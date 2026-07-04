@@ -1101,11 +1101,9 @@ def create_pdf(order, items):
 
 
 def page(title, body, admin=False, buyer_key=None):
-    nav = '<a href="/">Bestellen</a>'
-    if admin:
-        nav += '<a href="/admin">Admin</a>'
-    else:
-        nav += '<a href="/admin/login">Admin</a>'
+    # Nach der Anmeldung verschwindet die obere Umschaltung zwischen Bestellung und Admin.
+    # Die passenden Aktionen liegen dann direkt in der jeweiligen Ansicht.
+    nav = "" if (admin or buyer_key) else '<a href="/">Bestellen</a><a href="/admin/login">Admin</a>'
     subtitle = "" if title == "Besteller Login" else "<p>Opa Peters · internes Bestellsystem</p>"
     return f"""<!doctype html>
 <html lang="de">
@@ -1239,8 +1237,9 @@ class App(BaseHTTPRequestHandler):
             image_name = os.path.basename(path.replace("/order-images/", "", 1))
             return self.serve_file(os.path.join(ORDER_IMAGE_DIR, image_name), None)
         if path.startswith("/orders/"):
-            if not self.is_admin():
-                return self.redirect("/admin/login")
+            # PDF darf vom Admin und vom eingeloggten Standort direkt geöffnet/gedruckt werden.
+            if not (self.is_admin() or self.current_buyer_key()):
+                return self.redirect("/login")
             pdf_name = os.path.basename(path.replace("/orders/", "", 1))
             return self.serve_file(os.path.join(ORDER_DIR, pdf_name), "application/pdf")
         if path == "/":
@@ -1312,7 +1311,9 @@ class App(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def serve_file(self, filepath, content_type):
-        if not os.path.abspath(filepath).startswith(BASE_DIR) or not os.path.exists(filepath):
+        abs_path = os.path.abspath(filepath)
+        allowed_roots = [os.path.abspath(BASE_DIR), os.path.abspath(DATA_DIR)]
+        if not any(abs_path.startswith(root) for root in allowed_roots) or not os.path.exists(abs_path):
             self.send_error(404)
             return
         if content_type is None:
@@ -1594,43 +1595,42 @@ class App(BaseHTTPRequestHandler):
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         <section class="box">
             <div class="section-head"><div><h2>Angemeldet als Standort: {esc(location_name)}</h2>{personal_greeting}</div><div class="table-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a></div></div>
-            <form method="get" action="/" class="filters compact-form">
-                <label>Produktsuche<input name="q" value="{esc(search_text)}" placeholder="Name, Kategorie oder Gebinde suchen"></label>
-                <label>Produkte sortieren<select name="sort">{sort_options_html}</select></label>
-                <label>Kategorie anzeigen<select name="category">{cat_options}</select></label>
-                <button type="submit">Suchen / aktualisieren</button>
-                <a class="button" href="/">Zurücksetzen</a>
+            <form method="get" action="/" class="filters compact-form order-search">
+                <input type="hidden" name="sort" value="name_az">
+                <label class="search-main"><span>Produkt suchen</span><input name="q" value="{esc(search_text)}" placeholder="z. B. Becher, Servietten, Reinigung"></label>
+                <label class="search-category"><span>Kategorie</span><select name="category">{cat_options}</select></label>
+                <button class="primary" type="submit">Suchen</button>
+                <a class="button" href="/">Reset</a>
             </form>
             <p class="muted">{len(products)} Produkt(e) gefunden.</p>
         </section>
         <form method="post" action="/order" enctype="multipart/form-data">
             {hidden_qty_inputs}
-            <section class="box">
-                <h2>Bestelldaten</h2>
-                <input type="hidden" name="location" value="{esc(buyer_key)}">
-                <p><strong>Standort:</strong> {esc(location_name)}</p>
-                <label>Name des Bestellers *<input name="ordered_by" required placeholder="Name eingeben"></label>
-                <label>Bemerkung / Freitext<textarea name="note" rows="4" placeholder="Optionale Hinweise"></textarea></label>
-                <fieldset class="visibility-box">
-                    <legend>Bild zur Bestellung</legend>
-                    <label>Bildquelle auswählen
-                        <select id="orderImageMode" name="order_image_mode">
-                            <option value="">Kein Bild</option>
-                            <option value="gallery">Aus Galerie auswählen</option>
-                            <option value="camera">Foto mit Kamera aufnehmen</option>
-                        </select>
-                    </label>
-                    <label class="order-image-field" data-image-field="gallery" hidden>Bild aus Galerie auswählen<input type="file" name="order_image_gallery" accept="image/*" disabled></label>
-                    <label class="order-image-field" data-image-field="camera" hidden>Foto mit Kamera aufnehmen<input type="file" name="order_image_camera" accept="image/*" capture="environment" disabled></label>
-                    <p class="muted">Optional, zum Beispiel für Notizen, Schäden oder Lagerbestand. Maximal 10 MB.</p>
-                </fieldset>
-            </section>
+            <input type="hidden" name="location" value="{esc(buyer_key)}">
             <section class="category-sections">{''.join(category_panels) if category_panels else '<section class="box"><p>Keine passenden Produkte gefunden oder für diesen Standort sind noch keine Produkte sichtbar.</p></section>'}</section>
             <section id="cartReview" class="cart-review" hidden>
                 <div class="cart-card">
-                    <h2>Warenkorb prüfen</h2>
-                    <p class="muted">Standort: {esc(location_name)}. Bitte prüfe deine Bestellung vor dem endgültigen Absenden.</p>
+                    <h2>Warenkorb & Bestelldaten</h2>
+                    <p class="muted">Standort: {esc(location_name)}. Bitte prüfe deine Bestellung und ergänze die Bestelldaten.</p>
                     <div id="cartItems"></div>
+                    <section class="cart-details">
+                        <h3>Bestelldaten</h3>
+                        <label>Name des Bestellers *<input name="ordered_by" required placeholder="Name eingeben"></label>
+                        <label>Bemerkung / Freitext<textarea name="note" rows="3" placeholder="Optionale Hinweise"></textarea></label>
+                        <fieldset class="visibility-box">
+                            <legend>Bild zur Bestellung</legend>
+                            <label>Bildquelle auswählen
+                                <select id="orderImageMode" name="order_image_mode">
+                                    <option value="">Kein Bild</option>
+                                    <option value="gallery">Aus Galerie auswählen</option>
+                                    <option value="camera">Foto mit Kamera aufnehmen</option>
+                                </select>
+                            </label>
+                            <label class="order-image-field" data-image-field="gallery" hidden>Bild aus Galerie auswählen<input type="file" name="order_image_gallery" accept="image/*" disabled></label>
+                            <label class="order-image-field" data-image-field="camera" hidden>Foto mit Kamera aufnehmen<input type="file" name="order_image_camera" accept="image/*" capture="environment" disabled></label>
+                            <p class="muted">Optional, zum Beispiel für Notizen, Schäden oder Lagerbestand. Maximal 10 MB.</p>
+                        </fieldset>
+                    </section>
                     <div class="cart-actions">
                         <button type="button" id="cartCancel">Weiter bearbeiten</button>
                         <button class="primary" type="button" id="cartSubmit">Bestellung endgültig absenden</button>
@@ -2439,8 +2439,8 @@ class App(BaseHTTPRequestHandler):
             <p>Die Bestellung <strong>{esc(order_number)}</strong> wurde erstellt.</p>
             <p>Deine Bestellung wurde erfolgreich übermittelt. Vielen Dank.</p>
             {f'<p>Das Bild zur Bestellung wurde mitgespeichert.</p>' if order_image_filename else ''}
-            <p>Die PDF ist im Adminbereich für die Zentrale abrufbar.</p>
-            <p><a class="button" href="/">Neue Bestellung erfassen</a> {whatsapp_button}</p>
+            <p>Die PDF wurde erstellt und kann direkt geöffnet oder gedruckt werden.</p>
+            <p><a class="button" href="/">Neue Bestellung erfassen</a> <a class="button primary" target="_blank" rel="noopener" href="/orders/{esc(pdf_filename)}">PDF öffnen / drucken</a> {whatsapp_button}</p>
         </section>"""
         self.send_html(page("Bestellung gesendet", body, buyer_key=buyer_key))
 

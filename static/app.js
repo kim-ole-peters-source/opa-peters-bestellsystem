@@ -137,7 +137,7 @@
   function clampQty(value) {
     var number = parseInt(value || '0', 10);
     if (Number.isNaN(number) || number < 0) number = 0;
-    return Math.min(number, 999);
+    return Math.min(number, 9999);
   }
 
   function getHiddenQty(productId) {
@@ -234,7 +234,11 @@
           renderCart();
           return;
         }
-        orderForm.submit();
+        if (orderForm.requestSubmit) {
+          orderForm.requestSubmit();
+        } else {
+          orderForm.submit();
+        }
       });
     }
     updateOrderCount();
