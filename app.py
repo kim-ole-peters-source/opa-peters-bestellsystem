@@ -770,6 +770,20 @@ def time_options(limit_minutes=None):
     return [hhmm_from_minutes(minutes) for minutes in range(0, limit_minutes + 1, 15)]
 
 
+def time_options_between(start_minutes, end_minutes):
+    start_minutes = max(0, min(start_minutes, 23 * 60 + 45))
+    end_minutes = max(0, min(end_minutes, 23 * 60 + 45))
+    start_minutes = (start_minutes // 15) * 15
+    end_minutes = (end_minutes // 15) * 15
+    if start_minutes > end_minutes:
+        start_minutes = end_minutes
+    return [hhmm_from_minutes(minutes) for minutes in range(start_minutes, end_minutes + 1, 15)]
+
+
+def recent_end_time_options(limit_minutes, window_minutes=120):
+    return time_options_between(limit_minutes - window_minutes, limit_minutes)
+
+
 def option_html(options, selected=""):
     return "".join(f'<option value="{esc(value)}" {"selected" if value == selected else ""}>{esc(value)}</option>' for value in options)
 
@@ -815,6 +829,9 @@ def validate_time_entry(location, employee_name, work_location, start_time, end_
         max_end = (location or {}).get("time_tracking_max_end", "")
         if is_valid_hhmm(max_end) and end_minutes > minutes_from_hhmm(max_end):
             return None, f"Die Endzeit darf für diesen Standort nicht nach {max_end} liegen."
+        window_start = max(0, location_time_limit_minutes(location) - 120)
+        if end_minutes < window_start:
+            return None, "Die Endzeit muss im aktuellen 2-Stunden-Fenster liegen."
     return end_minutes - start_minutes, ""
 
 
@@ -1392,7 +1409,8 @@ class App(BaseHTTPRequestHandler):
         query = query or {}
         msg = (query.get("msg", [""])[0] or "").strip()
         limit_minutes = location_time_limit_minutes(location)
-        options = '<option value="">Bitte auswählen</option>' + option_html(time_options(limit_minutes))
+        start_options = '<option value="">Bitte auswählen</option>' + option_html(time_options(limit_minutes))
+        end_options = '<option value="">Bitte auswählen</option>' + option_html(recent_end_time_options(limit_minutes))
         contact_name = (location.get("contact_name") or "").strip()
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
@@ -1408,12 +1426,12 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/time" class="two time-form">
                 <label>Name des Mitarbeiters *<input name="employee_name" required value="{esc(contact_name)}" placeholder="Name eingeben"></label>
                 <label>Einsatzort / Filiale *<input name="work_location" required value="{esc(location['name'])}" placeholder="z. B. Schwarzenbek"></label>
-                <label>Anfangszeit *<select name="start_time" required>{options}</select></label>
-                <label>Endzeit *<select name="end_time" required>{options}</select></label>
+                <label>Anfangszeit *<select name="start_time" required>{start_options}</select></label>
+                <label>Endzeit *<select name="end_time" required>{end_options}</select></label>
                 <label class="full">Besondere Vorkommnisse<textarea name="note" rows="4" placeholder="Optional"></textarea></label>
                 <button class="primary" type="submit">Zeiterfassung speichern</button>
             </form>
-            <p class="muted">Endzeiten sind nur bis zur aktuellen Uhrzeit und bis zur hinterlegten maximalen Endzeit des Standortes möglich.</p>
+            <p class="muted">Endzeiten zeigen nur das aktuelle 2-Stunden-Fenster und bleiben zusätzlich durch Uhrzeit und maximale Standort-Endzeit begrenzt.</p>
         </section>
         """
         self.send_html(page("Zeiterfassung", body, buyer_key=buyer_key))
@@ -1550,6 +1568,7 @@ class App(BaseHTTPRequestHandler):
         contact_name = (location_data or {}).get("contact_name", "").strip()
         personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
         time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if (location_data or {}).get("time_tracking_enabled") else ""
+        logout_button = '<a class="button logout-button" href="/logout">Logout</a>'
         cat_options = '<option value="">Alle Kategorien</option>' + "".join(
             f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
         )
@@ -1594,7 +1613,7 @@ class App(BaseHTTPRequestHandler):
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         <section class="box">
-            <div class="section-head"><div><h2>Angemeldet als Standort: {esc(location_name)}</h2>{personal_greeting}</div><div class="table-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a></div></div>
+            <div class="section-head"><div><h2>Angemeldet als Standort: {esc(location_name)}</h2>{personal_greeting}</div><div class="table-actions order-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a>{logout_button}</div></div>
             <form method="get" action="/" class="filters compact-form order-search">
                 <input type="hidden" name="sort" value="name_az">
                 <label class="search-main"><span>Produkt suchen</span><input name="q" value="{esc(search_text)}" placeholder="z. B. Becher, Servietten, Reinigung"></label>
@@ -1677,7 +1696,7 @@ class App(BaseHTTPRequestHandler):
                 f"</div>"
             )
             rows.append(
-                f"<tr><td>{img}</td><td>{esc(p['name'])}</td><td>{esc(p['category'])}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
+                f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(p['category'])}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
             )
         order_rows = []
         for o in orders:
@@ -1694,6 +1713,11 @@ class App(BaseHTTPRequestHandler):
             for location in get_locations()
         )
         category_options = "".join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in get_category_names(True))
+        bulk_category_options = '<option value="">Kategorie behalten</option>' + category_options
+        bulk_visibility_checks = "".join(
+            f'<label class="visibility-option"><input type="checkbox" name="bulk_visible_{esc(location["id"])}" value="1"><span>{esc(location["name"])}</span></label>'
+            for location in get_locations()
+        )
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -1726,7 +1750,50 @@ class App(BaseHTTPRequestHandler):
                 <a class="button" href="/admin">Zurücksetzen</a>
             </form>
             <p class="muted">{len(products)} von {len(all_products)} Produkt(en) angezeigt.</p>
-            <div class="table-wrap"><table><tr><th>Bild</th><th>Name</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Sichtbar für</th><th>Status</th><th></th></tr>{''.join(rows) if rows else '<tr><td colspan="8">Keine passenden Produkte gefunden.</td></tr>'}</table></div>
+            <form id="bulkProductForm" method="post" action="/admin/bulk-products" class="bulk-editor" data-confirm="Mehrfachbearbeitung auf ausgewählte Produkte anwenden?">
+                <div class="bulk-editor-head">
+                    <strong>Mehrere Produkte bearbeiten</strong>
+                    <span class="muted">Produkte unten anhaken, gewünschte Felder setzen und anwenden.</span>
+                </div>
+                <div class="bulk-editor-grid">
+                    <label>Aktion
+                        <select name="bulk_action">
+                            <option value="update">Ausgewählte bearbeiten</option>
+                            <option value="delete">Ausgewählte löschen</option>
+                        </select>
+                    </label>
+                    <label>Kategorie
+                        <select name="bulk_category">{bulk_category_options}</select>
+                    </label>
+                    <label>Bezugsquelle
+                        <input name="bulk_source" placeholder="leer lassen = behalten">
+                    </label>
+                    <label>Status
+                        <select name="bulk_active">
+                            <option value="keep">Status behalten</option>
+                            <option value="1">aktiv setzen</option>
+                            <option value="0">deaktivieren</option>
+                        </select>
+                    </label>
+                    <label>Sichtbarkeit
+                        <select name="bulk_visibility_mode">
+                            <option value="keep">Sichtbarkeit behalten</option>
+                            <option value="all">für alle Standorte sichtbar</option>
+                            <option value="custom">unten gewählte Standorte setzen</option>
+                        </select>
+                    </label>
+                    <fieldset class="visibility-box bulk-visibility">
+                        <legend>Standorte für Sichtbarkeit</legend>
+                        <div class="visibility-grid">{bulk_visibility_checks}</div>
+                    </fieldset>
+                </div>
+                <div class="bulk-editor-actions">
+                    <label class="check"><input id="selectAllProducts" type="checkbox"> Alle sichtbaren Produkte auswählen</label>
+                    <span class="bulk-selected-count" id="bulkSelectedCount">0 Produkte ausgewählt</span>
+                    <button class="primary" type="submit">Auf Auswahl anwenden</button>
+                </div>
+            </form>
+            <div class="table-wrap"><table><tr><th>Auswahl / Bild</th><th>Name</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Sichtbar für</th><th>Status</th><th></th></tr>{''.join(rows) if rows else '<tr><td colspan="8">Keine passenden Produkte gefunden.</td></tr>'}</table></div>
         </section>
         <section class="box"><h2>Letzte Bestellungen</h2><div class="table-wrap"><table><tr><th>Datum</th><th>Nr.</th><th>Zugang</th><th>Standort</th><th>Besteller</th><th>PDF</th><th>Bild</th><th>WhatsApp</th></tr>{''.join(order_rows) if order_rows else '<tr><td colspan="8">Noch keine Bestellungen.</td></tr>'}</table></div></section>
         """
@@ -1988,6 +2055,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_add_product()
             if path == "/admin/update-product":
                 return self.handle_update_product()
+            if path == "/admin/bulk-products":
+                return self.handle_bulk_products()
             if path == "/admin/delete-product":
                 return self.handle_delete_product()
             if path == "/admin/add-category":
@@ -2119,6 +2188,63 @@ class App(BaseHTTPRequestHandler):
         con.commit()
         con.close()
         self.redirect("/admin?msg=" + quote_plus("Produktänderungen gespeichert."))
+
+    def handle_bulk_products(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        product_ids = [key.replace("selected_", "", 1) for key, value in form.items() if key.startswith("selected_") and value]
+        product_ids = [pid for pid in product_ids if str(pid).isdigit()]
+        if not product_ids:
+            return self.redirect("/admin?error=" + quote_plus("Bitte zuerst mindestens ein Produkt auswählen."))
+
+        placeholders = ",".join("?" for _ in product_ids)
+        action = self.form_value(form, "bulk_action", "update")
+        con = db()
+        try:
+            if action == "delete":
+                con.execute(f"DELETE FROM products WHERE id IN ({placeholders})", product_ids)
+                con.commit()
+                return self.redirect("/admin?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+
+            updates = []
+            params = []
+            bulk_category = self.form_value(form, "bulk_category").strip()
+            bulk_source = self.form_value(form, "bulk_source").strip()
+            bulk_active = self.form_value(form, "bulk_active", "keep")
+            visibility_mode = self.form_value(form, "bulk_visibility_mode", "keep")
+
+            if bulk_category:
+                updates.append("category=?")
+                params.append(ensure_category(bulk_category))
+            if bulk_source:
+                updates.append("source=?")
+                params.append(bulk_source)
+            if bulk_active in ["0", "1"]:
+                updates.append("active=?")
+                params.append(1 if bulk_active == "1" else 0)
+            if visibility_mode == "all":
+                updates.append("visible_to=?")
+                params.append(ALL_LOCATIONS_KEY)
+            elif visibility_mode == "custom":
+                visible_to = [location["id"] for location in get_locations() if self.form_value(form, f"bulk_visible_{location['id']}")]
+                if not visible_to:
+                    con.close()
+                    return self.redirect("/admin?error=" + quote_plus("Bitte für die neue Sichtbarkeit mindestens einen Standort auswählen."))
+                visible_to_text = ALL_LOCATIONS_KEY if set(visible_to) == set(location_ids()) else ",".join(visible_to)
+                updates.append("visible_to=?")
+                params.append(visible_to_text)
+
+            if not updates:
+                con.close()
+                return self.redirect("/admin?error=" + quote_plus("Bitte mindestens eine Änderung für die ausgewählten Produkte auswählen."))
+
+            params.extend(product_ids)
+            con.execute(f"UPDATE products SET {', '.join(updates)} WHERE id IN ({placeholders})", params)
+            con.commit()
+            return self.redirect("/admin?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) aktualisiert."))
+        finally:
+            con.close()
 
     def handle_add_category(self):
         if not self.is_admin():

@@ -262,4 +262,30 @@
     imageMode.addEventListener('change', updateImageFields);
     updateImageFields();
   }
+
+  var selectAllProducts = document.getElementById('selectAllProducts');
+  var bulkChecks = Array.prototype.slice.call(document.querySelectorAll('.bulk-product-check'));
+  var bulkSelectedCount = document.getElementById('bulkSelectedCount');
+  function updateBulkSelectionState() {
+    if (!bulkChecks.length) return;
+    var selected = bulkChecks.filter(function (item) { return item.checked; }).length;
+    if (selectAllProducts) {
+      selectAllProducts.checked = selected === bulkChecks.length;
+      selectAllProducts.indeterminate = selected > 0 && selected < bulkChecks.length;
+    }
+    if (bulkSelectedCount) {
+      bulkSelectedCount.textContent = selected + (selected === 1 ? ' Produkt ausgewählt' : ' Produkte ausgewählt');
+    }
+  }
+  if (selectAllProducts && bulkChecks.length) {
+    selectAllProducts.addEventListener('change', function () {
+      bulkChecks.forEach(function (box) { box.checked = selectAllProducts.checked; });
+      updateBulkSelectionState();
+    });
+    bulkChecks.forEach(function (box) {
+      box.addEventListener('change', updateBulkSelectionState);
+    });
+    updateBulkSelectionState();
+  }
+
 })();
