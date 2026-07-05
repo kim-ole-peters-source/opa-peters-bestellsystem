@@ -390,6 +390,26 @@ button:active, .button:active { transform: translateY(0); }
 }
 .visibility-option input:checked + span { background: var(--green-bg); color: var(--green-text); border-color: #74c69d; }
 .visibility-option input:checked + span::before { border-color: var(--green-text); background: var(--green-text); box-shadow: inset 0 0 0 4px white; }
+.product-visibility-grid {
+  margin: 12px 0 16px;
+}
+.product-visibility-option span {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.product-visibility-option small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+.visibility-save {
+  position: sticky;
+  bottom: calc(14px + var(--safe-bottom));
+  z-index: 20;
+  width: min(100%, 420px);
+  margin: 14px auto 0;
+}
 
 .check { display: flex; align-items: center; gap: 10px; font-weight: 800; margin: 10px 0; color: var(--muted); }
 .check input[type="checkbox"] {

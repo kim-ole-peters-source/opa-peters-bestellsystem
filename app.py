@@ -91,6 +91,7 @@ BUYER_ACCOUNTS = [
 ]
 BUYER_BY_KEY = {x["key"]: x for x in BUYER_ACCOUNTS}
 ALL_LOCATIONS_KEY = "all_locations"
+NO_LOCATIONS_KEY = "no_locations"
 DEFAULT_VISIBLE_TO = ALL_LOCATIONS_KEY
 DEFAULT_CATEGORIES = ["Allgemein", "Eis", "Feine Kost", "Reinigung", "Verbrauchsmaterial"]
 ACCESS_ROLES = [
@@ -474,6 +475,8 @@ def visible_keys_from_text(text):
 def product_visible_location_keys(text):
     keys = visible_keys_from_text(text)
     ids = location_ids()
+    if NO_LOCATIONS_KEY in keys:
+        return []
     if not keys or ALL_LOCATIONS_KEY in keys:
         return ids
     matching = [key for key in keys if key in ids]
@@ -507,6 +510,8 @@ def location_can_time(location):
 def store_visible_locations(keys):
     ids = location_ids()
     unique = [key for key in ids if key in set(keys)]
+    if not unique:
+        return NO_LOCATIONS_KEY
     return ALL_LOCATIONS_KEY if set(unique) == set(ids) else ",".join(unique)
 
 
@@ -1374,6 +1379,7 @@ def admin_menu():
         <a class="button" href="/admin/import">Import</a>
         <a class="button" href="/admin/settings">Einstellungen</a>
         <a class="button" href="/admin/locations">Standorte</a>
+        <a class="button" href="/admin/visibility">Sichtbarkeit</a>
         <a class="button" href="/admin/logout">Admin Logout</a>
     </section>
     """
@@ -1521,6 +1527,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_settings(query=parse_qs(parsed.query))
         if path == "/admin/locations":
             return self.show_locations(query=parse_qs(parsed.query))
+        if path == "/admin/visibility":
+            return self.show_visibility(query=parse_qs(parsed.query))
         self.send_html(page("Nicht gefunden", "<p>Diese Seite gibt es nicht.</p>", buyer_key=self.current_buyer_key()), 404)
 
 
@@ -2304,6 +2312,77 @@ class App(BaseHTTPRequestHandler):
         </section>"""
         self.send_html(page("Standorte", body, admin=True, buyer_key=self.current_buyer_key()))
 
+    def show_visibility(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        locations = get_locations()
+        selected_location_id = (query.get("location", [""])[0] or "").strip()
+        if not selected_location_id and locations:
+            selected_location_id = locations[0]["id"]
+        selected_location = find_location(selected_location_id)
+        products = get_products(False, sort="category")
+        categories = sorted({p["category"] or "Allgemein" for p in products}, key=lambda item: item.lower())
+        location_options = "".join(
+            f'<option value="{esc(location["id"])}" {"selected" if location["id"] == selected_location_id else ""}>{esc(location["name"])}</option>'
+            for location in locations
+        )
+        visible_product_ids = {
+            str(product["id"]) for product in products
+            if selected_location_id in product_visible_location_keys(product["visible_to"])
+        }
+        category_checks = []
+        for category in categories:
+            category_products = [p for p in products if (p["category"] or "Allgemein") == category]
+            all_visible = bool(category_products) and all(str(p["id"]) in visible_product_ids for p in category_products)
+            category_checks.append(
+                f'<label class="visibility-option"><input class="visibility-category-toggle" type="checkbox" name="category_{esc(category)}" value="1" data-category="{esc(category)}" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
+            )
+        product_panels = []
+        for category in categories:
+            category_products = [p for p in products if (p["category"] or "Allgemein") == category]
+            product_checks = "".join(
+                f'<label class="visibility-option product-visibility-option"><input class="visibility-product-check" type="checkbox" name="product_{product["id"]}" value="1" data-category="{esc(category)}" {"checked" if str(product["id"]) in visible_product_ids else ""}><span>{esc(product["name"])}<small>{esc(product["package_size"])}</small></span></label>'
+                for product in category_products
+            )
+            product_panels.append(
+                f"<details class='category-panel admin-product-panel' open><summary>{esc(category)} <span>{len(category_products)}</span></summary><div class='visibility-grid product-visibility-grid'>{product_checks}</div></details>"
+            )
+        body = f"""
+        {admin_menu()}
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        <section class="box">
+            <div class="section-head">
+                <div>
+                    <h2>Sichtbarkeit je Standort</h2>
+                    <p class="muted">Lege fest, welche Produktkategorien oder Einzelprodukte ein Standort im Bestellbereich sehen darf.</p>
+                </div>
+                <a class="button" href="/admin/locations">Standorte bearbeiten</a>
+            </div>
+            <form method="get" action="/admin/visibility" class="filters compact-form">
+                <label>Standort auswählen<select name="location">{location_options}</select></label>
+                <button class="primary" type="submit">Anzeigen</button>
+            </form>
+        </section>
+        <section class="box">
+            <h2>{esc(selected_location["name"] if selected_location else "Kein Standort")}</h2>
+            <form method="post" action="/admin/visibility" data-confirm="Sichtbarkeit für diesen Standort speichern?">
+                <input type="hidden" name="location_id" value="{esc(selected_location_id)}">
+                <fieldset class="visibility-box">
+                    <legend>Kategorien schnell auswählen</legend>
+                    <div class="visibility-grid">{''.join(category_checks) if category_checks else '<p>Keine Kategorien vorhanden.</p>'}</div>
+                    <p class="muted">Eine Kategorie setzt die darunterliegenden Produkte. Einzelprodukte kannst du danach zusätzlich an- oder abwählen.</p>
+                </fieldset>
+                <div class="category-sections">{''.join(product_panels) if product_panels else '<p>Keine Produkte vorhanden.</p>'}</div>
+                <button class="primary visibility-save" type="submit">Sichtbarkeit speichern</button>
+            </form>
+        </section>
+        """
+        self.send_html(page("Sichtbarkeit", body, admin=True, buyer_key=self.current_buyer_key()))
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -2337,6 +2416,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_settings()
             if path == "/admin/locations":
                 return self.handle_locations()
+            if path == "/admin/visibility":
+                return self.handle_visibility()
             if path == "/admin/time/update":
                 return self.handle_update_time_entry()
             self.send_error(404)
@@ -2704,6 +2785,40 @@ class App(BaseHTTPRequestHandler):
         if new_location_id:
             apply_category_visibility_for_location(new_location_id, new_location_categories)
         self.redirect("/admin/locations?msg=" + quote_plus("Standorte gespeichert."))
+
+    def handle_visibility(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        location_id = self.form_value(form, "location_id").strip()
+        if not find_location(location_id):
+            return self.redirect("/admin/visibility?error=" + quote_plus("Bitte einen gültigen Standort auswählen."))
+        selected_products = {
+            key.replace("product_", "", 1)
+            for key, value in form.items()
+            if key.startswith("product_") and value
+        }
+        selected_categories = {
+            key.replace("category_", "", 1)
+            for key, value in form.items()
+            if key.startswith("category_") and value
+        }
+        con = db()
+        rows = con.execute("SELECT id, category, visible_to FROM products").fetchall()
+        updated = 0
+        for row in rows:
+            visible = product_visible_location_keys(row["visible_to"])
+            should_show = str(row["id"]) in selected_products or (row["category"] or "Allgemein") in selected_categories
+            if should_show and location_id not in visible:
+                visible.append(location_id)
+                updated += 1
+            elif not should_show and location_id in visible:
+                visible = [key for key in visible if key != location_id]
+                updated += 1
+            con.execute("UPDATE products SET visible_to=? WHERE id=?", (store_visible_locations(visible), row["id"]))
+        con.commit()
+        con.close()
+        return self.redirect("/admin/visibility?location=" + quote_plus(location_id) + "&msg=" + quote_plus(f"Sichtbarkeit gespeichert. {updated} Produktzuordnung(en) geändert."))
 
     def handle_time_entry(self):
         buyer_key = self.current_buyer_key()

@@ -313,4 +313,35 @@
     updateOrderSelectionState();
   }
 
+  var visibilityCategoryToggles = Array.prototype.slice.call(document.querySelectorAll('.visibility-category-toggle'));
+  var visibilityProductChecks = Array.prototype.slice.call(document.querySelectorAll('.visibility-product-check'));
+  function updateVisibilityCategoryStates() {
+    visibilityCategoryToggles.forEach(function (toggle) {
+      var category = toggle.getAttribute('data-category') || '';
+      var matching = visibilityProductChecks.filter(function (box) {
+        return (box.getAttribute('data-category') || '') === category;
+      });
+      var selected = matching.filter(function (box) { return box.checked; }).length;
+      toggle.checked = matching.length > 0 && selected === matching.length;
+      toggle.indeterminate = selected > 0 && selected < matching.length;
+    });
+  }
+  if (visibilityCategoryToggles.length && visibilityProductChecks.length) {
+    visibilityCategoryToggles.forEach(function (toggle) {
+      toggle.addEventListener('change', function () {
+        var category = toggle.getAttribute('data-category') || '';
+        visibilityProductChecks.forEach(function (box) {
+          if ((box.getAttribute('data-category') || '') === category) {
+            box.checked = toggle.checked;
+          }
+        });
+        updateVisibilityCategoryStates();
+      });
+    });
+    visibilityProductChecks.forEach(function (box) {
+      box.addEventListener('change', updateVisibilityCategoryStates);
+    });
+    updateVisibilityCategoryStates();
+  }
+
 })();
