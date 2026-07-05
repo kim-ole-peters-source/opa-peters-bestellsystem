@@ -337,6 +337,7 @@ def init_db():
             buyer_group TEXT,
             note TEXT,
             pdf_filename TEXT NOT NULL,
+            pdf_data BLOB,
             order_image_filename TEXT,
             created_at TEXT NOT NULL
         )
@@ -390,12 +391,22 @@ def init_db():
         )
     """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pdf_files (
+            filename TEXT PRIMARY KEY,
+            pdf_data BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """
+    )
 
     # Migration für ältere ZIP-Versionen / bestehende lokale Datenbanken
     add_column_if_missing(con, "products", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "products", "visible_to", f"TEXT NOT NULL DEFAULT '{DEFAULT_VISIBLE_TO}'")
     add_column_if_missing(con, "orders", "buyer_group", "TEXT")
     add_column_if_missing(con, "orders", "order_image_filename", "TEXT")
+    add_column_if_missing(con, "orders", "pdf_data", "BLOB")
     add_column_if_missing(con, "order_items", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "time_entries", "updated_at", "TEXT")
     add_column_if_missing(con, "time_entries", "edited", "INTEGER NOT NULL DEFAULT 0")
@@ -815,6 +826,34 @@ def get_order_items(order_id):
     return rows
 
 
+def get_order_by_pdf_filename(pdf_filename):
+    con = db()
+    row = con.execute("SELECT * FROM orders WHERE pdf_filename=?", (pdf_filename,)).fetchone()
+    con.close()
+    return row
+
+
+def store_pdf_file(filename, data):
+    con = db()
+    con.execute(
+        """
+        INSERT INTO pdf_files (filename, pdf_data, created_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(filename) DO UPDATE SET pdf_data=excluded.pdf_data, created_at=excluded.created_at
+        """,
+        (filename, data, berlin_now().strftime("%d.%m.%Y %H:%M")),
+    )
+    con.commit()
+    con.close()
+
+
+def get_cached_pdf_file(filename):
+    con = db()
+    row = con.execute("SELECT pdf_data FROM pdf_files WHERE filename=?", (filename,)).fetchone()
+    con.close()
+    return bytes(row["pdf_data"]) if row and row["pdf_data"] else None
+
+
 def get_orders_by_ids(order_ids):
     order_ids = [str(order_id) for order_id in order_ids if str(order_id).isdigit()]
     if not order_ids:
@@ -1129,6 +1168,33 @@ def send_pdf_email_if_configured(order, pdf_filename):
     return True
 
 
+def read_order_pdf_data(pdf_filename):
+    path = os.path.join(ORDER_DIR, os.path.basename(pdf_filename or ""))
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    order = get_order_by_pdf_filename(pdf_filename)
+    if order and order["pdf_data"]:
+        return bytes(order["pdf_data"])
+    cached = get_cached_pdf_file(pdf_filename)
+    if cached:
+        return cached
+    if order:
+        items = [dict(item) for item in get_order_items(order["id"])]
+        order_dict = dict(order)
+        regenerated = create_pdf(order_dict, items)
+        regenerated_path = os.path.join(ORDER_DIR, regenerated)
+        if os.path.exists(regenerated_path):
+            with open(regenerated_path, "rb") as f:
+                data = f.read()
+            con = db()
+            con.execute("UPDATE orders SET pdf_data=? WHERE id=?", (data, order["id"]))
+            con.commit()
+            con.close()
+            return data
+    return None
+
+
 def create_pdf(order, items):
     filename = f"bestellung_{order['order_number']}.pdf"
     path = os.path.join(ORDER_DIR, filename)
@@ -1217,7 +1283,7 @@ def create_combined_order_pdf(orders):
             )
             combined[key]["quantity"] += int(item["quantity"] or 0)
 
-    number = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
+        number = berlin_now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
     filename = f"gesamtbestellung_{number}.pdf"
     path = os.path.join(ORDER_DIR, filename)
     doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
@@ -1225,7 +1291,7 @@ def create_combined_order_pdf(orders):
     story = [
         Paragraph("Gesamtbestellung", styles["Title"]),
         Spacer(1, 5 * mm),
-        Paragraph(f"Erstellt am: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles["Normal"]),
+        Paragraph(f"Erstellt am: {berlin_now().strftime('%d.%m.%Y %H:%M')}", styles["Normal"]),
         Paragraph(f"Zusammengefasste Bestellungen: {len(orders)}", styles["Normal"]),
         Spacer(1, 7 * mm),
         Paragraph("Ausgewählte Einzelbestellungen", styles["Heading2"]),
@@ -1402,7 +1468,17 @@ class App(BaseHTTPRequestHandler):
             if not (self.is_admin() or self.current_buyer_key()):
                 return self.redirect("/login")
             pdf_name = os.path.basename(path.replace("/orders/", "", 1))
-            return self.serve_file(os.path.join(ORDER_DIR, pdf_name), "application/pdf")
+            pdf_data = read_order_pdf_data(pdf_name)
+            if not pdf_data:
+                self.send_error(404, "PDF wurde nicht gefunden.")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'inline; filename="{pdf_name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(pdf_data)
+            return
         if path == "/":
             return self.show_order_form(query=parse_qs(parsed.query))
         if path == "/choose":
@@ -2454,7 +2530,13 @@ class App(BaseHTTPRequestHandler):
         orders = get_orders_by_ids(order_ids)
         if len(orders) < 2:
             return self.redirect("/admin/orders?error=" + quote_plus("Bitte mindestens zwei Bestellungen für eine Gesamtbestellung auswählen."))
-        pdf_filename = create_combined_order_pdf(orders)
+        try:
+            pdf_filename = create_combined_order_pdf(orders)
+            with open(os.path.join(ORDER_DIR, pdf_filename), "rb") as f:
+                store_pdf_file(pdf_filename, f.read())
+        except Exception as exc:
+            print(f"Gesamtbestellung-PDF fehlgeschlagen: {exc}")
+            return self.redirect("/admin/orders?error=" + quote_plus("Die Gesamtbestellung konnte nicht als PDF erstellt werden."))
         return self.redirect("/admin/orders?msg=" + quote_plus(f"Gesamtbestellung aus {len(orders)} Bestellung(en) wurde erstellt.") + "&pdf=" + quote_plus(pdf_filename))
 
     def handle_add_category(self):
@@ -2747,8 +2829,8 @@ class App(BaseHTTPRequestHandler):
                     f.write(uploaded_image.content)
                 break
 
-        order_number = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
-        created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+        order_number = berlin_now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
+        created_at = berlin_now().strftime("%d.%m.%Y %H:%M")
         buyer_group = location
         order = {
             "order_number": order_number,
@@ -2759,7 +2841,14 @@ class App(BaseHTTPRequestHandler):
             "order_image_filename": order_image_filename,
             "created_at": created_at,
         }
-        pdf_filename = create_pdf(order, items)
+        try:
+            pdf_filename = create_pdf(order, items)
+            with open(os.path.join(ORDER_DIR, pdf_filename), "rb") as f:
+                pdf_data = f.read()
+            store_pdf_file(pdf_filename, pdf_data)
+        except Exception as exc:
+            print(f"PDF-Erstellung fehlgeschlagen: {exc}")
+            return self.show_order_form("Die PDF zur Bestellung konnte nicht erstellt werden. Bitte prüfe die Eingaben und versuche es erneut.")
         try:
             send_pdf_email_if_configured(order, pdf_filename)
         except Exception as exc:
@@ -2767,8 +2856,8 @@ class App(BaseHTTPRequestHandler):
         con = db()
         cur = con.cursor()
         cur.execute(
-            "INSERT INTO orders (order_number, location, ordered_by, buyer_group, note, pdf_filename, order_image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (order_number, location, ordered_by, buyer_group, note, pdf_filename, order_image_filename, created_at),
+            "INSERT INTO orders (order_number, location, ordered_by, buyer_group, note, pdf_filename, pdf_data, order_image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (order_number, location, ordered_by, buyer_group, note, pdf_filename, pdf_data, order_image_filename, created_at),
         )
         order_id = cur.lastrowid
         for item in items:
