@@ -453,6 +453,31 @@ def visible_labels(text):
     return location_labels_from_keys(visible_keys_from_text(text))
 
 
+def store_visible_locations(keys):
+    ids = location_ids()
+    unique = [key for key in ids if key in set(keys)]
+    return ALL_LOCATIONS_KEY if set(unique) == set(ids) else ",".join(unique)
+
+
+def apply_category_visibility_for_location(location_id, categories):
+    allowed = {normalize_text_key(category) for category in categories if category}
+    all_locations = location_ids()
+    con = db()
+    rows = con.execute("SELECT id, category, visible_to FROM products").fetchall()
+    for row in rows:
+        visible = product_visible_location_keys(row["visible_to"])
+        category_key = normalize_text_key(row["category"] or "Allgemein")
+        if category_key in allowed:
+            if location_id not in visible:
+                visible.append(location_id)
+        else:
+            visible = [key for key in visible if key != location_id]
+        visible = [key for key in all_locations if key in visible]
+        con.execute("UPDATE products SET visible_to=? WHERE id=?", (store_visible_locations(visible), row["id"]))
+    con.commit()
+    con.close()
+
+
 def time_greeting():
     today = date.today()
     if (today.month, today.day) in [(1, 1), (12, 25), (12, 26)]:
@@ -746,6 +771,17 @@ def get_orders():
 def get_order_items(order_id):
     con = db()
     rows = con.execute("SELECT * FROM order_items WHERE order_id=? ORDER BY category, product_name", (order_id,)).fetchall()
+    con.close()
+    return rows
+
+
+def get_orders_by_ids(order_ids):
+    order_ids = [str(order_id) for order_id in order_ids if str(order_id).isdigit()]
+    if not order_ids:
+        return []
+    placeholders = ",".join("?" for _ in order_ids)
+    con = db()
+    rows = con.execute(f"SELECT * FROM orders WHERE id IN ({placeholders}) ORDER BY created_at, id", order_ids).fetchall()
     con.close()
     return rows
 
@@ -1113,6 +1149,74 @@ def create_pdf(order, items):
         story.append(table)
         story.append(Spacer(1, 7 * mm))
 
+    doc.build(story)
+    return filename
+
+
+def create_combined_order_pdf(orders):
+    combined = {}
+    order_rows = []
+    for order in orders:
+        order_rows.append([order["created_at"], order["order_number"], order["location"], order["ordered_by"]])
+        for item in get_order_items(order["id"]):
+            key = (
+                item["product_name"] or "",
+                item["category"] or "Allgemein",
+                item["package_size"] or "",
+                item["source"] or "",
+            )
+            combined.setdefault(
+                key,
+                {
+                    "product_name": key[0],
+                    "category": key[1],
+                    "package_size": key[2],
+                    "source": key[3],
+                    "quantity": 0,
+                },
+            )
+            combined[key]["quantity"] += int(item["quantity"] or 0)
+
+    number = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
+    filename = f"gesamtbestellung_{number}.pdf"
+    path = os.path.join(ORDER_DIR, filename)
+    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Gesamtbestellung", styles["Title"]),
+        Spacer(1, 5 * mm),
+        Paragraph(f"Erstellt am: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles["Normal"]),
+        Paragraph(f"Zusammengefasste Bestellungen: {len(orders)}", styles["Normal"]),
+        Spacer(1, 7 * mm),
+        Paragraph("Ausgewählte Einzelbestellungen", styles["Heading2"]),
+    ]
+    order_table = Table([["Datum", "Bestellnr.", "Standort", "Besteller"]] + order_rows, colWidths=[35 * mm, 42 * mm, 45 * mm, 42 * mm])
+    order_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(order_table)
+    story.extend([Spacer(1, 7 * mm), Paragraph("Addierte Produktmengen", styles["Heading2"])])
+    item_rows = [
+        [item["category"], item["product_name"], item["package_size"], item["source"], str(item["quantity"])]
+        for item in sorted(combined.values(), key=lambda x: (x["category"].lower(), x["product_name"].lower()))
+        if item["quantity"] > 0
+    ]
+    item_table = Table([["Kategorie", "Produkt", "Gebinde", "Bezugsquelle", "Menge"]] + item_rows, colWidths=[30 * mm, 50 * mm, 38 * mm, 40 * mm, 18 * mm])
+    item_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(item_table)
     doc.build(story)
     return filename
 
@@ -1638,15 +1742,7 @@ class App(BaseHTTPRequestHandler):
                         <label>Bemerkung / Freitext<textarea name="note" rows="3" placeholder="Optionale Hinweise"></textarea></label>
                         <fieldset class="visibility-box">
                             <legend>Bild zur Bestellung</legend>
-                            <label>Bildquelle auswählen
-                                <select id="orderImageMode" name="order_image_mode">
-                                    <option value="">Kein Bild</option>
-                                    <option value="gallery">Aus Galerie auswählen</option>
-                                    <option value="camera">Foto mit Kamera aufnehmen</option>
-                                </select>
-                            </label>
-                            <label class="order-image-field" data-image-field="gallery" hidden>Bild aus Galerie auswählen<input type="file" name="order_image_gallery" accept="image/*" disabled></label>
-                            <label class="order-image-field" data-image-field="camera" hidden>Foto mit Kamera aufnehmen<input type="file" name="order_image_camera" accept="image/*" capture="environment" disabled></label>
+                            <label>Bild zur Bestellung hinzufügen<input type="file" name="order_image" accept="image/*"></label>
                             <p class="muted">Optional, zum Beispiel für Notizen, Schäden oder Lagerbestand. Maximal 10 MB.</p>
                         </fieldset>
                     </section>
@@ -1684,6 +1780,7 @@ class App(BaseHTTPRequestHandler):
         active_count = sum(1 for p in all_products if p["active"])
         inactive_count = len(all_products) - active_count
         rows = []
+        rows_by_category = {}
         for p in products:
             img = f'<img class="thumb" src="/uploads/{esc(p["image_filename"])}">' if p["image_filename"] else "—"
             status = "aktiv" if p["active"] else "deaktiviert"
@@ -1695,9 +1792,9 @@ class App(BaseHTTPRequestHandler):
                 f"<input type='hidden' name='id' value='{p['id']}'><button>Löschen</button></form>"
                 f"</div>"
             )
-            rows.append(
-                f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(p['category'])}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
-            )
+            row_html = f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(p['category'])}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
+            rows.append(row_html)
+            rows_by_category.setdefault(p["category"] or "Allgemein", []).append(row_html)
         order_rows = []
         for o in orders:
             o_dict = dict(o)
@@ -1718,6 +1815,16 @@ class App(BaseHTTPRequestHandler):
             f'<label class="visibility-option"><input type="checkbox" name="bulk_visible_{esc(location["id"])}" value="1"><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
         )
+        product_table_header = "<tr><th>Auswahl / Bild</th><th>Name</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Sichtbar für</th><th>Status</th><th></th></tr>"
+        def product_table(row_html):
+            product_rows = "".join(row_html) if row_html else '<tr><td colspan="8">Keine passenden Produkte gefunden.</td></tr>'
+            return f"<div class='table-wrap'><table>{product_table_header}{product_rows}</table></div>"
+        admin_category_panels = []
+        if rows:
+            admin_category_panels.append(f"<details class='category-panel admin-product-panel' open><summary>Alle Produkte <span>{len(rows)}</span></summary>{product_table(rows)}</details>")
+            for category in sorted(rows_by_category.keys(), key=lambda item: item.lower()):
+                category_rows = rows_by_category[category]
+                admin_category_panels.append(f"<details class='category-panel admin-product-panel'><summary>{esc(category)} <span>{len(category_rows)}</span></summary>{product_table(category_rows)}</details>")
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -1727,9 +1834,10 @@ class App(BaseHTTPRequestHandler):
             <div class="stat"><strong>{inactive_count}</strong><span>deaktiviert</span></div>
             <div class="stat"><strong>{len(orders)}</strong><span>letzte Bestellungen</span></div>
         </section>
-        <section class="box">
-            <div class="section-head"><div><h2>Produkt anlegen</h2><p class="muted">Kategorien legst du separat an und wählst sie hier aus.</p></div><a class="button" href="/admin/categories">Kategorien verwalten</a></div>
+        <details class="category-panel admin-toggle-panel">
+            <summary>Produkte anlegen <span>+</span></summary>
             <form method="post" action="/admin/add-product" enctype="multipart/form-data" class="two">
+                <p class="muted full">Kategorien legst du separat an und wählst sie hier aus.</p>
                 <label>Produktname *<input name="name" required></label>
                 <label>Kategorie *<select name="category" required>{category_options}</select></label>
                 <label>Gebindegröße *<input name="package_size" required placeholder="z. B. Karton à 12 Stück"></label>
@@ -1740,16 +1848,13 @@ class App(BaseHTTPRequestHandler):
                     <div class="visibility-grid">{visibility_checks}</div>
                 </fieldset>
                 <button class="primary" type="submit">Produkt speichern</button>
+                <a class="button" href="/admin/categories">Kategorien verwalten</a>
             </form>
-        </section>
+        </details>
         <section class="box">
             <h2>Produkte</h2>
-            <form method="get" action="/admin" class="filters compact-form">
-                <label>Produktsuche<input name="q" value="{esc(search_text)}" placeholder="Name, Kategorie, Gebinde, Bezugsquelle oder Standort suchen"></label>
-                <button type="submit">Suchen</button>
-                <a class="button" href="/admin">Zurücksetzen</a>
-            </form>
-            <p class="muted">{len(products)} von {len(all_products)} Produkt(en) angezeigt.</p>
+            <details class="category-panel admin-toggle-panel">
+                <summary>Mehrere Produkte bearbeiten <span>+</span></summary>
             <form id="bulkProductForm" method="post" action="/admin/bulk-products" class="bulk-editor" data-confirm="Mehrfachbearbeitung auf ausgewählte Produkte anwenden?">
                 <div class="bulk-editor-head">
                     <strong>Mehrere Produkte bearbeiten</strong>
@@ -1793,7 +1898,14 @@ class App(BaseHTTPRequestHandler):
                     <button class="primary" type="submit">Auf Auswahl anwenden</button>
                 </div>
             </form>
-            <div class="table-wrap"><table><tr><th>Auswahl / Bild</th><th>Name</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Sichtbar für</th><th>Status</th><th></th></tr>{''.join(rows) if rows else '<tr><td colspan="8">Keine passenden Produkte gefunden.</td></tr>'}</table></div>
+            </details>
+            <form method="get" action="/admin" class="filters compact-form product-search">
+                <label>Produktsuche<input name="q" value="{esc(search_text)}" placeholder="Name, Kategorie, Gebinde, Bezugsquelle oder Standort suchen"></label>
+                <button type="submit">Suchen</button>
+                <a class="button" href="/admin">Zurücksetzen</a>
+            </form>
+            <p class="muted">{len(products)} von {len(all_products)} Produkt(en) angezeigt.</p>
+            <section class="category-sections">{''.join(admin_category_panels) if admin_category_panels else '<section class="box"><p>Keine passenden Produkte gefunden.</p></section>'}</section>
         </section>
         <section class="box"><h2>Letzte Bestellungen</h2><div class="table-wrap"><table><tr><th>Datum</th><th>Nr.</th><th>Zugang</th><th>Standort</th><th>Besteller</th><th>PDF</th><th>Bild</th><th>WhatsApp</th></tr>{''.join(order_rows) if order_rows else '<tr><td colspan="8">Noch keine Bestellungen.</td></tr>'}</table></div></section>
         """
@@ -1847,6 +1959,10 @@ class App(BaseHTTPRequestHandler):
     def show_admin_orders(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        combined_pdf = (query.get("pdf", [""])[0] or "").strip()
         orders = get_orders()
         cards = []
         for order in orders:
@@ -1863,7 +1979,7 @@ class App(BaseHTTPRequestHandler):
                 <article class="box order-card">
                     <div class="section-head">
                         <div>
-                            <h2>{esc(order['order_number'])}</h2>
+                            <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
                             <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
                         </div>
                         <div class="table-actions"><a class="button" href="/orders/{esc(order['pdf_filename'])}" target="_blank" rel="noopener">PDF öffnen</a>{image_link}</div>
@@ -1874,11 +1990,21 @@ class App(BaseHTTPRequestHandler):
                 </article>
                 """
             )
+        combined_button = f'<a class="button primary" target="_blank" rel="noopener" href="/orders/{esc(combined_pdf)}">Gesamtbestellung öffnen / drucken</a>' if combined_pdf else ""
         body = f"""
         {admin_menu()}
+        {f'<div class="success box narrow">{esc(msg)} {combined_button}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
         <section class="box">
             <h2>Getätigte Bestellungen</h2>
             <p class="muted">Hier siehst du Datum, Standort, Produkte, Mengen und die Gesamtübersicht jeder Bestellung.</p>
+            <form id="combineOrdersForm" method="post" action="/admin/orders/combined-pdf" class="bulk-editor order-combine-bar" data-confirm="Ausgewählte Bestellungen zu einer Gesamtbestellung zusammenfassen?">
+                <div class="bulk-editor-actions">
+                    <label class="check"><input id="selectAllOrders" type="checkbox"> Alle angezeigten Bestellungen auswählen</label>
+                    <span class="bulk-selected-count" id="ordersSelectedCount">0 Bestellungen ausgewählt</span>
+                    <button class="primary" type="submit">Gesamtbestellung als PDF erstellen</button>
+                </div>
+            </form>
         </section>
         {''.join(cards) if cards else '<section class="box"><p>Noch keine Bestellungen vorhanden.</p></section>'}
         """
@@ -2001,6 +2127,10 @@ class App(BaseHTTPRequestHandler):
         msg = (query.get("msg", [""])[0] or "").strip()
         locations = get_locations()
         time_limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options())
+        category_visibility_checks = "".join(
+            f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
+            for category in get_category_names(True)
+        )
         rows = []
         for index, location in enumerate(locations):
             max_end_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), location.get("time_tracking_max_end", ""))
@@ -2031,6 +2161,11 @@ class App(BaseHTTPRequestHandler):
                     <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="new_location_password" autocomplete="new-password" placeholder="Optional"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                     <label class="check feature-check"><input type="checkbox" name="new_location_time_tracking" value="1"> Zeiterfassung aktivieren</label>
                     <label>Maximale Endzeit<select name="new_location_time_tracking_max_end">{time_limit_options}</select></label>
+                    <fieldset class="visibility-box location-category-visibility">
+                        <legend>Produktkategorien für neuen Standort</legend>
+                        <div class="visibility-grid">{category_visibility_checks}</div>
+                        <p class="muted">Nur Produkte aus diesen Kategorien werden für den neuen Standort sichtbar.</p>
+                    </fieldset>
                 </div>
                 <button class="primary" type="submit">Standorte speichern</button>
             </form>
@@ -2057,6 +2192,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_update_product()
             if path == "/admin/bulk-products":
                 return self.handle_bulk_products()
+            if path == "/admin/orders/combined-pdf":
+                return self.handle_combined_order_pdf()
             if path == "/admin/delete-product":
                 return self.handle_delete_product()
             if path == "/admin/add-category":
@@ -2246,6 +2383,17 @@ class App(BaseHTTPRequestHandler):
         finally:
             con.close()
 
+    def handle_combined_order_pdf(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
+        orders = get_orders_by_ids(order_ids)
+        if len(orders) < 2:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte mindestens zwei Bestellungen für eine Gesamtbestellung auswählen."))
+        pdf_filename = create_combined_order_pdf(orders)
+        return self.redirect("/admin/orders?msg=" + quote_plus(f"Gesamtbestellung aus {len(orders)} Bestellung(en) wurde erstellt.") + "&pdf=" + quote_plus(pdf_filename))
+
     def handle_add_category(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -2386,6 +2534,10 @@ class App(BaseHTTPRequestHandler):
                 }
             )
         new_name = self.form_value(form, "new_location_name").strip()
+        new_location_categories = [
+            category for category in get_category_names(True)
+            if self.form_value(form, f"new_location_category_{category}")
+        ]
         if new_name:
             locations.append(
                 {
@@ -2399,7 +2551,11 @@ class App(BaseHTTPRequestHandler):
             )
         if not locations:
             return self.redirect("/admin/locations?msg=" + quote_plus("Bitte mindestens einen Standort anlegen."))
-        save_locations(locations)
+        normalized_locations = normalize_locations(locations)
+        new_location_id = normalized_locations[-1]["id"] if new_name and normalized_locations else ""
+        save_locations(normalized_locations)
+        if new_location_id:
+            apply_category_visibility_for_location(new_location_id, new_location_categories)
         self.redirect("/admin/locations?msg=" + quote_plus("Standorte gespeichert."))
 
     def handle_time_entry(self):
@@ -2513,7 +2669,7 @@ class App(BaseHTTPRequestHandler):
             return self.show_order_form("Bitte bei mindestens einem Produkt eine Menge eintragen.")
 
         order_image_filename = None
-        for image_field in ["order_image_camera", "order_image_gallery"]:
+        for image_field in ["order_image", "order_image_camera", "order_image_gallery"]:
             uploaded_image = form.get(image_field)
             if isinstance(uploaded_image, UploadedFile) and uploaded_image.filename and uploaded_image.content:
                 if len(uploaded_image.content) > MAX_ORDER_IMAGE_BYTES:

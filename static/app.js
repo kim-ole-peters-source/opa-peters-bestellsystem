@@ -288,4 +288,29 @@
     updateBulkSelectionState();
   }
 
+  var selectAllOrders = document.getElementById('selectAllOrders');
+  var orderChecks = Array.prototype.slice.call(document.querySelectorAll('.combine-order-check'));
+  var ordersSelectedCount = document.getElementById('ordersSelectedCount');
+  function updateOrderSelectionState() {
+    if (!orderChecks.length) return;
+    var selected = orderChecks.filter(function (item) { return item.checked; }).length;
+    if (selectAllOrders) {
+      selectAllOrders.checked = selected === orderChecks.length;
+      selectAllOrders.indeterminate = selected > 0 && selected < orderChecks.length;
+    }
+    if (ordersSelectedCount) {
+      ordersSelectedCount.textContent = selected + (selected === 1 ? ' Bestellung ausgewählt' : ' Bestellungen ausgewählt');
+    }
+  }
+  if (selectAllOrders && orderChecks.length) {
+    selectAllOrders.addEventListener('change', function () {
+      orderChecks.forEach(function (box) { box.checked = selectAllOrders.checked; });
+      updateOrderSelectionState();
+    });
+    orderChecks.forEach(function (box) {
+      box.addEventListener('change', updateOrderSelectionState);
+    });
+    updateOrderSelectionState();
+  }
+
 })();

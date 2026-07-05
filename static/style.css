@@ -188,6 +188,41 @@ p { line-height: 1.55; }
   font-size: 13px;
 }
 .category-panel .grid { margin-top: 8px; }
+.admin-toggle-panel,
+.admin-product-panel {
+  margin-bottom: 14px;
+}
+.admin-toggle-panel > form,
+.admin-product-panel > .table-wrap {
+  margin-top: 10px;
+}
+.admin-toggle-panel > summary span {
+  min-width: 40px;
+}
+.product-search {
+  margin: 16px 0 10px;
+}
+.order-combine-bar {
+  margin-bottom: 0;
+}
+.order-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 900;
+}
+.order-select input,
+.combine-order-check {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  accent-color: var(--accent-2);
+}
+.location-category-visibility {
+  grid-column: 1 / -1;
+}
 .card {
   position: relative;
   display: flex;
