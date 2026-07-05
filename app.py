@@ -89,6 +89,14 @@ BUYER_BY_KEY = {x["key"]: x for x in BUYER_ACCOUNTS}
 ALL_LOCATIONS_KEY = "all_locations"
 DEFAULT_VISIBLE_TO = ALL_LOCATIONS_KEY
 DEFAULT_CATEGORIES = ["Allgemein", "Eis", "Feine Kost", "Reinigung", "Verbrauchsmaterial"]
+ACCESS_ROLES = [
+    ("standard", "Standort"),
+    ("b2b", "B2B Kunde"),
+    ("order_only", "Nur Bestellungen"),
+    ("time_only", "Nur Zeiterfassung"),
+    ("manager", "Filialleitung"),
+]
+ACCESS_ROLE_KEYS = {key for key, _label in ACCESS_ROLES}
 
 DEFAULT_SETTINGS = {
     "locations": [
@@ -196,6 +204,7 @@ def normalize_locations(raw_locations):
             name = str(item.get("name") or "").strip()
             password = str(item.get("password") or "")
             contact_name = str(item.get("contact_name") or "")
+            role = str(item.get("role") or item.get("access_role") or "standard").strip()
             time_tracking_enabled = bool(item.get("time_tracking_enabled"))
             time_tracking_max_end = str(item.get("time_tracking_max_end") or "")
             raw_id = str(item.get("id") or "").strip()
@@ -203,6 +212,7 @@ def normalize_locations(raw_locations):
             name = str(item or "").strip()
             password = ""
             contact_name = ""
+            role = "standard"
             time_tracking_enabled = False
             time_tracking_max_end = ""
             raw_id = ""
@@ -220,6 +230,7 @@ def normalize_locations(raw_locations):
             "name": name,
             "password": password,
             "contact_name": contact_name,
+            "role": role if role in ACCESS_ROLE_KEYS else "standard",
             "time_tracking_enabled": time_tracking_enabled,
             "time_tracking_max_end": time_tracking_max_end if is_valid_hhmm(time_tracking_max_end) else "",
         })
@@ -451,6 +462,26 @@ def product_visible_location_keys(text):
 
 def visible_labels(text):
     return location_labels_from_keys(visible_keys_from_text(text))
+
+
+def role_label(role):
+    labels = dict(ACCESS_ROLES)
+    return labels.get(role or "standard", labels["standard"])
+
+
+def role_options(selected="standard"):
+    return "".join(
+        f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
+        for key, label in ACCESS_ROLES
+    )
+
+
+def location_can_order(location):
+    return (location or {}).get("role", "standard") in ["standard", "b2b", "order_only", "manager"]
+
+
+def location_can_time(location):
+    return bool((location or {}).get("time_tracking_enabled")) and (location or {}).get("role", "standard") in ["standard", "time_only", "manager"]
 
 
 def store_visible_locations(keys):
@@ -1493,12 +1524,20 @@ class App(BaseHTTPRequestHandler):
         buyer_key = self.current_buyer_key()
         if not buyer_key:
             return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        order_button = '<a class="button primary" href="/">Bestellung</a>' if location_can_order(location) else ""
+        time_button = '<a class="button primary" href="/time">Zeiterfassung</a>' if location_can_time(location) else ""
         body = f"""
         <section class="box narrow choice-box">
+            <h2>{esc(location['name'])}</h2>
+            <p class="muted">Rolle: {esc(role_label(location.get('role')))}</p>
             <div class="choice-actions">
-                <a class="button primary" href="/">Bestellung</a>
-                <a class="button primary" href="/time">Zeiterfassung</a>
+                {order_button}
+                {time_button}
             </div>
+            {'' if order_button or time_button else '<p class="error">Für diese Rolle ist aktuell kein Bereich freigeschaltet.</p>'}
         </section>
         """
         self.send_html(page("Auswahl", body, buyer_key=buyer_key))
@@ -1508,7 +1547,7 @@ class App(BaseHTTPRequestHandler):
         if not buyer_key:
             return self.redirect("/login")
         location = find_location(buyer_key)
-        if not location or not location.get("time_tracking_enabled"):
+        if not location or not location_can_time(location):
             return self.redirect("/")
         query = query or {}
         msg = (query.get("msg", [""])[0] or "").strip()
@@ -1641,7 +1680,7 @@ class App(BaseHTTPRequestHandler):
         self.send_html(page("Zeiterfassung Admin", body, admin=True, buyer_key=self.current_buyer_key()))
 
     def show_buyer_login(self, error=""):
-        options = "".join(f'<option value="{esc(location["id"])}">{esc(location["name"])}</option>' for location in get_locations())
+        options = "".join(f'<option value="{esc(location["id"])}">{esc(location["name"])} · {esc(role_label(location.get("role")))}</option>' for location in get_locations())
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         <form class="box narrow" method="post" action="/login">
@@ -1659,6 +1698,9 @@ class App(BaseHTTPRequestHandler):
         buyer_key = self.current_buyer_key()
         if not buyer_key:
             return self.redirect("/login")
+        location_data = find_location(buyer_key)
+        if not location_can_order(location_data):
+            return self.redirect("/time" if location_can_time(location_data) else "/choose")
 
         query = query or {}
         sort = (query.get("sort", ["name_az"])[0] or "name_az").strip()
@@ -1667,11 +1709,11 @@ class App(BaseHTTPRequestHandler):
         products = get_products(True, buyer_key=buyer_key, sort=sort, category_filter=category_filter)
         products = filter_products_by_search(products, search_text, include_source=False)
         categories = get_categories_for_buyer(buyer_key)
-        location_data = find_location(buyer_key)
         location_name = location_data["name"] if location_data else buyer_label(buyer_key)
         contact_name = (location_data or {}).get("contact_name", "").strip()
+        role_badge = f"<p class='role-badge'>{esc(role_label((location_data or {}).get('role')))}</p>"
         personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
-        time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if (location_data or {}).get("time_tracking_enabled") else ""
+        time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if location_can_time(location_data) else ""
         logout_button = '<a class="button logout-button" href="/logout">Logout</a>'
         cat_options = '<option value="">Alle Kategorien</option>' + "".join(
             f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
@@ -1717,7 +1759,7 @@ class App(BaseHTTPRequestHandler):
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         <section class="box">
-            <div class="section-head"><div><h2>Angemeldet als Standort: {esc(location_name)}</h2>{personal_greeting}</div><div class="table-actions order-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a>{logout_button}</div></div>
+            <div class="section-head"><div><h2>Angemeldet als: {esc(location_name)}</h2>{role_badge}{personal_greeting}</div><div class="table-actions order-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a>{logout_button}</div></div>
             <form method="get" action="/" class="filters compact-form order-search">
                 <input type="hidden" name="sort" value="name_az">
                 <label class="search-main"><span>Produkt suchen</span><input name="q" value="{esc(search_text)}" placeholder="z. B. Becher, Servietten, Reinigung"></label>
@@ -2134,11 +2176,13 @@ class App(BaseHTTPRequestHandler):
         rows = []
         for index, location in enumerate(locations):
             max_end_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), location.get("time_tracking_max_end", ""))
+            current_role_options = role_options(location.get("role", "standard"))
             rows.append(
                 f"""
                 <div class="location-row">
                     <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
                     <label>Standortname<input name="location_name_{index}" value="{esc(location['name'])}" required></label>
+                    <label>Rolle<select name="location_role_{index}">{current_role_options}</select></label>
                     <label>Name der bestellenden Person<input name="location_contact_name_{index}" value="{esc(location.get('contact_name', ''))}" placeholder="z. B. Lisa"></label>
                     <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                     <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
@@ -2157,6 +2201,7 @@ class App(BaseHTTPRequestHandler):
                 <div class="location-list">{''.join(rows) if rows else '<p>Noch keine Standorte.</p>'}</div>
                 <div class="location-row new-location">
                     <label>Neuer Standort<input name="new_location_name" placeholder="z. B. Filiale 4"></label>
+                    <label>Rolle<select name="new_location_role">{role_options("standard")}</select></label>
                     <label>Name der bestellenden Person<input name="new_location_contact_name" placeholder="Optional"></label>
                     <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="new_location_password" autocomplete="new-password" placeholder="Optional"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                     <label class="check feature-check"><input type="checkbox" name="new_location_time_tracking" value="1"> Zeiterfassung aktivieren</label>
@@ -2219,9 +2264,17 @@ class App(BaseHTTPRequestHandler):
         location = find_location(buyer_key)
         expected_password = (location or {}).get("password", "")
         if location and pin == expected_password:
+            if location_can_order(location) and location_can_time(location):
+                target = "/choose"
+            elif location_can_time(location):
+                target = "/time"
+            elif location_can_order(location):
+                target = "/"
+            else:
+                return self.show_buyer_login("Für diese Rolle ist aktuell kein Bereich freigeschaltet.")
             self.send_response(303)
             self.send_header("Set-Cookie", f"buyer={make_buyer_token(buyer_key)}; HttpOnly; SameSite=Lax; Path=/")
-            self.send_header("Location", "/choose")
+            self.send_header("Location", target)
             self.end_headers()
         else:
             self.show_buyer_login("Falscher Standort oder falsches Standort-Passwort.")
@@ -2527,6 +2580,7 @@ class App(BaseHTTPRequestHandler):
                 {
                     "id": self.form_value(form, f"location_id_{index}").strip() or make_location_id(name),
                     "name": name,
+                    "role": self.form_value(form, f"location_role_{index}", "standard").strip(),
                     "contact_name": self.form_value(form, f"location_contact_name_{index}").strip(),
                     "password": self.form_value(form, f"location_password_{index}").strip(),
                     "time_tracking_enabled": bool(self.form_value(form, f"location_time_tracking_{index}")),
@@ -2543,6 +2597,7 @@ class App(BaseHTTPRequestHandler):
                 {
                     "id": make_location_id(new_name),
                     "name": new_name,
+                    "role": self.form_value(form, "new_location_role", "standard").strip(),
                     "contact_name": self.form_value(form, "new_location_contact_name").strip(),
                     "password": self.form_value(form, "new_location_password").strip(),
                     "time_tracking_enabled": bool(self.form_value(form, "new_location_time_tracking")),
@@ -2563,7 +2618,7 @@ class App(BaseHTTPRequestHandler):
         if not buyer_key:
             return self.redirect("/login")
         location = find_location(buyer_key)
-        if not location or not location.get("time_tracking_enabled"):
+        if not location or not location_can_time(location):
             return self.redirect("/")
         form = self.read_form()
         employee_name = self.form_value(form, "employee_name").strip()
@@ -2639,6 +2694,8 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         location_id = buyer_key
         location_data = find_location(location_id)
+        if not location_can_order(location_data):
+            return self.redirect("/time" if location_can_time(location_data) else "/choose")
         location = location_data["name"] if location_data else ""
         ordered_by = self.form_value(form, "ordered_by").strip()
         note = self.form_value(form, "note").strip()
