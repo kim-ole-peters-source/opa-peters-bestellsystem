@@ -21,6 +21,10 @@ from urllib.parse import parse_qs, urlparse, quote_plus
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -123,6 +127,7 @@ MAX_IMAGE_BYTES = 6 * 1024 * 1024
 MAX_ORDER_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_ORDER_QUANTITY = 9999
+BERLIN_TZ = ZoneInfo("Europe/Berlin") if ZoneInfo else None
 
 
 class UploadedFile:
@@ -133,6 +138,10 @@ class UploadedFile:
 
 class RequestTooLarge(Exception):
     pass
+
+
+def berlin_now():
+    return datetime.now(BERLIN_TZ) if BERLIN_TZ else datetime.now()
 
 
 def hash_pin(pin):
@@ -510,10 +519,10 @@ def apply_category_visibility_for_location(location_id, categories):
 
 
 def time_greeting():
-    today = date.today()
+    today = berlin_now().date()
     if (today.month, today.day) in [(1, 1), (12, 25), (12, 26)]:
         return "Einen schönen Feiertag"
-    hour = datetime.now().hour
+    hour = berlin_now().hour
     if hour < 11:
         return "Guten Morgen"
     if hour < 18:
@@ -522,10 +531,10 @@ def time_greeting():
 
 
 def farewell_message():
-    today = date.today()
+    today = berlin_now().date()
     if today.weekday() >= 5:
         return "Hab ein schönes Wochenende und vielen Dank für deine Unterstützung."
-    hour = datetime.now().hour
+    hour = berlin_now().hour
     if hour >= 18:
         return "Genieß deinen Abend und danke für deine Arbeit."
     if hour < 12:
@@ -818,15 +827,15 @@ def get_orders_by_ids(order_ids):
 
 
 def today_iso():
-    return date.today().isoformat()
+    return berlin_now().date().isoformat()
 
 
 def current_month():
-    return date.today().strftime("%Y-%m")
+    return berlin_now().strftime("%Y-%m")
 
 
 def floor_now_to_quarter():
-    now = datetime.now()
+    now = berlin_now()
     return now.hour * 60 + (now.minute // 15) * 15
 
 
@@ -1008,7 +1017,7 @@ def log_time_export(month, filename, sent_to, status, message, auto=False):
         INSERT INTO time_export_logs (export_month, filename, sent_to, status, message, auto, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (month, filename, sent_to, status, message, 1 if auto else 0, datetime.now().strftime("%d.%m.%Y %H:%M")),
+        (month, filename, sent_to, status, message, 1 if auto else 0, berlin_now().strftime("%d.%m.%Y %H:%M")),
     )
     con.commit()
     con.close()
@@ -1055,7 +1064,7 @@ def send_time_export_email(month, filename, data, content_type):
 
 
 def maybe_run_auto_time_export():
-    now = datetime.now()
+    now = berlin_now()
     last_day = calendar.monthrange(now.year, now.month)[1]
     if now.day != last_day or now.hour < 23 or (now.hour == 23 and now.minute < 55):
         return
@@ -1068,13 +1077,13 @@ def maybe_run_auto_time_export():
         log_time_export(month, filename, recipient, "gesendet", "Automatischer Export wurde versendet.", auto=True)
         settings = load_settings()
         settings["last_auto_time_export_month"] = month
-        settings["last_auto_time_export_status"] = f"gesendet am {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        settings["last_auto_time_export_status"] = f"gesendet am {berlin_now().strftime('%d.%m.%Y %H:%M')}"
         save_settings(settings)
     except Exception as exc:
         log_time_export(month, filename, load_settings().get("time_export_email", ""), "fehlgeschlagen", str(exc), auto=True)
         settings = load_settings()
         settings["last_auto_time_export_month"] = month
-        settings["last_auto_time_export_status"] = f"fehlgeschlagen: {exc}"
+        settings["last_auto_time_export_status"] = f"fehlgeschlagen am {berlin_now().strftime('%d.%m.%Y %H:%M')}: {exc}"
         save_settings(settings)
 
 
@@ -1555,6 +1564,7 @@ class App(BaseHTTPRequestHandler):
         start_options = '<option value="">Bitte auswählen</option>' + option_html(time_options(limit_minutes))
         end_options = '<option value="">Bitte auswählen</option>' + option_html(recent_end_time_options(limit_minutes))
         contact_name = (location.get("contact_name") or "").strip()
+        order_link = '<a class="button" href="/">Zum Bestellsystem</a>' if location_can_order(location) else ""
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -1564,7 +1574,7 @@ class App(BaseHTTPRequestHandler):
                     <h2>Zeiterfassung</h2>
                     <p class="muted">Standort: {esc(location['name'])} · Datum: {esc(today_iso())}</p>
                 </div>
-                <a class="button" href="/">Zum Bestellsystem</a>
+                {order_link}
             </div>
             <form method="post" action="/time" class="two time-form">
                 <label>Name des Mitarbeiters *<input name="employee_name" required value="{esc(contact_name)}" placeholder="Name eingeben"></label>
@@ -2629,7 +2639,7 @@ class App(BaseHTTPRequestHandler):
         duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=False)
         if error:
             return self.show_time_form(error)
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        now = berlin_now().strftime("%d.%m.%Y %H:%M")
         con = db()
         con.execute(
             """
@@ -2640,13 +2650,14 @@ class App(BaseHTTPRequestHandler):
         )
         con.commit()
         con.close()
+        order_back_button = '<a class="button primary" href="/">Zurück zum Bestellsystem</a>' if location_can_order(location) else ""
         body = f"""
         <section class="box narrow success">
             <h2>Zeiterfassung gespeichert</h2>
             <p>Deine Zeiterfassung wurde erfolgreich gespeichert.</p>
             <p>Wir wünschen dir einen schönen Feierabend.</p>
             <p>{esc(farewell_message())}</p>
-            <p><a class="button primary" href="/">Zurück zum Bestellsystem</a> <a class="button" href="/time">Weitere Zeit erfassen</a></p>
+            <p>{order_back_button} <a class="button" href="/time">Weitere Zeit erfassen</a></p>
         </section>
         """
         self.send_html(page("Zeiterfassung gespeichert", body, buyer_key=buyer_key))
@@ -2673,7 +2684,7 @@ class App(BaseHTTPRequestHandler):
         month = work_date[:7]
         if error:
             return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus(error))
-        updated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+        updated_at = berlin_now().strftime("%d.%m.%Y %H:%M")
         con = db()
         con.execute(
             """
