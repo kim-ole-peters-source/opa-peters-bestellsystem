@@ -2263,14 +2263,23 @@ class App(BaseHTTPRequestHandler):
         msg = (query.get("msg", [""])[0] or "").strip()
         locations = get_locations()
         time_limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options())
+        categories = get_category_names(True)
+        products_for_visibility = get_products(False, sort="category")
         category_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
-            for category in get_category_names(True)
+            for category in categories
         )
         rows = []
         for index, location in enumerate(locations):
             max_end_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), location.get("time_tracking_max_end", ""))
             current_role_options = role_options(location.get("role", "standard"))
+            location_category_checks = []
+            for category in categories:
+                category_products = [p for p in products_for_visibility if (p["category"] or "Allgemein") == category]
+                all_visible = bool(category_products) and all(location["id"] in product_visible_location_keys(p["visible_to"]) for p in category_products)
+                location_category_checks.append(
+                    f'<label class="visibility-option"><input type="checkbox" name="location_category_{index}_{esc(category)}" value="1" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
+                )
             rows.append(
                 f"""
                 <div class="location-row">
@@ -2282,6 +2291,11 @@ class App(BaseHTTPRequestHandler):
                     <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
                     <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
                     <label class="check remove-check"><input type="checkbox" name="location_remove_{index}" value="1"> Standort entfernen</label>
+                    <fieldset class="visibility-box location-category-visibility">
+                        <legend>Produktkategorien für diesen Standort</legend>
+                        <div class="visibility-grid">{''.join(location_category_checks)}</div>
+                        <p class="muted">Hier steuerst du Kategorien. Einzelne Produkte kannst du zusätzlich unter <a href="/admin/visibility?location={esc(location['id'])}">Sichtbarkeit</a> bearbeiten.</p>
+                    </fieldset>
                 </div>
                 """
             )
@@ -2743,15 +2757,18 @@ class App(BaseHTTPRequestHandler):
         except ValueError:
             location_count = 0
         locations = []
+        existing_category_updates = {}
+        categories = get_category_names(True)
         for index in range(location_count):
             if self.form_value(form, f"location_remove_{index}"):
                 continue
             name = self.form_value(form, f"location_name_{index}").strip()
             if not name:
                 continue
+            location_id = self.form_value(form, f"location_id_{index}").strip() or make_location_id(name)
             locations.append(
                 {
-                    "id": self.form_value(form, f"location_id_{index}").strip() or make_location_id(name),
+                    "id": location_id,
                     "name": name,
                     "role": self.form_value(form, f"location_role_{index}", "standard").strip(),
                     "contact_name": self.form_value(form, f"location_contact_name_{index}").strip(),
@@ -2760,9 +2777,13 @@ class App(BaseHTTPRequestHandler):
                     "time_tracking_max_end": self.form_value(form, f"location_time_tracking_max_end_{index}").strip(),
                 }
             )
+            existing_category_updates[location_id] = [
+                category for category in categories
+                if self.form_value(form, f"location_category_{index}_{category}")
+            ]
         new_name = self.form_value(form, "new_location_name").strip()
         new_location_categories = [
-            category for category in get_category_names(True)
+            category for category in categories
             if self.form_value(form, f"new_location_category_{category}")
         ]
         if new_name:
@@ -2782,6 +2803,10 @@ class App(BaseHTTPRequestHandler):
         normalized_locations = normalize_locations(locations)
         new_location_id = normalized_locations[-1]["id"] if new_name and normalized_locations else ""
         save_locations(normalized_locations)
+        valid_location_ids = {location["id"] for location in normalized_locations}
+        for location_id, selected_categories in existing_category_updates.items():
+            if location_id in valid_location_ids:
+                apply_category_visibility_for_location(location_id, selected_categories)
         if new_location_id:
             apply_category_visibility_for_location(new_location_id, new_location_categories)
         self.redirect("/admin/locations?msg=" + quote_plus("Standorte gespeichert."))
