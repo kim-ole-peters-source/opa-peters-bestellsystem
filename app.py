@@ -166,8 +166,25 @@ def is_valid_hhmm(value):
     return 0 <= hour <= 23 and minute in [0, 15, 30, 45]
 
 
+def is_valid_clock_time(value):
+    if not re.match(r"^\d{2}:\d{2}$", value or ""):
+        return False
+    try:
+        hour, minute = [int(part) for part in value.split(":", 1)]
+    except ValueError:
+        return False
+    return 0 <= hour <= 23 and 0 <= minute <= 59
+
+
 def minutes_from_hhmm(value):
     if not is_valid_hhmm(value):
+        return None
+    hour, minute = [int(part) for part in value.split(":", 1)]
+    return hour * 60 + minute
+
+
+def minutes_from_clock_time(value):
+    if not is_valid_clock_time(value):
         return None
     hour, minute = [int(part) for part in value.split(":", 1)]
     return hour * 60 + minute
@@ -423,10 +440,11 @@ def init_db():
             (category_name, now),
         )
     for row in cur.execute("SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND TRIM(category) != ''").fetchall():
-        cur.execute(
-            "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
-            (row[0], now),
-        )
+        for category_name in split_categories(row[0]):
+            cur.execute(
+                "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
+                (category_name, now),
+            )
     con.commit()
     con.close()
 
@@ -522,8 +540,8 @@ def apply_category_visibility_for_location(location_id, categories):
     rows = con.execute("SELECT id, category, visible_to FROM products").fetchall()
     for row in rows:
         visible = product_visible_location_keys(row["visible_to"])
-        category_key = normalize_text_key(row["category"] or "Allgemein")
-        if category_key in allowed:
+        category_keys = {normalize_text_key(category) for category in product_categories(row)}
+        if category_keys & allowed:
             if location_id not in visible:
                 visible.append(location_id)
         else:
@@ -632,7 +650,7 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
         rows = [p for p in rows if buyer_key in product_visible_location_keys(p["visible_to"])]
 
     if category_filter:
-        rows = [p for p in rows if (p["category"] or "Allgemein") == category_filter]
+        rows = [p for p in rows if product_has_category(p, category_filter)]
 
     def name_key(p):
         return (p["name"] or "").lower()
@@ -640,7 +658,7 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     if sort == "name_za":
         rows.sort(key=name_key, reverse=True)
     elif sort == "category":
-        rows.sort(key=lambda p: ((p["category"] or "Allgemein").lower(), name_key(p)))
+        rows.sort(key=lambda p: (product_categories(p)[0].lower(), name_key(p)))
     elif sort == "package":
         rows.sort(key=lambda p: ((p["package_size"] or "").lower(), name_key(p)))
     elif sort == "newest":
@@ -668,6 +686,54 @@ def get_category_names(active_only=True):
     return names
 
 
+def split_categories(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ["Allgemein"]
+    parts = [part.strip() for part in re.split(r"[,;|/\n]+", raw) if part.strip()]
+    unique = []
+    seen = set()
+    for part in parts or ["Allgemein"]:
+        key = normalize_text_key(part)
+        if key and key not in seen:
+            unique.append(part)
+            seen.add(key)
+    return unique or ["Allgemein"]
+
+
+def category_text(categories):
+    return ", ".join(categories or ["Allgemein"])
+
+
+def product_categories(product_or_value):
+    if isinstance(product_or_value, sqlite3.Row) or isinstance(product_or_value, dict):
+        return split_categories(product_or_value["category"] if product_or_value["category"] else "Allgemein")
+    return split_categories(product_or_value)
+
+
+def product_has_category(product_or_value, category):
+    wanted = normalize_text_key(category or "Allgemein")
+    return any(normalize_text_key(item) == wanted for item in product_categories(product_or_value))
+
+
+def category_input_name(prefix, category):
+    return f"{prefix}_{normalize_text_key(category)}"
+
+
+def category_checkboxes(name_prefix, selected_categories=None):
+    selected_keys = {normalize_text_key(category) for category in (selected_categories or [])}
+    return "".join(
+        f'<label class="visibility-option"><input type="checkbox" name="{esc(category_input_name(name_prefix, category))}" value="1" {"checked" if normalize_text_key(category) in selected_keys else ""}><span>{esc(category)}</span></label>'
+        for category in get_category_names(True)
+    )
+
+
+def form_categories(form, prefix, fallback=None):
+    names = get_category_names(True)
+    selected = [category for category in names if str(form.get(category_input_name(prefix, category), "")).strip()]
+    return selected or (fallback or ["Allgemein"])
+
+
 def ensure_category(name):
     name = (name or "Allgemein").strip() or "Allgemein"
     con = db()
@@ -686,6 +752,15 @@ def ensure_category(name):
     return name
 
 
+def ensure_categories(categories):
+    cleaned = []
+    for category in categories or ["Allgemein"]:
+        ensured = ensure_category(category)
+        if normalize_text_key(ensured) not in {normalize_text_key(item) for item in cleaned}:
+            cleaned.append(ensured)
+    return cleaned or ["Allgemein"]
+
+
 def get_product(product_id):
     con = db()
     row = con.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
@@ -695,7 +770,7 @@ def get_product(product_id):
 
 def get_categories_for_buyer(buyer_key=None):
     products = get_products(True, buyer_key=buyer_key, sort="category")
-    categories = sorted({p["category"] or "Allgemein" for p in products}, key=lambda x: x.lower())
+    categories = sorted({category for p in products for category in product_categories(p)}, key=lambda x: x.lower())
     return categories
 
 
@@ -707,7 +782,7 @@ def filter_products_by_search(products, search_text, include_source=False):
     words = [w for w in re.split(r"\s+", term) if w]
     filtered = []
     for p in products:
-        values = [p["name"], p["category"], p["package_size"]]
+        values = [p["name"], category_text(product_categories(p)), p["package_size"]]
         if include_source:
             values.extend([p["source"], visible_labels(p["visible_to"])])
         haystack = " ".join(str(v or "") for v in values).lower()
@@ -937,9 +1012,11 @@ def validate_time_entry(location, employee_name, work_location, start_time, end_
         return None, "Bitte den Namen des Mitarbeiters eintragen."
     if not work_location:
         return None, "Bitte Einsatzort oder Filiale eintragen."
-    if not is_valid_hhmm(start_time) or not is_valid_hhmm(end_time):
-        return None, "Bitte Anfangszeit und Endzeit in 15-Minuten-Schritten auswählen."
-    start_minutes = minutes_from_hhmm(start_time)
+    if not is_valid_clock_time(start_time):
+        return None, "Bitte eine gültige Anfangszeit auswählen."
+    if not is_valid_hhmm(end_time):
+        return None, "Bitte die Endzeit in 15-Minuten-Schritten auswählen."
+    start_minutes = minutes_from_clock_time(start_time)
     end_minutes = minutes_from_hhmm(end_time)
     if end_minutes <= start_minutes:
         return None, "Die Endzeit muss nach der Anfangszeit liegen."
@@ -1645,7 +1722,6 @@ class App(BaseHTTPRequestHandler):
         query = query or {}
         msg = (query.get("msg", [""])[0] or "").strip()
         limit_minutes = location_time_limit_minutes(location)
-        start_options = '<option value="">Bitte auswählen</option>' + option_html(time_options(limit_minutes))
         end_options = '<option value="">Bitte auswählen</option>' + option_html(recent_end_time_options(limit_minutes))
         contact_name = (location.get("contact_name") or "").strip()
         order_link = '<a class="button" href="/">Zum Bestellsystem</a>' if location_can_order(location) else ""
@@ -1663,7 +1739,7 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/time" class="two time-form">
                 <label>Name des Mitarbeiters *<input name="employee_name" required value="{esc(contact_name)}" placeholder="Name eingeben"></label>
                 <label>Einsatzort / Filiale *<input name="work_location" required value="{esc(location['name'])}" placeholder="z. B. Schwarzenbek"></label>
-                <label>Anfangszeit *<select name="start_time" required>{start_options}</select></label>
+                <label>Anfangszeit *<input name="start_time" type="time" required></label>
                 <label>Endzeit *<select name="end_time" required>{end_options}</select></label>
                 <label class="full">Besondere Vorkommnisse<textarea name="note" rows="4" placeholder="Optional"></textarea></label>
                 <button class="primary" type="submit">Zeiterfassung speichern</button>
@@ -1701,7 +1777,6 @@ class App(BaseHTTPRequestHandler):
                 matrix_rows.append(f"<tr><td>{esc(employee)}</td><td>{esc(work_location)}</td><td>{esc(format_duration(minutes))}</td></tr>")
         entry_cards = []
         for entry in entries:
-            start_options = option_html(time_options(), entry["start_time"])
             end_options = option_html(time_options(), entry["end_time"])
             entry_cards.append(
                 f"""
@@ -1711,7 +1786,7 @@ class App(BaseHTTPRequestHandler):
                         <label>Datum<input name="work_date" type="date" value="{esc(entry['work_date'])}" required></label>
                         <label>Mitarbeiter<input name="employee_name" value="{esc(entry['employee_name'])}" required></label>
                         <label>Einsatzort<input name="work_location" value="{esc(entry['work_location'])}" required></label>
-                        <label>Anfang<select name="start_time">{start_options}</select></label>
+                        <label>Anfang<input name="start_time" type="time" value="{esc(entry['start_time'])}" required></label>
                         <label>Ende<select name="end_time">{end_options}</select></label>
                         <label>Dauer<input value="{esc(format_duration(entry['duration_minutes']))}" disabled></label>
                         <label class="full">Vorkommnisse<textarea name="note" rows="3">{esc(entry['note'])}</textarea></label>
@@ -1824,10 +1899,11 @@ class App(BaseHTTPRequestHandler):
         )
         def product_card(p):
             img = f'<img src="/uploads/{esc(p["image_filename"])}" alt="">' if p["image_filename"] else '<div class="noimg">kein Bild</div>'
+            categories_label = category_text(product_categories(p))
             return f"""
             <article class="card product-card" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}">
                 {img}
-                <div class="category-badge">{esc(p['category'] or 'Allgemein')}</div>
+                <div class="category-badge">{esc(categories_label)}</div>
                 <h3>{esc(p['name'])}</h3>
                 <p class="muted">Gebindegröße: {esc(p['package_size'])}</p>
                 <div class="quantity-control" aria-label="Menge für {esc(p['name'])}">
@@ -1845,7 +1921,7 @@ class App(BaseHTTPRequestHandler):
         if products:
             category_panels.append(f"<details class='category-panel' open><summary>Alle Produkte <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
             for category in categories:
-                category_products = [p for p in products if (p["category"] or "Allgemein") == category]
+                category_products = [p for p in products if product_has_category(p, category)]
                 if category_products:
                     category_panels.append(
                         f"<details class='category-panel'><summary>{esc(category)} <span>{len(category_products)}</span></summary><section class='grid'>{''.join(product_card(p) for p in category_products)}</section></details>"
@@ -1928,9 +2004,11 @@ class App(BaseHTTPRequestHandler):
                 f"<input type='hidden' name='id' value='{p['id']}'><button>Löschen</button></form>"
                 f"</div>"
             )
-            row_html = f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(p['category'])}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
+            categories_label = category_text(product_categories(p))
+            row_html = f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(categories_label)}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
             rows.append(row_html)
-            rows_by_category.setdefault(p["category"] or "Allgemein", []).append(row_html)
+            for category in product_categories(p):
+                rows_by_category.setdefault(category, []).append(row_html)
         order_rows = []
         for o in orders:
             o_dict = dict(o)
@@ -1945,8 +2023,8 @@ class App(BaseHTTPRequestHandler):
             f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" checked><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
         )
-        category_options = "".join(f'<option value="{esc(c)}">{esc(c)}</option>' for c in get_category_names(True))
-        bulk_category_options = '<option value="">Kategorie behalten</option>' + category_options
+        category_checks = category_checkboxes("category", ["Allgemein"])
+        bulk_category_checks = category_checkboxes("bulk_category")
         bulk_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="bulk_visible_{esc(location["id"])}" value="1"><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
@@ -1975,7 +2053,10 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/admin/add-product" enctype="multipart/form-data" class="two">
                 <p class="muted full">Kategorien legst du separat an und wählst sie hier aus.</p>
                 <label>Produktname *<input name="name" required></label>
-                <label>Kategorie *<select name="category" required>{category_options}</select></label>
+                <fieldset class="visibility-box full">
+                    <legend>Kategorien *</legend>
+                    <div class="visibility-grid">{category_checks}</div>
+                </fieldset>
                 <label>Gebindegröße *<input name="package_size" required placeholder="z. B. Karton à 12 Stück"></label>
                 <label>Bezugsquelle *<input name="source" required placeholder="z. B. Lieferant A"></label>
                 <label>Produktbild<input type="file" name="image" accept="image/*"></label>
@@ -2003,9 +2084,11 @@ class App(BaseHTTPRequestHandler):
                             <option value="delete">Ausgewählte löschen</option>
                         </select>
                     </label>
-                    <label>Kategorie
-                        <select name="bulk_category">{bulk_category_options}</select>
-                    </label>
+                    <fieldset class="visibility-box bulk-visibility">
+                        <legend>Kategorien setzen</legend>
+                        <div class="visibility-grid">{bulk_category_checks}</div>
+                        <p class="muted">Leer lassen = Kategorien behalten.</p>
+                    </fieldset>
                     <label>Bezugsquelle
                         <input name="bulk_source" placeholder="leer lassen = behalten">
                     </label>
@@ -2062,10 +2145,7 @@ class App(BaseHTTPRequestHandler):
             f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" {"checked" if location["id"] in selected_locations else ""}><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
         )
-        category_options = "".join(
-            f'<option value="{esc(c)}" {"selected" if c == (product["category"] or "Allgemein") else ""}>{esc(c)}</option>'
-            for c in get_category_names(True)
-        )
+        category_checks = category_checkboxes("category", product_categories(product))
         current_image = f'<p><img class="edit-preview" src="/uploads/{esc(product["image_filename"])}" alt=""></p>' if product["image_filename"] else "<p class='muted'>Für dieses Produkt ist noch kein Bild hinterlegt.</p>"
         body = f"""
         {admin_menu()}
@@ -2076,7 +2156,10 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/admin/update-product" enctype="multipart/form-data" class="two">
                 <input type="hidden" name="id" value="{esc(product['id'])}">
                 <label>Produktname *<input name="name" required value="{esc(product['name'])}"></label>
-                <label>Kategorie *<select name="category" required>{category_options}</select></label>
+                <fieldset class="visibility-box full">
+                    <legend>Kategorien *</legend>
+                    <div class="visibility-grid">{category_checks}</div>
+                </fieldset>
                 <label>Gebindegröße *<input name="package_size" required value="{esc(product['package_size'])}"></label>
                 <label>Bezugsquelle *<input name="source" required value="{esc(product['source'])}"></label>
                 <label>Status<select name="active"><option value="1" {"selected" if product["active"] else ""}>aktiv</option><option value="0" {"selected" if not product["active"] else ""}>deaktiviert</option></select></label>
@@ -2155,9 +2238,10 @@ class App(BaseHTTPRequestHandler):
         rows = []
         con = db()
         categories = get_all_categories(active_only=False)
+        product_rows = con.execute("SELECT category FROM products").fetchall()
         for c in categories:
             status = "aktiv" if c["active"] else "deaktiviert"
-            product_count = con.execute("SELECT COUNT(*) FROM products WHERE category=?", (c["name"],)).fetchone()[0]
+            product_count = sum(1 for row in product_rows if product_has_category(row["category"], c["name"]))
             action = "—" if c["name"] == "Allgemein" else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button>Löschen</button></form>"
             rows.append(
                 f"<tr><td><span class='pill'>{esc(c['name'])}</span></td><td>{product_count}</td><td>{status}</td><td>{action}</td></tr>"
@@ -2275,7 +2359,7 @@ class App(BaseHTTPRequestHandler):
             current_role_options = role_options(location.get("role", "standard"))
             location_category_checks = []
             for category in categories:
-                category_products = [p for p in products_for_visibility if (p["category"] or "Allgemein") == category]
+                category_products = [p for p in products_for_visibility if product_has_category(p, category)]
                 all_visible = bool(category_products) and all(location["id"] in product_visible_location_keys(p["visible_to"]) for p in category_products)
                 location_category_checks.append(
                     f'<label class="visibility-option"><input type="checkbox" name="location_category_{index}_{esc(category)}" value="1" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
@@ -2338,7 +2422,7 @@ class App(BaseHTTPRequestHandler):
             selected_location_id = locations[0]["id"]
         selected_location = find_location(selected_location_id)
         products = get_products(False, sort="category")
-        categories = sorted({p["category"] or "Allgemein" for p in products}, key=lambda item: item.lower())
+        categories = sorted({category for p in products for category in product_categories(p)}, key=lambda item: item.lower())
         location_options = "".join(
             f'<option value="{esc(location["id"])}" {"selected" if location["id"] == selected_location_id else ""}>{esc(location["name"])}</option>'
             for location in locations
@@ -2349,14 +2433,14 @@ class App(BaseHTTPRequestHandler):
         }
         category_checks = []
         for category in categories:
-            category_products = [p for p in products if (p["category"] or "Allgemein") == category]
+            category_products = [p for p in products if product_has_category(p, category)]
             all_visible = bool(category_products) and all(str(p["id"]) in visible_product_ids for p in category_products)
             category_checks.append(
                 f'<label class="visibility-option"><input class="visibility-category-toggle" type="checkbox" name="category_{esc(category)}" value="1" data-category="{esc(category)}" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
             )
         product_panels = []
         for category in categories:
-            category_products = [p for p in products if (p["category"] or "Allgemein") == category]
+            category_products = [p for p in products if product_has_category(p, category)]
             product_checks = "".join(
                 f'<label class="visibility-option product-visibility-option"><input class="visibility-product-check" type="checkbox" name="product_{product["id"]}" value="1" data-category="{esc(category)}" {"checked" if str(product["id"]) in visible_product_ids else ""}><span>{esc(product["name"])}<small>{esc(product["package_size"])}</small></span></label>'
                 for product in category_products
@@ -2477,7 +2561,8 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/login")
         form = self.read_form()
         name = self.form_value(form, "name").strip()
-        category = ensure_category(self.form_value(form, "category").strip() or "Allgemein")
+        categories = ensure_categories(form_categories(form, "category"))
+        category = category_text(categories)
         package_size = self.form_value(form, "package_size").strip()
         source = self.form_value(form, "source").strip()
         visible_to = [location["id"] for location in get_locations() if self.form_value(form, f"visible_{location['id']}")]
@@ -2493,7 +2578,7 @@ class App(BaseHTTPRequestHandler):
                 image_filename = slug_filename(item.filename)
                 with open(os.path.join(UPLOAD_DIR, image_filename), "wb") as f:
                     f.write(item.content)
-        if name and package_size and source:
+        if name and package_size and source and categories:
             con = db()
             con.execute(
                 """
@@ -2506,7 +2591,7 @@ class App(BaseHTTPRequestHandler):
             con.close()
             self.redirect("/admin?msg=" + quote_plus("Produkt gespeichert."))
         else:
-            self.redirect("/admin?error=" + quote_plus("Bitte Produktname, Gebindegröße und Bezugsquelle ausfüllen."))
+            self.redirect("/admin?error=" + quote_plus("Bitte Produktname, mindestens eine Kategorie, Gebindegröße und Bezugsquelle ausfüllen."))
 
     def handle_delete_product(self):
         if not self.is_admin():
@@ -2528,7 +2613,8 @@ class App(BaseHTTPRequestHandler):
         if not product:
             return self.redirect("/admin?error=" + quote_plus("Produkt wurde nicht gefunden."))
         name = self.form_value(form, "name").strip()
-        category = ensure_category(self.form_value(form, "category").strip() or "Allgemein")
+        categories = ensure_categories(form_categories(form, "category", product_categories(product)))
+        category = category_text(categories)
         package_size = self.form_value(form, "package_size").strip()
         source = self.form_value(form, "source").strip()
         active = 1 if self.form_value(form, "active", "1") == "1" else 0
@@ -2536,8 +2622,8 @@ class App(BaseHTTPRequestHandler):
         if not visible_to:
             visible_to = location_ids()
         visible_to_text = ALL_LOCATIONS_KEY if set(visible_to) == set(location_ids()) else ",".join(visible_to)
-        if not (name and package_size and source):
-            return self.redirect(f"/admin/edit-product?id={quote_plus(product_id)}&error=" + quote_plus("Bitte Produktname, Gebindegröße und Bezugsquelle ausfüllen."))
+        if not (name and package_size and source and categories):
+            return self.redirect(f"/admin/edit-product?id={quote_plus(product_id)}&error=" + quote_plus("Bitte Produktname, mindestens eine Kategorie, Gebindegröße und Bezugsquelle ausfüllen."))
         image_filename = product["image_filename"]
         if "image" in form and isinstance(form["image"], UploadedFile):
             item = form["image"]
@@ -2580,14 +2666,14 @@ class App(BaseHTTPRequestHandler):
 
             updates = []
             params = []
-            bulk_category = self.form_value(form, "bulk_category").strip()
+            bulk_categories = [category for category in get_category_names(True) if self.form_value(form, category_input_name("bulk_category", category))]
             bulk_source = self.form_value(form, "bulk_source").strip()
             bulk_active = self.form_value(form, "bulk_active", "keep")
             visibility_mode = self.form_value(form, "bulk_visibility_mode", "keep")
 
-            if bulk_category:
+            if bulk_categories:
                 updates.append("category=?")
-                params.append(ensure_category(bulk_category))
+                params.append(category_text(ensure_categories(bulk_categories)))
             if bulk_source:
                 updates.append("source=?")
                 params.append(bulk_source)
@@ -2650,7 +2736,8 @@ class App(BaseHTTPRequestHandler):
         name = self.form_value(form, "name").strip()
         if name and name != "Allgemein":
             con = db()
-            product_count = con.execute("SELECT COUNT(*) FROM products WHERE category=?", (name,)).fetchone()[0]
+            product_rows = con.execute("SELECT category FROM products").fetchall()
+            product_count = sum(1 for row in product_rows if product_has_category(row["category"], name))
             if product_count:
                 con.close()
                 return self.redirect("/admin/categories?error=" + quote_plus("Kategorie kann nicht gelöscht werden, solange noch Produkte zugeordnet sind. Bitte Produkte vorher bearbeiten."))
@@ -2683,10 +2770,11 @@ class App(BaseHTTPRequestHandler):
             if not (name and package_size and source):
                 skipped += 1
                 continue
-            category = (row.get("category") or "Allgemein").strip() or "Allgemein"
-            categories_to_ensure.add(category)
+            row_categories = split_categories(row.get("category") or "Allgemein")
+            for category in row_categories:
+                categories_to_ensure.add(category)
             prepared_rows.append(
-                (name, package_size, category, source, ALL_LOCATIONS_KEY, None, datetime.now().isoformat(timespec="seconds"))
+                (name, package_size, category_text(row_categories), source, ALL_LOCATIONS_KEY, None, datetime.now().isoformat(timespec="seconds"))
             )
         con = db()
         now = datetime.now().isoformat(timespec="seconds")
@@ -2710,7 +2798,7 @@ class App(BaseHTTPRequestHandler):
             category_map[category] = category
         for prepared in prepared_rows:
             prepared = list(prepared)
-            prepared[2] = category_map.get(prepared[2], prepared[2])
+            prepared[2] = category_text([category_map.get(category, category) for category in split_categories(prepared[2])])
             con.execute(
                 """
                 INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at)
@@ -2833,7 +2921,7 @@ class App(BaseHTTPRequestHandler):
         updated = 0
         for row in rows:
             visible = product_visible_location_keys(row["visible_to"])
-            should_show = str(row["id"]) in selected_products or (row["category"] or "Allgemein") in selected_categories
+            should_show = str(row["id"]) in selected_products or any(category in selected_categories for category in product_categories(row))
             if should_show and location_id not in visible:
                 visible.append(location_id)
                 updated += 1
@@ -2950,7 +3038,7 @@ class App(BaseHTTPRequestHandler):
                         "product_id": p["id"],
                         "product_name": p["name"],
                         "package_size": p["package_size"],
-                        "category": p["category"] or "Allgemein",
+                        "category": category_text(product_categories(p)),
                         "source": p["source"],
                         "quantity": qty,
                     }
