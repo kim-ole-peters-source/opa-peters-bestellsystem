@@ -1527,6 +1527,9 @@ class App(BaseHTTPRequestHandler):
 
     def redirect(self, path):
         self.send_response(303)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Location", path)
         self.end_headers()
 
@@ -1833,6 +1836,11 @@ class App(BaseHTTPRequestHandler):
                         <div class="entry-meta">{'bearbeitet' if entry['edited'] else 'original'}{f" · {esc(entry['updated_at'])}" if entry['updated_at'] else ''}</div>
                         <button class="primary" type="submit">Eintrag speichern</button>
                     </form>
+                    <form method="post" action="/admin/time/delete" data-confirm="Diesen Zeiteintrag wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.">
+                        <input type="hidden" name="id" value="{entry['id']}">
+                        <input type="hidden" name="month" value="{esc(month)}">
+                        <button class="danger" type="submit">Zeiteintrag löschen</button>
+                    </form>
                 </article>
                 """
             )
@@ -2056,8 +2064,14 @@ class App(BaseHTTPRequestHandler):
             wa_link = whatsapp_order_link(o_dict)
             wa_cell = f"<a target='_blank' rel='noopener' href='{esc(wa_link)}'>WhatsApp</a>" if wa_link else "—"
             image_cell = f"<a href='/order-images/{esc(o['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if o["order_image_filename"] else "—"
+            delete_cell = (
+                f"<form method='post' action='/admin/orders/delete' data-confirm='Diese Bestellung wirklich löschen?'>"
+                f"<input type='hidden' name='order_{o['id']}' value='1'>"
+                f"<input type='hidden' name='return_to' value='/admin'>"
+                f"<button class='danger' type='submit'>Löschen</button></form>"
+            )
             order_rows.append(
-                f"<tr><td>{esc(o['created_at'])}</td><td>{esc(o['order_number'])}</td><td>{esc(o['buyer_group'] or '')}</td><td>{esc(o['location'])}</td><td>{esc(o['ordered_by'])}</td><td><a href='/orders/{esc(o['pdf_filename'])}'>PDF öffnen</a></td><td>{image_cell}</td><td>{wa_cell}</td></tr>"
+                f"<tr><td>{esc(o['created_at'])}</td><td>{esc(o['order_number'])}</td><td>{esc(o['buyer_group'] or '')}</td><td>{esc(o['location'])}</td><td>{esc(o['ordered_by'])}</td><td><a href='/orders/{esc(o['pdf_filename'])}'>PDF öffnen</a></td><td>{image_cell}</td><td>{wa_cell}</td><td>{delete_cell}</td></tr>"
             )
         visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" checked><span>{esc(location["name"])}</span></label>'
@@ -2166,7 +2180,7 @@ class App(BaseHTTPRequestHandler):
             <p class="muted">{len(products)} von {len(all_products)} Produkt(en) angezeigt.</p>
             <section class="category-sections">{''.join(admin_category_panels) if admin_category_panels else '<section class="box"><p>Keine passenden Produkte gefunden.</p></section>'}</section>
         </section>
-        <section class="box"><h2>Letzte Bestellungen</h2><div class="table-wrap"><table><tr><th>Datum</th><th>Nr.</th><th>Zugang</th><th>Standort</th><th>Besteller</th><th>PDF</th><th>Bild</th><th>WhatsApp</th></tr>{''.join(order_rows) if order_rows else '<tr><td colspan="8">Noch keine Bestellungen.</td></tr>'}</table></div></section>
+        <section class="box"><h2>Letzte Bestellungen</h2><div class="table-wrap"><table><tr><th>Datum</th><th>Nr.</th><th>Zugang</th><th>Standort</th><th>Besteller</th><th>PDF</th><th>Bild</th><th>WhatsApp</th><th></th></tr>{''.join(order_rows) if order_rows else '<tr><td colspan="9">Noch keine Bestellungen.</td></tr>'}</table></div></section>
         """
         self.send_html(page("Adminbereich", body, admin=True, buyer_key=self.current_buyer_key()))
 
@@ -2568,6 +2582,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_visibility()
             if path == "/admin/time/update":
                 return self.handle_update_time_entry()
+            if path == "/admin/time/delete":
+                return self.handle_delete_time_entry()
             self.send_error(404)
         except RequestTooLarge as exc:
             self.send_html(page("Datei zu groß", f"<div class='error box narrow'>{esc(exc)}</div>", admin=self.is_admin(), buyer_key=self.current_buyer_key()), 413)
@@ -2784,13 +2800,16 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        return_to = self.form_value(form, "return_to", "/admin/orders").strip()
+        if return_to not in ["/admin", "/admin/orders"]:
+            return_to = "/admin/orders"
         order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
         if not order_ids:
-            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
+            return self.redirect(return_to + "?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
         deleted_count = delete_orders_by_ids(order_ids)
         if not deleted_count:
-            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
-        return self.redirect("/admin/orders?msg=" + quote_plus(f"{deleted_count} Bestellung(en) gelöscht."))
+            return self.redirect(return_to + "?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
+        return self.redirect(return_to + "?msg=" + quote_plus(f"{deleted_count} Bestellung(en) gelöscht."))
 
     def handle_add_category(self):
         if not self.is_admin():
@@ -3079,6 +3098,25 @@ class App(BaseHTTPRequestHandler):
         con.commit()
         con.close()
         self.redirect(f"/admin/time?month={quote_plus(month)}&msg=" + quote_plus("Zeiteintrag gespeichert. Die Stunden wurden neu berechnet."))
+
+    def handle_delete_time_entry(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        entry_id = self.form_value(form, "id").strip()
+        month = self.form_value(form, "month", current_month()).strip()
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = current_month()
+        if not entry_id.isdigit():
+            return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus("Ungültiger Zeiteintrag."))
+        con = db()
+        cur = con.execute("DELETE FROM time_entries WHERE id=?", (entry_id,))
+        con.commit()
+        deleted = cur.rowcount
+        con.close()
+        if deleted:
+            return self.redirect(f"/admin/time?month={quote_plus(month)}&msg=" + quote_plus("Zeiteintrag gelöscht."))
+        return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus("Zeiteintrag wurde nicht gefunden."))
 
     def handle_order(self):
         buyer_key = self.current_buyer_key()
