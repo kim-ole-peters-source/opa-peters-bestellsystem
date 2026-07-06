@@ -1872,9 +1872,24 @@ class App(BaseHTTPRequestHandler):
         entry_cards = []
         for entry in entries:
             end_options = option_html(time_options(), entry["end_time"])
+            status_text = "bearbeitet" if entry["edited"] else "original"
+            if entry["updated_at"]:
+                status_text += f" · {entry['updated_at']}"
             entry_cards.append(
                 f"""
-                <article class="time-entry-card">
+                <details class="time-entry-card">
+                    <summary class="time-entry-summary">
+                        <span class="time-entry-main">
+                            <strong>{esc(entry['employee_name'])}</strong>
+                            <span>{esc(entry['work_date'])} · {esc(entry['start_time'])}-{esc(entry['end_time'])}</span>
+                        </span>
+                        <span class="time-entry-meta">
+                            <span>{esc(entry['work_location'])}</span>
+                            <strong>{esc(format_duration(entry['duration_minutes']))}</strong>
+                        </span>
+                    </summary>
+                    <div class="time-entry-edit">
+                        <p class="entry-meta">{esc(status_text)}</p>
                     <form method="post" action="/admin/time/update" class="time-entry-form">
                         <input type="hidden" name="id" value="{entry['id']}">
                         <label>Datum<input name="work_date" type="date" value="{esc(entry['work_date'])}" required></label>
@@ -1884,7 +1899,6 @@ class App(BaseHTTPRequestHandler):
                         <label>Ende<select name="end_time">{end_options}</select></label>
                         <label>Dauer<input value="{esc(format_duration(entry['duration_minutes']))}" disabled></label>
                         <label class="full">Vorkommnisse<textarea name="note" rows="3">{esc(entry['note'])}</textarea></label>
-                        <div class="entry-meta">{'bearbeitet' if entry['edited'] else 'original'}{f" · {esc(entry['updated_at'])}" if entry['updated_at'] else ''}</div>
                         <button class="primary" type="submit">Eintrag speichern</button>
                     </form>
                     <form method="post" action="/admin/time/delete" data-confirm="Diesen Zeiteintrag wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.">
@@ -1892,7 +1906,8 @@ class App(BaseHTTPRequestHandler):
                         <input type="hidden" name="month" value="{esc(month)}">
                         <button class="danger" type="submit">Zeiteintrag löschen</button>
                     </form>
-                </article>
+                    </div>
+                </details>
                 """
             )
         latest_log = latest_time_export_log()

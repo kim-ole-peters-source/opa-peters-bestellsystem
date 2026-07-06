@@ -459,7 +459,35 @@ button:active, .button:active { transform: translateY(1px); }
 
 .time-form select { min-height: 54px; font-size: 16px; }
 .time-entry-list { display: grid; gap: 12px; }
-.time-entry-card { padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-2); }
+.time-entry-card { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-2); overflow: hidden; }
+.time-entry-summary {
+  min-height: 68px;
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+.time-entry-summary::-webkit-details-marker { display: none; }
+.time-entry-summary::after {
+  content: "+";
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-weight: 900;
+}
+.time-entry-card[open] .time-entry-summary::after { content: "-"; }
+.time-entry-main, .time-entry-meta { display: grid; gap: 4px; }
+.time-entry-main span, .time-entry-meta span { color: var(--muted); font-size: 14px; font-weight: 700; }
+.time-entry-meta { justify-items: end; text-align: right; }
+.time-entry-edit { padding: 0 14px 14px; display: grid; gap: 12px; border-top: 1px solid var(--line); }
 .time-entry-form { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 12px; align-items: end; }
 .time-entry-form label { margin: 0; }
 .entry-meta { color: var(--muted); font-size: 13px; font-weight: 700; align-self: center; }
@@ -600,6 +628,8 @@ tr:hover td { background: var(--primary-soft); }
   .bulk-editor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .order-actions { justify-content: stretch; width: 100%; }
   .order-actions .button { flex: 1 1 180px; }
+  .time-entry-summary { grid-template-columns: minmax(0, 1fr) 38px; }
+  .time-entry-meta { grid-column: 1 / -1; justify-items: start; text-align: left; }
 }
 
 @media (min-width: 761px) and (max-width: 1100px) {
