@@ -422,6 +422,7 @@ def init_db():
     # Migration für ältere ZIP-Versionen / bestehende lokale Datenbanken
     add_column_if_missing(con, "products", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "products", "visible_to", f"TEXT NOT NULL DEFAULT '{DEFAULT_VISIBLE_TO}'")
+    add_column_if_missing(con, "products", "deleted_at", "TEXT")
     add_column_if_missing(con, "orders", "buyer_group", "TEXT")
     add_column_if_missing(con, "orders", "order_image_filename", "TEXT")
     add_column_if_missing(con, "orders", "pdf_data", "BLOB")
@@ -439,7 +440,7 @@ def init_db():
             "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
             (category_name, now),
         )
-    for row in cur.execute("SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND TRIM(category) != ''").fetchall():
+    for row in cur.execute("SELECT DISTINCT category FROM products WHERE deleted_at IS NULL AND category IS NOT NULL AND TRIM(category) != ''").fetchall():
         for category_name in split_categories(row[0]):
             cur.execute(
                 "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
@@ -451,7 +452,7 @@ def init_db():
 
 def seed_demo_products():
     con = db()
-    count = con.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM products WHERE deleted_at IS NULL").fetchone()[0]
     if count == 0:
         now = datetime.now().isoformat(timespec="seconds")
         demo = [
@@ -537,7 +538,7 @@ def apply_category_visibility_for_location(location_id, categories):
     allowed = {normalize_text_key(category) for category in categories if category}
     all_locations = location_ids()
     con = db()
-    rows = con.execute("SELECT id, category, visible_to FROM products").fetchall()
+    rows = con.execute("SELECT id, category, visible_to FROM products WHERE deleted_at IS NULL").fetchall()
     for row in rows:
         visible = product_visible_location_keys(row["visible_to"])
         category_keys = {normalize_text_key(category) for category in product_categories(row)}
@@ -641,8 +642,11 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     con = db()
     q = "SELECT * FROM products"
     params = []
+    conditions = ["deleted_at IS NULL"]
     if active_only:
-        q += " WHERE active=1"
+        conditions.append("active=1")
+    if conditions:
+        q += " WHERE " + " AND ".join(conditions)
     rows = list(con.execute(q, params).fetchall())
     con.close()
 
@@ -763,7 +767,7 @@ def ensure_categories(categories):
 
 def get_product(product_id):
     con = db()
-    row = con.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    row = con.execute("SELECT * FROM products WHERE id=? AND deleted_at IS NULL", (product_id,)).fetchone()
     con.close()
     return row
 
@@ -2282,7 +2286,7 @@ class App(BaseHTTPRequestHandler):
         rows = []
         con = db()
         categories = get_all_categories(active_only=False)
-        product_rows = con.execute("SELECT category FROM products").fetchall()
+        product_rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
         for c in categories:
             status = "aktiv" if c["active"] else "deaktiviert"
             product_count = sum(1 for row in product_rows if product_has_category(row["category"], c["name"]))
@@ -2645,10 +2649,17 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         pid = self.form_value(form, "id")
         con = db()
-        con.execute("DELETE FROM products WHERE id=?", (pid,))
+        con.execute(
+            "UPDATE products SET active=0, visible_to=?, deleted_at=? WHERE id=? AND deleted_at IS NULL",
+            (NO_LOCATIONS_KEY, berlin_now().isoformat(timespec="seconds"), pid),
+        )
         con.commit()
+        changed = con.total_changes
         con.close()
-        self.redirect("/admin?msg=" + quote_plus("Produkt gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+        if changed:
+            self.redirect("/admin?msg=" + quote_plus("Produkt gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+        else:
+            self.redirect("/admin?error=" + quote_plus("Produkt wurde nicht gefunden oder war bereits gelöscht."))
 
     def handle_update_product(self):
         if not self.is_admin():
@@ -2706,9 +2717,12 @@ class App(BaseHTTPRequestHandler):
         con = db()
         try:
             if action == "delete":
-                con.execute(f"DELETE FROM products WHERE id IN ({placeholders})", product_ids)
+                con.execute(
+                    f"UPDATE products SET active=0, visible_to=?, deleted_at=? WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+                    [NO_LOCATIONS_KEY, berlin_now().isoformat(timespec="seconds"), *product_ids],
+                )
                 con.commit()
-                return self.redirect("/admin?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+                return self.redirect("/admin?msg=" + quote_plus(f"{con.total_changes} Produkt(e) gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
 
             updates = []
             params = []
@@ -2743,7 +2757,7 @@ class App(BaseHTTPRequestHandler):
                 return self.redirect("/admin?error=" + quote_plus("Bitte mindestens eine Änderung für die ausgewählten Produkte auswählen."))
 
             params.extend(product_ids)
-            con.execute(f"UPDATE products SET {', '.join(updates)} WHERE id IN ({placeholders})", params)
+            con.execute(f"UPDATE products SET {', '.join(updates)} WHERE id IN ({placeholders}) AND deleted_at IS NULL", params)
             con.commit()
             return self.redirect("/admin?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) aktualisiert."))
         finally:
@@ -2794,7 +2808,7 @@ class App(BaseHTTPRequestHandler):
         name = self.form_value(form, "name").strip()
         if name and name != "Allgemein":
             con = db()
-            product_rows = con.execute("SELECT category FROM products").fetchall()
+            product_rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
             product_count = sum(1 for row in product_rows if product_has_category(row["category"], name))
             if product_count:
                 con.close()
@@ -2975,7 +2989,7 @@ class App(BaseHTTPRequestHandler):
             if key.startswith("category_") and value
         }
         con = db()
-        rows = con.execute("SELECT id, category, visible_to FROM products").fetchall()
+        rows = con.execute("SELECT id, category, visible_to FROM products WHERE deleted_at IS NULL").fetchall()
         updated = 0
         for row in rows:
             visible = product_visible_location_keys(row["visible_to"])
