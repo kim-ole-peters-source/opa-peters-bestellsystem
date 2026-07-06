@@ -317,6 +317,54 @@ def add_column_if_missing(con, table_name, column_name, sql_definition):
         con.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}")
 
 
+def category_key(name):
+    return normalize_text_key(name or "Allgemein") or "allgemein"
+
+
+def category_exists_in_products(con, category_name):
+    rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
+    return any(product_has_category(row["category"], category_name) for row in rows)
+
+
+def sync_category_metadata(con):
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = con.execute("SELECT id, name, category_key, deleted_at FROM categories ORDER BY id").fetchall()
+    seen_live = {}
+    for row in rows:
+        key = category_key(row["name"])
+        if row["category_key"] != key:
+            con.execute("UPDATE categories SET category_key=? WHERE id=?", (key, row["id"]))
+        if row["deleted_at"]:
+            continue
+        if key in seen_live:
+            con.execute("UPDATE categories SET active=0, deleted_at=? WHERE id=?", (now, row["id"]))
+            continue
+        seen_live[key] = row["name"]
+
+
+def ensure_category_in_connection(con, name, active=1):
+    clean_name = (name or "Allgemein").strip() or "Allgemein"
+    key = category_key(clean_name)
+    now = datetime.now().isoformat(timespec="seconds")
+    row = con.execute("SELECT * FROM categories WHERE category_key=? ORDER BY deleted_at IS NULL DESC, id LIMIT 1", (key,)).fetchone()
+    if row:
+        con.execute(
+            "UPDATE categories SET name=?, active=?, deleted_at=NULL WHERE id=?",
+            (row["name"] or clean_name, active, row["id"]),
+        )
+        return row["name"] or clean_name
+    con.execute(
+        "INSERT INTO categories (name, category_key, active, created_at, deleted_at) VALUES (?, ?, ?, ?, NULL)",
+        (clean_name, key, active, now),
+    )
+    return clean_name
+
+
+def category_was_deleted(con, name):
+    row = con.execute("SELECT deleted_at FROM categories WHERE category_key=? ORDER BY id LIMIT 1", (category_key(name),)).fetchone()
+    return bool(row and row["deleted_at"])
+
+
 def init_db():
     con = db()
     cur = con.cursor()
@@ -340,7 +388,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+            category_key TEXT,
             active INTEGER NOT NULL DEFAULT 1,
+            deleted_at TEXT,
             created_at TEXT NOT NULL
         )
     """
@@ -423,6 +473,8 @@ def init_db():
     add_column_if_missing(con, "products", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "products", "visible_to", f"TEXT NOT NULL DEFAULT '{DEFAULT_VISIBLE_TO}'")
     add_column_if_missing(con, "products", "deleted_at", "TEXT")
+    add_column_if_missing(con, "categories", "category_key", "TEXT")
+    add_column_if_missing(con, "categories", "deleted_at", "TEXT")
     add_column_if_missing(con, "orders", "buyer_group", "TEXT")
     add_column_if_missing(con, "orders", "order_image_filename", "TEXT")
     add_column_if_missing(con, "orders", "pdf_data", "BLOB")
@@ -433,19 +485,22 @@ def init_db():
     cur.execute("UPDATE products SET category='Allgemein' WHERE category IS NULL OR TRIM(category)=''")
     cur.execute("UPDATE products SET visible_to=? WHERE visible_to IS NULL OR TRIM(visible_to)=''", (DEFAULT_VISIBLE_TO,))
     cur.execute("UPDATE order_items SET category='Allgemein' WHERE category IS NULL OR TRIM(category)=''")
+    sync_category_metadata(con)
 
     now = datetime.now().isoformat(timespec="seconds")
     for category_name in DEFAULT_CATEGORIES:
-        cur.execute(
-            "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
-            (category_name, now),
-        )
+        if category_key(category_name) == category_key("Allgemein") or not category_was_deleted(con, category_name):
+            ensure_category_in_connection(con, category_name, active=1)
     for row in cur.execute("SELECT DISTINCT category FROM products WHERE deleted_at IS NULL AND category IS NOT NULL AND TRIM(category) != ''").fetchall():
         for category_name in split_categories(row[0]):
-            cur.execute(
-                "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
-                (category_name, now),
-            )
+            if not category_was_deleted(con, category_name):
+                ensure_category_in_connection(con, category_name, active=1)
+    sync_category_metadata(con)
+    try:
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_live_key ON categories(category_key) WHERE deleted_at IS NULL")
+    except sqlite3.IntegrityError:
+        sync_category_metadata(con)
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_live_key ON categories(category_key) WHERE deleted_at IS NULL")
     con.commit()
     con.close()
 
@@ -672,11 +727,16 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     return rows
 
 
-def get_all_categories(active_only=True):
+def get_all_categories(active_only=True, include_deleted=False):
     con = db()
     q = "SELECT * FROM categories"
+    conditions = []
     if active_only:
-        q += " WHERE active=1"
+        conditions.append("active=1")
+    if not include_deleted:
+        conditions.append("deleted_at IS NULL")
+    if conditions:
+        q += " WHERE " + " AND ".join(conditions)
     q += " ORDER BY LOWER(name)"
     rows = con.execute(q).fetchall()
     con.close()
@@ -739,18 +799,9 @@ def form_categories(form, prefix, fallback=None):
 
 
 def ensure_category(name):
-    name = (name or "Allgemein").strip() or "Allgemein"
     con = db()
-    existing = con.execute("SELECT name FROM categories").fetchall()
-    for row in existing:
-        if normalize_text_key(row["name"]) == normalize_text_key(name):
-            name = row["name"]
-            break
-    con.execute(
-        "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
-        (name, datetime.now().isoformat(timespec="seconds")),
-    )
-    con.execute("UPDATE categories SET active=1 WHERE name=?", (name,))
+    name = ensure_category_in_connection(con, name, active=1)
+    sync_category_metadata(con)
     con.commit()
     con.close()
     return name
@@ -2304,7 +2355,7 @@ class App(BaseHTTPRequestHandler):
         for c in categories:
             status = "aktiv" if c["active"] else "deaktiviert"
             product_count = sum(1 for row in product_rows if product_has_category(row["category"], c["name"]))
-            action = "—" if c["name"] == "Allgemein" else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button class='danger'>Löschen</button></form>"
+            action = "—" if category_key(c["name"]) == category_key("Allgemein") else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button class='danger'>Löschen</button></form>"
             rows.append(
                 f"<tr><td><span class='pill'>{esc(c['name'])}</span></td><td>{product_count}</td><td>{status}</td><td>{action}</td></tr>"
             )
@@ -2825,16 +2876,22 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/login")
         form = self.read_form()
         name = self.form_value(form, "name").strip()
-        if name and name != "Allgemein":
+        if name and category_key(name) != category_key("Allgemein"):
             con = db()
             product_rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
             product_count = sum(1 for row in product_rows if product_has_category(row["category"], name))
             if product_count:
                 con.close()
                 return self.redirect("/admin/categories?error=" + quote_plus("Kategorie kann nicht gelöscht werden, solange noch Produkte zugeordnet sind. Bitte Produkte vorher bearbeiten."))
-            con.execute("DELETE FROM categories WHERE name=?", (name,))
+            cur = con.execute(
+                "UPDATE categories SET active=0, deleted_at=? WHERE category_key=? AND deleted_at IS NULL",
+                (berlin_now().isoformat(timespec="seconds"), category_key(name)),
+            )
             con.commit()
+            deleted = cur.rowcount
             con.close()
+            if not deleted:
+                return self.redirect("/admin/categories?error=" + quote_plus("Kategorie wurde nicht gefunden oder war bereits gelöscht."))
         self.redirect("/admin/categories?msg=" + quote_plus("Kategorie gelöscht."))
 
     def handle_import_products(self):
@@ -2868,25 +2925,10 @@ class App(BaseHTTPRequestHandler):
                 (name, package_size, category_text(row_categories), source, ALL_LOCATIONS_KEY, None, datetime.now().isoformat(timespec="seconds"))
             )
         con = db()
-        now = datetime.now().isoformat(timespec="seconds")
-        existing_categories = {
-            normalize_text_key(row["name"]): row["name"]
-            for row in con.execute("SELECT name FROM categories").fetchall()
-        }
         category_map = {}
         for category in sorted(categories_to_ensure, key=lambda x: x.lower()):
-            norm = normalize_text_key(category)
-            if norm in existing_categories:
-                category_map[category] = existing_categories[norm]
-                con.execute("UPDATE categories SET active=1 WHERE name=?", (existing_categories[norm],))
-                continue
-            con.execute(
-                "INSERT OR IGNORE INTO categories (name, active, created_at) VALUES (?, 1, ?)",
-                (category, now),
-            )
-            con.execute("UPDATE categories SET active=1 WHERE name=?", (category,))
-            existing_categories[norm] = category
-            category_map[category] = category
+            category_map[category] = ensure_category_in_connection(con, category, active=1)
+        sync_category_metadata(con)
         for prepared in prepared_rows:
             prepared = list(prepared)
             prepared[2] = category_text([category_map.get(category, category) for category in split_categories(prepared[2])])
