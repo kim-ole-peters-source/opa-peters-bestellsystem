@@ -945,6 +945,42 @@ def get_orders_by_ids(order_ids):
     return rows
 
 
+def delete_orders_by_ids(order_ids):
+    order_ids = [str(order_id) for order_id in order_ids if str(order_id).isdigit()]
+    if not order_ids:
+        return 0
+    orders = get_orders_by_ids(order_ids)
+    if not orders:
+        return 0
+    placeholders = ",".join("?" for _ in order_ids)
+    con = db()
+    try:
+        con.execute(f"DELETE FROM order_items WHERE order_id IN ({placeholders})", order_ids)
+        con.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", order_ids)
+        pdf_names = [order["pdf_filename"] for order in orders if order["pdf_filename"]]
+        if pdf_names:
+            pdf_placeholders = ",".join("?" for _ in pdf_names)
+            con.execute(f"DELETE FROM pdf_files WHERE filename IN ({pdf_placeholders})", pdf_names)
+        con.commit()
+    finally:
+        con.close()
+
+    for order in orders:
+        for directory, filename in (
+            (ORDER_DIR, order["pdf_filename"]),
+            (ORDER_IMAGE_DIR, order["order_image_filename"]),
+        ):
+            if not filename:
+                continue
+            path = os.path.join(directory, os.path.basename(filename))
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    return len(orders)
+
+
 def today_iso():
     return berlin_now().date().isoformat()
 
@@ -1457,7 +1493,7 @@ def admin_menu():
         <a class="button" href="/admin/settings">Einstellungen</a>
         <a class="button" href="/admin/locations">Standorte</a>
         <a class="button" href="/admin/visibility">Sichtbarkeit</a>
-        <a class="button" href="/admin/logout">Admin Logout</a>
+        <a class="button logout-button" href="/admin/logout">Admin Logout</a>
     </section>
     """
 
@@ -2001,7 +2037,7 @@ class App(BaseHTTPRequestHandler):
                 f"<div class='table-actions'>"
                 f"<a class='button' href='/admin/edit-product?id={p['id']}'>Bearbeiten</a>"
                 f"<form method='post' action='/admin/delete-product' data-confirm='Produkt wirklich löschen? Diese Aktion entfernt es aus dem Bestellmenü.'>"
-                f"<input type='hidden' name='id' value='{p['id']}'><button>Löschen</button></form>"
+                f"<input type='hidden' name='id' value='{p['id']}'><button class='danger'>Löschen</button></form>"
                 f"</div>"
             )
             categories_label = category_text(product_categories(p))
@@ -2201,7 +2237,14 @@ class App(BaseHTTPRequestHandler):
                             <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
                             <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
                         </div>
-                        <div class="table-actions"><a class="button" href="/orders/{esc(order['pdf_filename'])}" target="_blank" rel="noopener">PDF öffnen</a>{image_link}</div>
+                        <div class="table-actions">
+                            <a class="button" href="/orders/{esc(order['pdf_filename'])}" target="_blank" rel="noopener">PDF öffnen</a>
+                            {image_link}
+                            <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
+                                <input type="hidden" name="order_{order['id']}" value="1">
+                                <button type="submit" class="danger">Löschen</button>
+                            </form>
+                        </div>
                     </div>
                     <p><strong>Gesamtübersicht:</strong> {position_count} Position(en), {quantity_sum} Gebinde insgesamt.</p>
                     {f'<p><strong>Bemerkung:</strong> {esc(order["note"])}</p>' if order["note"] else ''}
@@ -2217,11 +2260,12 @@ class App(BaseHTTPRequestHandler):
         <section class="box">
             <h2>Getätigte Bestellungen</h2>
             <p class="muted">Hier siehst du Datum, Standort, Produkte, Mengen und die Gesamtübersicht jeder Bestellung.</p>
-            <form id="combineOrdersForm" method="post" action="/admin/orders/combined-pdf" class="bulk-editor order-combine-bar" data-confirm="Ausgewählte Bestellungen zu einer Gesamtbestellung zusammenfassen?">
+            <form id="combineOrdersForm" method="post" action="/admin/orders/combined-pdf" class="bulk-editor order-combine-bar" data-confirm="Aktion für die ausgewählten Bestellungen ausführen?">
                 <div class="bulk-editor-actions">
                     <label class="check"><input id="selectAllOrders" type="checkbox"> Alle angezeigten Bestellungen auswählen</label>
                     <span class="bulk-selected-count" id="ordersSelectedCount">0 Bestellungen ausgewählt</span>
                     <button class="primary" type="submit">Gesamtbestellung als PDF erstellen</button>
+                    <button type="submit" class="danger" formaction="/admin/orders/delete">Ausgewählte löschen</button>
                 </div>
             </form>
         </section>
@@ -2242,7 +2286,7 @@ class App(BaseHTTPRequestHandler):
         for c in categories:
             status = "aktiv" if c["active"] else "deaktiviert"
             product_count = sum(1 for row in product_rows if product_has_category(row["category"], c["name"]))
-            action = "—" if c["name"] == "Allgemein" else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button>Löschen</button></form>"
+            action = "—" if c["name"] == "Allgemein" else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button class='danger'>Löschen</button></form>"
             rows.append(
                 f"<tr><td><span class='pill'>{esc(c['name'])}</span></td><td>{product_count}</td><td>{status}</td><td>{action}</td></tr>"
             )
@@ -2502,6 +2546,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bulk_products()
             if path == "/admin/orders/combined-pdf":
                 return self.handle_combined_order_pdf()
+            if path == "/admin/orders/delete":
+                return self.handle_delete_orders()
             if path == "/admin/delete-product":
                 return self.handle_delete_product()
             if path == "/admin/add-category":
@@ -2719,6 +2765,18 @@ class App(BaseHTTPRequestHandler):
             print(f"Gesamtbestellung-PDF fehlgeschlagen: {exc}")
             return self.redirect("/admin/orders?error=" + quote_plus("Die Gesamtbestellung konnte nicht als PDF erstellt werden."))
         return self.redirect("/admin/orders?msg=" + quote_plus(f"Gesamtbestellung aus {len(orders)} Bestellung(en) wurde erstellt.") + "&pdf=" + quote_plus(pdf_filename))
+
+    def handle_delete_orders(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
+        if not order_ids:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
+        deleted_count = delete_orders_by_ids(order_ids)
+        if not deleted_count:
+            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
+        return self.redirect("/admin/orders?msg=" + quote_plus(f"{deleted_count} Bestellung(en) gelöscht."))
 
     def handle_add_category(self):
         if not self.is_admin():
