@@ -133,6 +133,9 @@
   var cartItems = document.getElementById('cartItems');
   var cartCancel = document.getElementById('cartCancel');
   var cartSubmit = document.getElementById('cartSubmit');
+  var locationInput = orderForm ? orderForm.querySelector('input[name="location"]') : null;
+  var cartStorageKey = locationInput ? 'opaPetersCart:' + locationInput.value : 'opaPetersCart';
+  var restoringCart = false;
 
   function clampQty(value) {
     var number = parseInt(value || '0', 10);
@@ -144,6 +147,42 @@
     return orderForm ? orderForm.querySelector('input[type="hidden"][name="qty_' + productId + '"]') : null;
   }
 
+  function readStoredCart() {
+    try {
+      return JSON.parse(window.localStorage.getItem(cartStorageKey) || '{}') || {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function writeStoredCart() {
+    if (!orderForm || restoringCart) return;
+    var data = {};
+    orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]').forEach(function (input) {
+      var productId = input.getAttribute('data-product-id');
+      var qty = clampQty(input.value);
+      if (productId && qty > 0) data[productId] = qty;
+    });
+    try {
+      if (Object.keys(data).length) {
+        window.localStorage.setItem(cartStorageKey, JSON.stringify(data));
+      } else {
+        window.localStorage.removeItem(cartStorageKey);
+      }
+    } catch (error) {}
+  }
+
+  function restoreStoredCart() {
+    if (!orderForm) return;
+    restoringCart = true;
+    var data = readStoredCart();
+    Object.keys(data).forEach(function (productId) {
+      setProductQty(productId, data[productId]);
+    });
+    restoringCart = false;
+    updateOrderCount();
+  }
+
   function setProductQty(productId, value) {
     if (!orderForm) return;
     var qty = clampQty(value);
@@ -153,6 +192,7 @@
       input.value = String(qty);
     });
     updateOrderCount();
+    writeStoredCart();
   }
 
   function selectedItems() {
@@ -234,6 +274,7 @@
           renderCart();
           return;
         }
+        try { window.localStorage.removeItem(cartStorageKey); } catch (error) {}
         if (orderForm.requestSubmit) {
           orderForm.requestSubmit();
         } else {
@@ -241,6 +282,7 @@
         }
       });
     }
+    restoreStoredCart();
     updateOrderCount();
   }
 

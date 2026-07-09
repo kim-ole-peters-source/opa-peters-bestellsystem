@@ -117,6 +117,7 @@ DEFAULT_SETTINGS = {
     "time_export_email": "info@opapeters",
     "last_auto_time_export_month": "",
     "last_auto_time_export_status": "",
+    "time_employees": [],
 }
 
 APP_NAME = "Opa Peters Bestellung"
@@ -216,6 +217,37 @@ def load_settings():
 def save_settings(data):
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def normalize_time_employees(raw_employees):
+    normalized = []
+    seen = set()
+    for item in raw_employees or []:
+        name = str(item.get("name") if isinstance(item, dict) else item or "").strip()
+        if not name:
+            continue
+        key = normalize_text_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        active = bool(item.get("active", True)) if isinstance(item, dict) else True
+        normalized.append({"name": name, "active": active})
+    return normalized
+
+
+def get_time_employees(active_only=True):
+    employees = normalize_time_employees(load_settings().get("time_employees", []))
+    return [employee for employee in employees if employee.get("active") or not active_only]
+
+
+def get_time_employee_names(active_only=True):
+    return [employee["name"] for employee in get_time_employees(active_only=active_only)]
+
+
+def save_time_employees(employees):
+    settings = load_settings()
+    settings["time_employees"] = normalize_time_employees(employees)
+    save_settings(settings)
 
 
 def make_location_id(name):
@@ -1538,19 +1570,29 @@ def page(title, body, admin=False, buyer_key=None):
 
 
 def admin_menu():
-    return """
-    <section class="admin-menu">
+    links = """
         <a class="button" href="/admin">Produkte</a>
         <a class="button" href="/admin/orders">Bestellungen</a>
         <a class="button" href="/admin/time">Zeiterfassung</a>
+        <a class="button" href="/admin/employees">Personen</a>
         <a class="button" href="/admin/categories">Kategorien</a>
         <a class="button" href="/admin/import">Import</a>
         <a class="button" href="/admin/settings">Einstellungen</a>
         <a class="button" href="/admin/locations">Standorte</a>
         <a class="button" href="/admin/visibility">Sichtbarkeit</a>
         <a class="button logout-button" href="/admin/logout">Admin Logout</a>
-    </section>
     """
+    return """
+    <details class="admin-mobile-menu">
+        <summary>Admin-Menü</summary>
+        <div class="admin-mobile-links">
+            {links}
+        </div>
+    </details>
+    <section class="admin-menu">
+        {links}
+    </section>
+    """.format(links=links)
 
 
 class App(BaseHTTPRequestHandler):
@@ -1686,6 +1728,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_admin_orders(query=parse_qs(parsed.query))
         if path == "/admin/time":
             return self.show_admin_time(query=parse_qs(parsed.query))
+        if path == "/admin/employees":
+            return self.show_employees(query=parse_qs(parsed.query))
         if path == "/admin/time/export":
             return self.serve_time_export(query=parse_qs(parsed.query))
         if path == "/admin/categories":
@@ -1817,7 +1861,14 @@ class App(BaseHTTPRequestHandler):
         msg = (query.get("msg", [""])[0] or "").strip()
         limit_minutes = location_time_limit_minutes(location)
         end_options = '<option value="">Bitte auswählen</option>' + option_html(recent_end_time_options(limit_minutes))
-        contact_name = (location.get("contact_name") or "").strip()
+        employee_names = get_time_employee_names(True)
+        employee_options = '<option value="">Bitte auswählen</option>' + option_html(employee_names)
+        employee_field = (
+            f'<label>Mitarbeiter *<select name="employee_name" required>{employee_options}</select></label>'
+            if employee_names
+            else '<div class="error full">Es sind noch keine Personen für die Zeiterfassung angelegt. Bitte im Adminbereich unter Personen mindestens eine Person anlegen.</div>'
+        )
+        submit_disabled = "" if employee_names else " disabled"
         order_link = '<a class="button" href="/">Zum Bestellsystem</a>' if location_can_order(location) else ""
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
@@ -1831,12 +1882,12 @@ class App(BaseHTTPRequestHandler):
                 {order_link}
             </div>
             <form method="post" action="/time" class="two time-form">
-                <label>Name des Mitarbeiters *<input name="employee_name" required value="{esc(contact_name)}" placeholder="Name eingeben"></label>
+                {employee_field}
                 <label>Einsatzort / Filiale *<input name="work_location" required value="{esc(location['name'])}" placeholder="z. B. Schwarzenbek"></label>
                 <label>Anfangszeit *<input name="start_time" type="time" required></label>
                 <label>Endzeit *<select name="end_time" required>{end_options}</select></label>
                 <label class="full">Besondere Vorkommnisse<textarea name="note" rows="4" placeholder="Optional"></textarea></label>
-                <button class="primary" type="submit">Zeiterfassung speichern</button>
+                <button class="primary" type="submit"{submit_disabled}>Zeiterfassung speichern</button>
             </form>
             <p class="muted">Endzeiten zeigen nur das aktuelle 2-Stunden-Fenster und bleiben zusätzlich durch Uhrzeit und maximale Standort-Endzeit begrenzt.</p>
         </section>
@@ -1870,8 +1921,13 @@ class App(BaseHTTPRequestHandler):
             for work_location, minutes in sorted(locations.items(), key=lambda item: item[0].lower()):
                 matrix_rows.append(f"<tr><td>{esc(employee)}</td><td>{esc(work_location)}</td><td>{esc(format_duration(minutes))}</td></tr>")
         entry_cards = []
+        employee_names_all = get_time_employee_names(active_only=False)
         for entry in entries:
             end_options = option_html(time_options(), entry["end_time"])
+            entry_employee_names = list(employee_names_all)
+            if entry["employee_name"] and entry["employee_name"] not in entry_employee_names:
+                entry_employee_names.append(entry["employee_name"])
+            employee_options = option_html(entry_employee_names, entry["employee_name"])
             status_text = "bearbeitet" if entry["edited"] else "original"
             if entry["updated_at"]:
                 status_text += f" · {entry['updated_at']}"
@@ -1893,7 +1949,7 @@ class App(BaseHTTPRequestHandler):
                     <form method="post" action="/admin/time/update" class="time-entry-form">
                         <input type="hidden" name="id" value="{entry['id']}">
                         <label>Datum<input name="work_date" type="date" value="{esc(entry['work_date'])}" required></label>
-                        <label>Mitarbeiter<input name="employee_name" value="{esc(entry['employee_name'])}" required></label>
+                        <label>Mitarbeiter<select name="employee_name" required>{employee_options}</select></label>
                         <label>Einsatzort<input name="work_location" value="{esc(entry['work_location'])}" required></label>
                         <label>Anfang<input name="start_time" type="time" value="{esc(entry['start_time'])}" required></label>
                         <label>Ende<select name="end_time">{end_options}</select></label>
@@ -1962,6 +2018,56 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Zeiterfassung Admin", body, admin=True, buyer_key=self.current_buyer_key()))
 
+    def show_employees(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        employees = get_time_employees(active_only=False)
+        rows = []
+        for index, employee in enumerate(employees):
+            checked = "checked" if employee.get("active", True) else ""
+            status = "aktiv" if employee.get("active", True) else "deaktiviert"
+            rows.append(
+                f"""
+                <tr>
+                    <td><input form="employeesForm" type="hidden" name="employee_original_{index}" value="{esc(employee['name'])}"><input form="employeesForm" name="employee_name_{index}" value="{esc(employee['name'])}" required></td>
+                    <td><label class="check"><input form="employeesForm" type="checkbox" name="employee_active_{index}" value="1" {checked}> {status}</label></td>
+                    <td><label class="check danger-check"><input form="employeesForm" type="checkbox" name="employee_remove_{index}" value="1"> Entfernen</label></td>
+                </tr>
+                """
+            )
+        body = f"""
+        {admin_menu()}
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        <section class="box">
+            <div class="section-head">
+                <div>
+                    <h2>Personen für Zeiterfassung</h2>
+                    <p class="muted">Diese Personen erscheinen im Zeiterfassungsformular als Auswahl. Ein freies Namensfeld gibt es dort nicht mehr.</p>
+                </div>
+                <a class="button" href="/admin/time">Zur Zeiterfassung</a>
+            </div>
+            <form id="employeesForm" method="post" action="/admin/employees" data-confirm="Personenliste speichern?">
+                <input type="hidden" name="employee_count" value="{len(employees)}">
+                <div class="table-wrap">
+                    <table>
+                        <tr><th>Name</th><th>Status</th><th>Entfernen</th></tr>
+                        {''.join(rows) if rows else '<tr><td colspan="3">Noch keine Personen angelegt.</td></tr>'}
+                    </table>
+                </div>
+                <fieldset class="visibility-box">
+                    <legend>Neue Person hinzufügen</legend>
+                    <label>Name<input name="new_employee_name" placeholder="z. B. Lisa"></label>
+                </fieldset>
+                <button class="primary" type="submit">Personen speichern</button>
+            </form>
+        </section>
+        """
+        self.send_html(page("Personen", body, admin=True, buyer_key=self.current_buyer_key()))
+
     def show_buyer_login(self, error=""):
         options = "".join(f'<option value="{esc(location["id"])}">{esc(location["name"])} · {esc(role_label(location.get("role")))}</option>' for location in get_locations())
         body = f"""
@@ -1989,6 +2095,7 @@ class App(BaseHTTPRequestHandler):
         sort = (query.get("sort", ["name_az"])[0] or "name_az").strip()
         category_filter = (query.get("category", [""])[0] or "").strip()
         search_text = (query.get("q", [""])[0] or "").strip()
+        all_order_products = get_products(True, buyer_key=buyer_key, sort=sort)
         products = get_products(True, buyer_key=buyer_key, sort=sort, category_filter=category_filter)
         products = filter_products_by_search(products, search_text, include_source=False)
         categories = get_categories_for_buyer(buyer_key)
@@ -2028,7 +2135,7 @@ class App(BaseHTTPRequestHandler):
             </article>"""
         hidden_qty_inputs = "".join(
             f'<input type="hidden" name="qty_{p["id"]}" id="qty_{p["id"]}" value="0" data-product-id="{p["id"]}" data-product-name="{esc(p["name"])}" data-product-package="{esc(p["package_size"])}">'
-            for p in products
+            for p in all_order_products
         )
         category_panels = []
         all_cards = "".join(product_card(p) for p in products)
@@ -2642,6 +2749,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_import_products()
             if path == "/admin/settings":
                 return self.handle_settings()
+            if path == "/admin/employees":
+                return self.handle_employees()
             if path == "/admin/locations":
                 return self.handle_locations()
             if path == "/admin/visibility":
@@ -2983,6 +3092,33 @@ class App(BaseHTTPRequestHandler):
         save_settings(settings)
         self.redirect("/admin/settings?msg=" + quote_plus("Einstellungen gespeichert."))
 
+    def handle_employees(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        try:
+            count = int(self.form_value(form, "employee_count", "0") or "0")
+        except ValueError:
+            count = 0
+        employees = []
+        for index in range(count):
+            if self.form_value(form, f"employee_remove_{index}"):
+                continue
+            name = self.form_value(form, f"employee_name_{index}").strip()
+            if not name:
+                continue
+            employees.append({
+                "name": name,
+                "active": bool(self.form_value(form, f"employee_active_{index}")),
+            })
+        new_name = self.form_value(form, "new_employee_name").strip()
+        if new_name:
+            employees.append({"name": new_name, "active": True})
+        employees = normalize_time_employees(employees)
+        save_time_employees(employees)
+        active_count = sum(1 for employee in employees if employee.get("active"))
+        self.redirect("/admin/employees?msg=" + quote_plus(f"Personen gespeichert. {active_count} aktive Person(en) verfügbar."))
+
 
     def handle_locations(self):
         if not self.is_admin():
@@ -3094,6 +3230,11 @@ class App(BaseHTTPRequestHandler):
         start_time = self.form_value(form, "start_time").strip()
         end_time = self.form_value(form, "end_time").strip()
         note = self.form_value(form, "note").strip()
+        allowed_employees = {normalize_text_key(name) for name in get_time_employee_names(True)}
+        if not allowed_employees:
+            return self.show_time_form("Bitte zuerst im Adminbereich Personen für die Zeiterfassung anlegen.")
+        if normalize_text_key(employee_name) not in allowed_employees:
+            return self.show_time_form("Bitte eine angelegte Person aus der Liste auswählen.")
         duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=False)
         if error:
             return self.show_time_form(error)
