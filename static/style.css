@@ -590,20 +590,22 @@ tr:hover td { background: var(--primary-soft); }
 /* ---------- 8. Overlays ---------- */
 .pinpad-overlay {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
   z-index: 90;
   width: 100vw;
   height: 100vh;
-  height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: calc(18px + var(--safe-top)) 18px calc(18px + var(--safe-bottom));
   background: rgba(15, 23, 42, .55);
   overflow: auto;
+  transform: translateZ(0);
+  -webkit-overflow-scrolling: touch;
 }
 .pinpad-overlay[hidden] { display: none; }
-.pinpad-card { width: min(390px, calc(100vw - 36px)); max-height: calc(100dvh - 36px - var(--safe-top) - var(--safe-bottom)); overflow: auto; margin: auto; padding: 22px; border-radius: var(--radius-xl); background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.pinpad-card { width: min(390px, calc(100% - 36px)); max-height: calc(100% - 36px - var(--safe-top) - var(--safe-bottom)); overflow: auto; margin: auto; padding: 22px; border-radius: var(--radius-xl); background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
 .pinpad-display {
   display: grid; place-items: center; min-height: 54px; margin: 10px 0 14px; border-radius: var(--radius-lg);
   background: var(--surface-2); border: 1px solid var(--line-strong); font-size: 24px; font-weight: 800; letter-spacing: 4px;

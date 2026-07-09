@@ -80,8 +80,24 @@
   }
 
   var activePinInput = null;
+  var pinpadOpenedAt = 0;
   var pinpad = document.querySelector('.pinpad-overlay') || createPinPad();
   var pinDisplay = pinpad.querySelector('.pinpad-display');
+
+  function positionPinPad() {
+    var viewport = window.visualViewport;
+    if (viewport) {
+      pinpad.style.left = viewport.offsetLeft + 'px';
+      pinpad.style.top = viewport.offsetTop + 'px';
+      pinpad.style.width = viewport.width + 'px';
+      pinpad.style.height = viewport.height + 'px';
+    } else {
+      pinpad.style.left = '0px';
+      pinpad.style.top = '0px';
+      pinpad.style.width = '100vw';
+      pinpad.style.height = '100vh';
+    }
+  }
 
   function updatePinDisplay() {
     if (!activePinInput || !pinDisplay) return;
@@ -90,18 +106,47 @@
 
   function openPinPad(input) {
     activePinInput = input;
+    input.blur();
+    positionPinPad();
     updatePinDisplay();
+    document.documentElement.classList.add('modal-open');
     pinpad.hidden = false;
+    pinpadOpenedAt = Date.now();
+  }
+
+  function closePinPad() {
+    pinpad.hidden = true;
+    document.documentElement.classList.remove('modal-open');
+    if (activePinInput) activePinInput.blur();
   }
 
   document.querySelectorAll('.numeric-pin').forEach(function (input) {
     input.readOnly = true;
-    input.addEventListener('click', function () { openPinPad(input); });
-    input.addEventListener('touchend', function (event) {
+    function preventNativeFocus(event) {
+      event.preventDefault();
+    }
+    function interceptPinOpen(event) {
       event.preventDefault();
       openPinPad(input);
-    }, { passive: false });
+    }
+    input.addEventListener('pointerdown', preventNativeFocus);
+    input.addEventListener('mousedown', preventNativeFocus);
+    input.addEventListener('touchstart', preventNativeFocus, { passive: false });
+    input.addEventListener('touchend', interceptPinOpen, { passive: false });
+    input.addEventListener('click', interceptPinOpen);
+    input.addEventListener('focus', function () {
+      openPinPad(input);
+    });
   });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', function () {
+      if (!pinpad.hidden) positionPinPad();
+    });
+    window.visualViewport.addEventListener('scroll', function () {
+      if (!pinpad.hidden) positionPinPad();
+    });
+  }
 
   pinpad.addEventListener('click', function (event) {
     var digitButton = event.target.closest('[data-pin-digit]');
@@ -119,11 +164,10 @@
         updatePinDisplay();
       }
       if (action === 'done') {
-        pinpad.hidden = true;
-        activePinInput.blur();
+        closePinPad();
       }
     }
-    if (event.target === pinpad) pinpad.hidden = true;
+    if (event.target === pinpad && Date.now() - pinpadOpenedAt > 250) closePinPad();
   });
 
   var orderForm = document.querySelector('form[action="/order"]');

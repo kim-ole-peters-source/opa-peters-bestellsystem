@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v13-responsive';
+const CACHE_NAME = 'opa-peters-bestellung-v14-ipad-pin';
 const STATIC_ASSETS = [
   '/',
   '/login',

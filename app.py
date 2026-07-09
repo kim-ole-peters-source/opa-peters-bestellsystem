@@ -123,6 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
+ASSET_VERSION = "2026-07-09-ipad-pin-v15"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
@@ -1550,7 +1551,7 @@ def page(title, body, admin=False, buyer_key=None):
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/static/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v={ASSET_VERSION}">
 </head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/brand-logo.png" alt="Opa Peters Logo"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
@@ -1564,7 +1565,7 @@ def page(title, body, admin=False, buyer_key=None):
     <p class="muted">Danach erscheint das Bestellsystem wie eine App auf dem Home-Bildschirm.</p>
   </div>
 </div>
-<script src="/static/app.js" defer></script>
+<script src="/static/app.js?v={ASSET_VERSION}" defer></script>
 </body>
 </html>""".encode("utf-8")
 
