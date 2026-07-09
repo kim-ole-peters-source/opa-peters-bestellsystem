@@ -257,16 +257,24 @@
         renderCart();
       }
     });
-    if (reviewOrder && cartReview) {
-      reviewOrder.addEventListener('click', function () {
+    function openCartReview(event) {
+      if (event) event.preventDefault();
+      if (!cartReview) return;
         renderCart();
         cartReview.hidden = false;
-      });
+      document.documentElement.classList.add('modal-open');
+    }
+    function closeCartReview() {
+      if (!cartReview) return;
+      cartReview.hidden = true;
+      document.documentElement.classList.remove('modal-open');
+    }
+    if (reviewOrder && cartReview) {
+      reviewOrder.addEventListener('click', openCartReview);
+      reviewOrder.addEventListener('touchend', openCartReview, { passive: false });
     }
     if (cartCancel && cartReview) {
-      cartCancel.addEventListener('click', function () {
-        cartReview.hidden = true;
-      });
+      cartCancel.addEventListener('click', closeCartReview);
     }
     if (cartSubmit) {
       cartSubmit.addEventListener('click', function () {
@@ -274,6 +282,7 @@
           renderCart();
           return;
         }
+        document.documentElement.classList.remove('modal-open');
         try { window.localStorage.removeItem(cartStorageKey); } catch (error) {}
         if (orderForm.requestSubmit) {
           orderForm.requestSubmit();
