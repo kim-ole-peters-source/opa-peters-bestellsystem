@@ -1,4 +1,70 @@
 (function () {
+  if (window.Element && !Element.prototype.matches) {
+    Element.prototype.matches = Element.prototype.msMatchesSelector || Element.prototype.webkitMatchesSelector;
+  }
+  if (window.Element && !Element.prototype.closest) {
+    Element.prototype.closest = function (selector) {
+      var node = this;
+      while (node && node.nodeType === 1) {
+        if (node.matches && node.matches(selector)) return node;
+        node = node.parentElement || node.parentNode;
+      }
+      return null;
+    };
+  }
+  if (window.NodeList && !NodeList.prototype.forEach) {
+    NodeList.prototype.forEach = Array.prototype.forEach;
+  }
+
+  var nonPassiveEvent = false;
+  try {
+    var passiveTest = Object.defineProperty({}, 'passive', {
+      get: function () {
+        nonPassiveEvent = { passive: false };
+        return false;
+      }
+    });
+    window.addEventListener('testPassive', null, passiveTest);
+    window.removeEventListener('testPassive', null, passiveTest);
+  } catch (error) {
+    nonPassiveEvent = false;
+  }
+
+  function toArray(list) {
+    return Array.prototype.slice.call(list || []);
+  }
+
+  function triggerInputEvent(input) {
+    if (!input) return;
+    var event;
+    if (typeof Event === 'function') {
+      event = new Event('input', { bubbles: true });
+    } else {
+      event = document.createEvent('Event');
+      event.initEvent('input', true, true);
+    }
+    input.dispatchEvent(event);
+  }
+
+  function repeatText(text, count) {
+    var result = '';
+    for (var index = 0; index < count; index += 1) result += text;
+    return result;
+  }
+
+  function addLegacyTapListener(element, handler) {
+    if (!element) return;
+    var lastTouch = 0;
+    element.addEventListener('touchend', function (event) {
+      lastTouch = Date.now();
+      handler(event);
+    }, nonPassiveEvent);
+    element.addEventListener('click', function (event) {
+      if (Date.now() - lastTouch < 500) return;
+      handler(event);
+    });
+  }
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('/service-worker.js').catch(function () {});
@@ -10,7 +76,7 @@
   var iosHelp = document.getElementById('iosInstallHelp');
   var iosClose = document.querySelector('.install-help-close');
   var isAppleMobile = /iphone|ipad|ipod/i.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  var isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  var isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
   if (button && isAppleMobile && !isStandalone) {
     button.hidden = false;
   }
@@ -26,7 +92,10 @@
         return;
       }
       deferredPrompt.prompt();
-      deferredPrompt.userChoice.finally(function () {
+      deferredPrompt.userChoice.then(function () {
+        deferredPrompt = null;
+        button.hidden = true;
+      }).catch(function () {
         deferredPrompt = null;
         button.hidden = true;
       });
@@ -101,7 +170,7 @@
 
   function updatePinDisplay() {
     if (!activePinInput || !pinDisplay) return;
-    pinDisplay.textContent = activePinInput.value ? '•'.repeat(activePinInput.value.length) : 'PIN';
+    pinDisplay.textContent = activePinInput.value ? repeatText('•', activePinInput.value.length) : 'PIN';
   }
 
   function openPinPad(input) {
@@ -131,8 +200,8 @@
     }
     input.addEventListener('pointerdown', preventNativeFocus);
     input.addEventListener('mousedown', preventNativeFocus);
-    input.addEventListener('touchstart', preventNativeFocus, { passive: false });
-    input.addEventListener('touchend', interceptPinOpen, { passive: false });
+    input.addEventListener('touchstart', preventNativeFocus, nonPassiveEvent);
+    input.addEventListener('touchend', interceptPinOpen, nonPassiveEvent);
     input.addEventListener('click', interceptPinOpen);
     input.addEventListener('focus', function () {
       openPinPad(input);
@@ -153,14 +222,14 @@
     var actionButton = event.target.closest('[data-pin-action]');
     if (digitButton && activePinInput) {
       activePinInput.value += digitButton.getAttribute('data-pin-digit');
-      activePinInput.dispatchEvent(new Event('input', { bubbles: true }));
+      triggerInputEvent(activePinInput);
       updatePinDisplay();
     }
     if (actionButton && activePinInput) {
       var action = actionButton.getAttribute('data-pin-action');
       if (action === 'delete') {
         activePinInput.value = activePinInput.value.slice(0, -1);
-        activePinInput.dispatchEvent(new Event('input', { bubbles: true }));
+        triggerInputEvent(activePinInput);
         updatePinDisplay();
       }
       if (action === 'done') {
@@ -179,11 +248,12 @@
   var cartSubmit = document.getElementById('cartSubmit');
   var locationInput = orderForm ? orderForm.querySelector('input[name="location"]') : null;
   var cartStorageKey = locationInput ? 'opaPetersCart:' + locationInput.value : 'opaPetersCart';
+  var cartStorageBackupKey = locationInput ? 'opaPetersCartBackup:' + locationInput.value : 'opaPetersCartBackup';
   var restoringCart = false;
 
   function clampQty(value) {
     var number = parseInt(value || '0', 10);
-    if (Number.isNaN(number) || number < 0) number = 0;
+    if (isNaN(number) || number < 0) number = 0;
     return Math.min(number, 9999);
   }
 
@@ -193,7 +263,8 @@
 
   function readStoredCart() {
     try {
-      return JSON.parse(window.localStorage.getItem(cartStorageKey) || '{}') || {};
+      var raw = window.localStorage.getItem(cartStorageKey) || window.localStorage.getItem(cartStorageBackupKey) || '{}';
+      return JSON.parse(raw) || {};
     } catch (error) {
       return {};
     }
@@ -209,10 +280,20 @@
     });
     try {
       if (Object.keys(data).length) {
-        window.localStorage.setItem(cartStorageKey, JSON.stringify(data));
+        var serialized = JSON.stringify(data);
+        window.localStorage.setItem(cartStorageKey, serialized);
+        window.localStorage.setItem(cartStorageBackupKey, serialized);
       } else {
         window.localStorage.removeItem(cartStorageKey);
+        window.localStorage.removeItem(cartStorageBackupKey);
       }
+    } catch (error) {}
+  }
+
+  function clearStoredCart() {
+    try {
+      window.localStorage.removeItem(cartStorageKey);
+      window.localStorage.removeItem(cartStorageBackupKey);
     } catch (error) {}
   }
 
@@ -241,7 +322,7 @@
 
   function selectedItems() {
     if (!orderForm) return [];
-    return Array.from(orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]')).map(function (input) {
+    return toArray(orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]')).map(function (input) {
       return {
         id: input.getAttribute('data-product-id'),
         name: input.getAttribute('data-product-name') || 'Produkt',
@@ -280,11 +361,13 @@
   }
 
   if (orderForm && orderCount) {
-    orderForm.addEventListener('click', function (event) {
-      var plus = event.target.closest('.qty-plus');
-      var minus = event.target.closest('.qty-minus');
-      var remove = event.target.closest('.cart-remove');
+    function handleQuantityAction(event) {
+      var target = event.target;
+      var plus = target && target.closest ? target.closest('.qty-plus') : null;
+      var minus = target && target.closest ? target.closest('.qty-minus') : null;
+      var remove = target && target.closest ? target.closest('.cart-remove') : null;
       if (plus || minus || remove) {
+        if (event) event.preventDefault();
         var productId = (plus || minus || remove).getAttribute('data-product-id');
         var current = getHiddenQty(productId);
         var value = current ? clampQty(current.value) : 0;
@@ -293,10 +376,19 @@
         if (remove) setProductQty(productId, 0);
         renderCart();
       }
+    }
+    addLegacyTapListener(orderForm, handleQuantityAction);
+    orderForm.addEventListener('input', function (event) {
+      if (event.target && event.target.matches && event.target.matches('.qty-display[data-product-id]')) {
+        setProductQty(event.target.getAttribute('data-product-id'), event.target.value);
+        renderCart();
+        return;
+      }
+      updateOrderCount();
+      writeStoredCart();
     });
-    orderForm.addEventListener('input', updateOrderCount);
     orderForm.addEventListener('change', function (event) {
-      if (event.target.matches('.qty-display[data-product-id]')) {
+      if (event.target && event.target.matches && event.target.matches('.qty-display[data-product-id]')) {
         setProductQty(event.target.getAttribute('data-product-id'), event.target.value);
         renderCart();
       }
@@ -314,20 +406,20 @@
       document.documentElement.classList.remove('modal-open');
     }
     if (reviewOrder && cartReview) {
-      reviewOrder.addEventListener('click', openCartReview);
-      reviewOrder.addEventListener('touchend', openCartReview, { passive: false });
+      addLegacyTapListener(reviewOrder, openCartReview);
     }
     if (cartCancel && cartReview) {
-      cartCancel.addEventListener('click', closeCartReview);
+      addLegacyTapListener(cartCancel, closeCartReview);
     }
     if (cartSubmit) {
-      cartSubmit.addEventListener('click', function () {
+      addLegacyTapListener(cartSubmit, function (event) {
+        if (event) event.preventDefault();
         if (!selectedItems().length) {
           renderCart();
           return;
         }
         document.documentElement.classList.remove('modal-open');
-        try { window.localStorage.removeItem(cartStorageKey); } catch (error) {}
+        clearStoredCart();
         if (orderForm.requestSubmit) {
           orderForm.requestSubmit();
         } else {
@@ -335,6 +427,18 @@
         }
       });
     }
+    toArray(document.querySelectorAll('a[href="/logout"]')).forEach(function (link) {
+      addLegacyTapListener(link, function (event) {
+        if (event) event.preventDefault();
+        writeStoredCart();
+        window.location.href = link.getAttribute('href');
+      });
+    });
+    window.addEventListener('pagehide', writeStoredCart);
+    window.addEventListener('beforeunload', writeStoredCart);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) writeStoredCart();
+    });
     restoreStoredCart();
     updateOrderCount();
   }

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v15-admin-time-pdf';
+const CACHE_NAME = 'opa-peters-bestellung-v16-cart-old-ipad';
 const STATIC_ASSETS = [
   '/',
   '/login',
