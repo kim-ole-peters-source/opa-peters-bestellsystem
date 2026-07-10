@@ -65,6 +65,36 @@
     });
   }
 
+  function addClassName(element, className) {
+    if (!element) return;
+    if (element.className.indexOf(className) === -1) {
+      element.className = (element.className + ' ' + className).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+    }
+  }
+
+  function removeClassName(element, className) {
+    if (!element) return;
+    element.className = (' ' + element.className + ' ').replace(' ' + className + ' ', ' ').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+  }
+
+  function addImmediateTouchListener(element, handler) {
+    if (!element) return;
+    var lastRun = 0;
+    element.addEventListener('touchstart', function (event) {
+      lastRun = Date.now();
+      handler(event);
+    }, nonPassiveEvent);
+    element.addEventListener('touchend', function (event) {
+      if (Date.now() - lastRun < 700) return;
+      lastRun = Date.now();
+      handler(event);
+    }, nonPassiveEvent);
+    element.addEventListener('click', function (event) {
+      if (Date.now() - lastRun < 700) return;
+      handler(event);
+    });
+  }
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('/service-worker.js').catch(function () {});
@@ -527,18 +557,20 @@
     function openCartReview(event) {
       if (event) event.preventDefault();
       if (!cartReview) return;
-        renderCart();
-        cartReview.hidden = false;
+      renderCart();
+      cartReview.hidden = false;
+      addClassName(cartReview, 'is-open');
       document.documentElement.classList.add('modal-open');
     }
     function closeCartReview() {
       if (!cartReview) return;
       writeStoredCart();
+      removeClassName(cartReview, 'is-open');
       cartReview.hidden = true;
       document.documentElement.classList.remove('modal-open');
     }
     if (reviewOrder && cartReview) {
-      addLegacyTapListener(reviewOrder, openCartReview);
+      addImmediateTouchListener(reviewOrder, openCartReview);
     }
     if (cartCancel && cartReview) {
       addLegacyTapListener(cartCancel, closeCartReview);
