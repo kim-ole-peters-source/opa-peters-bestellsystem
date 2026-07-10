@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-09-ipad-pin-v15"
+ASSET_VERSION = "2026-07-10-admin-time-combined-pdf"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
@@ -561,6 +561,10 @@ def seed_demo_products():
 
 def esc(s):
     return html.escape(str(s or ""))
+
+
+def pdf_viewer_href(pdf_filename):
+    return "/pdf-viewer?file=" + quote_plus(os.path.basename(pdf_filename or ""))
 
 
 def slug_filename(filename):
@@ -1468,22 +1472,24 @@ def create_pdf(order, items):
 def create_combined_order_pdf(orders):
     combined = {}
     order_rows = []
-    for order in orders:
+    for order in sorted(orders, key=lambda o: ((o["location"] or "").lower(), o["created_at"] or "", o["order_number"] or "")):
         order_rows.append([order["created_at"], order["order_number"], order["location"], order["ordered_by"]])
         for item in get_order_items(order["id"]):
             key = (
+                order["location"] or "Ohne Standort",
+                item["source"] or "Ohne Bezugsquelle",
                 item["product_name"] or "",
                 item["category"] or "Allgemein",
                 item["package_size"] or "",
-                item["source"] or "",
             )
             combined.setdefault(
                 key,
                 {
-                    "product_name": key[0],
-                    "category": key[1],
-                    "package_size": key[2],
-                    "source": key[3],
+                    "location": key[0],
+                    "source": key[1],
+                    "product_name": key[2],
+                    "category": key[3],
+                    "package_size": key[4],
                     "quantity": 0,
                 },
             )
@@ -1513,22 +1519,31 @@ def create_combined_order_pdf(orders):
     ]))
     story.append(order_table)
     story.extend([Spacer(1, 7 * mm), Paragraph("Addierte Produktmengen", styles["Heading2"])])
-    item_rows = [
-        [item["category"], item["product_name"], item["package_size"], item["source"], str(item["quantity"])]
-        for item in sorted(combined.values(), key=lambda x: (x["category"].lower(), x["product_name"].lower()))
-        if item["quantity"] > 0
-    ]
-    item_table = Table([["Kategorie", "Produkt", "Gebinde", "Bezugsquelle", "Menge"]] + item_rows, colWidths=[30 * mm, 50 * mm, 38 * mm, 40 * mm, 18 * mm])
-    item_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
-        ("PADDING", (0, 0), (-1, -1), 5),
-    ]))
-    story.append(item_table)
+    by_location = {}
+    for item in combined.values():
+        if item["quantity"] > 0:
+            by_location.setdefault(item["location"], {}).setdefault(item["source"], []).append(item)
+    for location in sorted(by_location.keys(), key=lambda value: value.lower()):
+        story.append(Paragraph(f"Standort: {esc(location)}", styles["Heading2"]))
+        for source in sorted(by_location[location].keys(), key=lambda value: value.lower()):
+            story.append(Paragraph(f"Bezugsquelle: {esc(source)}", styles["Heading3"]))
+            item_rows = [
+                [item["category"], item["product_name"], item["package_size"], str(item["quantity"])]
+                for item in sorted(by_location[location][source], key=lambda x: (x["category"].lower(), x["product_name"].lower(), x["package_size"].lower()))
+            ]
+            item_table = Table([["Kategorie", "Produkt", "Gebinde", "Menge"]] + item_rows, colWidths=[36 * mm, 72 * mm, 48 * mm, 18 * mm])
+            item_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
+                ("PADDING", (0, 0), (-1, -1), 5),
+            ]))
+            story.append(item_table)
+            story.append(Spacer(1, 5 * mm))
+        story.append(Spacer(1, 3 * mm))
     doc.build(story)
     return filename
 
@@ -1727,6 +1742,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_edit_product(query=parse_qs(parsed.query))
         if path == "/admin/orders":
             return self.show_admin_orders(query=parse_qs(parsed.query))
+        if path == "/pdf-viewer":
+            return self.show_pdf_viewer(query=parse_qs(parsed.query))
         if path == "/admin/time":
             return self.show_admin_time(query=parse_qs(parsed.query))
         if path == "/admin/employees":
@@ -1909,6 +1926,12 @@ class App(BaseHTTPRequestHandler):
         entries = get_time_entries(month, employee_filter, location_filter)
         by_employee, by_location, matrix = summarize_time_entries(entries)
         full_options = option_html(time_options())
+        active_employee_names = get_time_employee_names(active_only=True)
+        add_employee_options = '<option value="">Bitte auswählen</option>' + option_html(active_employee_names)
+        create_disabled = "" if active_employee_names else " disabled"
+        location_options = '<option value="">Bitte auswählen</option>' + "".join(
+            f'<option value="{esc(location["id"])}">{esc(location["name"])}</option>' for location in get_locations()
+        )
         summary_employee = "".join(
             f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
             for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower())
@@ -1989,6 +2012,20 @@ class App(BaseHTTPRequestHandler):
                 <a class="button" href="/admin/time">Zurücksetzen</a>
             </form>
         </section>
+        <details class="category-panel admin-toggle-panel">
+            <summary>Schicht manuell nachtragen <span>Admin</span></summary>
+            <form method="post" action="/admin/time/create" class="time-entry-form admin-time-create-form">
+                <label>Datum<input name="work_date" type="date" value="{esc(today_iso())}" required></label>
+                <label>Standort<select name="location_id" required>{location_options}</select></label>
+                <label>Mitarbeiter<select name="employee_name" required>{add_employee_options}</select></label>
+                <label>Einsatzort / Filiale<input name="work_location" placeholder="z. B. Schwarzenbek" required></label>
+                <label>Anfang<input name="start_time" type="time" required></label>
+                <label>Ende<select name="end_time" required>{full_options}</select></label>
+                <label class="full">Vorkommnisse / Hinweis<textarea name="note" rows="3" placeholder="Optional"></textarea></label>
+                <button class="primary" type="submit"{create_disabled}>Schicht nachtragen</button>
+            </form>
+            {'' if active_employee_names else '<p class="error">Bitte zuerst unter Personen mindestens eine aktive Person anlegen.</p>'}
+        </details>
         <section class="stats">
             <div class="stat"><strong>{len(entries)}</strong><span>Einträge</span></div>
             <div class="stat"><strong>{esc(format_duration(sum(entry['duration_minutes'] for entry in entries)))}</strong><span>Gesamtstunden</span></div>
@@ -2018,6 +2055,26 @@ class App(BaseHTTPRequestHandler):
         </section>
         """
         self.send_html(page("Zeiterfassung Admin", body, admin=True, buyer_key=self.current_buyer_key()))
+
+    def show_pdf_viewer(self, query=None):
+        if not (self.is_admin() or self.current_buyer_key()):
+            return self.redirect("/login")
+        query = query or {}
+        pdf_name = os.path.basename((query.get("file", [""])[0] or "").strip())
+        if not pdf_name or not read_order_pdf_data(pdf_name):
+            self.send_error(404, "PDF wurde nicht gefunden.")
+            return
+        close_href = "/admin/orders" if self.is_admin() else "/"
+        body = f"""
+        <section class="pdf-viewer-shell">
+            <div class="pdf-viewer-bar">
+                <strong>{esc(pdf_name)}</strong>
+                <a class="pdf-close-button" href="{close_href}" aria-label="PDF schließen">×</a>
+            </div>
+            <iframe class="pdf-frame" src="/orders/{esc(pdf_name)}" title="PDF Vorschau"></iframe>
+        </section>
+        """
+        self.send_html(page("PDF", body, admin=self.is_admin(), buyer_key=self.current_buyer_key()))
 
     def show_employees(self, query=None):
         if not self.is_admin():
@@ -2245,7 +2302,7 @@ class App(BaseHTTPRequestHandler):
                 f"<button class='danger' type='submit'>Löschen</button></form>"
             )
             order_rows.append(
-                f"<tr><td>{esc(o['created_at'])}</td><td>{esc(o['order_number'])}</td><td>{esc(o['buyer_group'] or '')}</td><td>{esc(o['location'])}</td><td>{esc(o['ordered_by'])}</td><td><a href='/orders/{esc(o['pdf_filename'])}'>PDF öffnen</a></td><td>{image_cell}</td><td>{wa_cell}</td><td>{delete_cell}</td></tr>"
+                f"<tr><td>{esc(o['created_at'])}</td><td>{esc(o['order_number'])}</td><td>{esc(o['buyer_group'] or '')}</td><td>{esc(o['location'])}</td><td>{esc(o['ordered_by'])}</td><td><a href='{esc(pdf_viewer_href(o['pdf_filename']))}'>PDF öffnen</a></td><td>{image_cell}</td><td>{wa_cell}</td><td>{delete_cell}</td></tr>"
             )
         visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" checked><span>{esc(location["name"])}</span></label>'
@@ -2430,7 +2487,7 @@ class App(BaseHTTPRequestHandler):
                             <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
                         </div>
                         <div class="table-actions">
-                            <a class="button" href="/orders/{esc(order['pdf_filename'])}" target="_blank" rel="noopener">PDF öffnen</a>
+                            <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF öffnen</a>
                             {image_link}
                             <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
                                 <input type="hidden" name="order_{order['id']}" value="1">
@@ -2444,7 +2501,7 @@ class App(BaseHTTPRequestHandler):
                 </article>
                 """
             )
-        combined_button = f'<a class="button primary" target="_blank" rel="noopener" href="/orders/{esc(combined_pdf)}">Gesamtbestellung öffnen / drucken</a>' if combined_pdf else ""
+        combined_button = f'<a class="button primary" href="{esc(pdf_viewer_href(combined_pdf))}">Gesamtbestellung öffnen / drucken</a>' if combined_pdf else ""
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)} {combined_button}</div>' if msg else ''}
@@ -2756,6 +2813,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_locations()
             if path == "/admin/visibility":
                 return self.handle_visibility()
+            if path == "/admin/time/create":
+                return self.handle_create_time_entry()
             if path == "/admin/time/update":
                 return self.handle_update_time_entry()
             if path == "/admin/time/delete":
@@ -3262,6 +3321,46 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Zeiterfassung gespeichert", body, buyer_key=buyer_key))
 
+    def handle_create_time_entry(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        work_date = self.form_value(form, "work_date").strip()
+        try:
+            datetime.strptime(work_date, "%Y-%m-%d")
+        except ValueError:
+            return self.redirect("/admin/time?error=" + quote_plus("Bitte ein gültiges Datum verwenden."))
+        location_id = self.form_value(form, "location_id").strip()
+        location = find_location(location_id)
+        if not location:
+            return self.redirect("/admin/time?error=" + quote_plus("Bitte einen gültigen Standort auswählen."))
+        employee_name = self.form_value(form, "employee_name").strip()
+        active_employees = {normalize_text_key(name) for name in get_time_employee_names(active_only=True)}
+        if not active_employees:
+            return self.redirect("/admin/time?error=" + quote_plus("Bitte zuerst unter Personen mindestens eine aktive Person anlegen."))
+        if normalize_text_key(employee_name) not in active_employees:
+            return self.redirect("/admin/time?error=" + quote_plus("Bitte eine aktive Person aus der Liste auswählen."))
+        work_location = self.form_value(form, "work_location").strip()
+        start_time = self.form_value(form, "start_time").strip()
+        end_time = self.form_value(form, "end_time").strip()
+        note = self.form_value(form, "note").strip()
+        duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=True)
+        month = work_date[:7]
+        if error:
+            return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus(error))
+        now = berlin_now().strftime("%d.%m.%Y %H:%M")
+        con = db()
+        con.execute(
+            """
+            INSERT INTO time_entries (location_id, location_name, employee_name, work_location, work_date, start_time, end_time, duration_minutes, note, created_at, updated_at, edited)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (location_id, location["name"], employee_name, work_location, work_date, start_time, end_time, duration, note, now, now),
+        )
+        con.commit()
+        con.close()
+        self.redirect(f"/admin/time?month={quote_plus(month)}&msg=" + quote_plus("Schicht wurde manuell nachgetragen."))
+
     def handle_update_time_entry(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -3416,7 +3515,7 @@ class App(BaseHTTPRequestHandler):
             <p>Deine Bestellung wurde erfolgreich übermittelt. Vielen Dank.</p>
             {f'<p>Das Bild zur Bestellung wurde mitgespeichert.</p>' if order_image_filename else ''}
             <p>Die PDF wurde erstellt und kann direkt geöffnet oder gedruckt werden.</p>
-            <p><a class="button" href="/">Neue Bestellung erfassen</a> <a class="button primary" target="_blank" rel="noopener" href="/orders/{esc(pdf_filename)}">PDF öffnen / drucken</a> {whatsapp_button}</p>
+            <p><a class="button" href="/">Neue Bestellung erfassen</a> <a class="button primary" href="{esc(pdf_viewer_href(pdf_filename))}">PDF öffnen / drucken</a> {whatsapp_button}</p>
         </section>"""
         self.send_html(page("Bestellung gesendet", body, buyer_key=buyer_key))
 
