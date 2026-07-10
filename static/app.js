@@ -250,6 +250,9 @@
   var cartStorageKey = locationInput ? 'opaPetersCart:' + locationInput.value : 'opaPetersCart';
   var cartStorageBackupKey = locationInput ? 'opaPetersCartBackup:' + locationInput.value : 'opaPetersCartBackup';
   var restoringCart = false;
+  var waitingForServerCart = false;
+  var cartChangedWhileLoading = false;
+  var serverSaveTimer = null;
 
   function clampQty(value) {
     var number = parseInt(value || '0', 10);
@@ -261,26 +264,91 @@
     return orderForm ? orderForm.querySelector('input[type="hidden"][name="qty_' + productId + '"]') : null;
   }
 
+  function normalizeCartState(rawState) {
+    var state = rawState || {};
+    var rawItems = state.items || state;
+    var items = {};
+    var details = state.details || {};
+    Object.keys(rawItems || {}).forEach(function (productId) {
+      var qty = clampQty(rawItems[productId]);
+      if (qty > 0) items[productId] = qty;
+    });
+    return {
+      items: items,
+      details: {
+        ordered_by: String(details.ordered_by || ''),
+        note: String(details.note || '')
+      },
+      updatedAt: state.updatedAt || Date.now()
+    };
+  }
+
+  function cartStateHasContent(state) {
+    state = normalizeCartState(state);
+    return !!(Object.keys(state.items).length || state.details.ordered_by || state.details.note);
+  }
+
+  function currentCartDetails() {
+    return {
+      ordered_by: orderForm && orderForm.elements.ordered_by ? orderForm.elements.ordered_by.value : '',
+      note: orderForm && orderForm.elements.note ? orderForm.elements.note.value : ''
+    };
+  }
+
+  function currentCartState() {
+    var items = {};
+    if (orderForm) {
+      orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]').forEach(function (input) {
+        var productId = input.getAttribute('data-product-id');
+        var qty = clampQty(input.value);
+        if (productId && qty > 0) items[productId] = qty;
+      });
+    }
+    return normalizeCartState({
+      items: items,
+      details: currentCartDetails(),
+      updatedAt: Date.now()
+    });
+  }
+
+  function applyCartDetails(details) {
+    details = details || {};
+    if (orderForm && orderForm.elements.ordered_by) orderForm.elements.ordered_by.value = details.ordered_by || '';
+    if (orderForm && orderForm.elements.note) orderForm.elements.note.value = details.note || '';
+  }
+
+  function applyCartState(rawState) {
+    if (!orderForm) return;
+    var state = normalizeCartState(rawState);
+    restoringCart = true;
+    orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]').forEach(function (input) {
+      input.value = '0';
+    });
+    orderForm.querySelectorAll('.qty-display[data-product-id]').forEach(function (input) {
+      input.value = '0';
+    });
+    Object.keys(state.items).forEach(function (productId) {
+      setProductQty(productId, state.items[productId]);
+    });
+    applyCartDetails(state.details);
+    restoringCart = false;
+    updateOrderCount();
+  }
+
   function readStoredCart() {
     try {
       var raw = window.localStorage.getItem(cartStorageKey) || window.localStorage.getItem(cartStorageBackupKey) || '{}';
-      return JSON.parse(raw) || {};
+      return normalizeCartState(JSON.parse(raw) || {});
     } catch (error) {
-      return {};
+      return normalizeCartState({});
     }
   }
 
-  function writeStoredCart() {
-    if (!orderForm || restoringCart) return;
-    var data = {};
-    orderForm.querySelectorAll('input[type="hidden"][name^="qty_"]').forEach(function (input) {
-      var productId = input.getAttribute('data-product-id');
-      var qty = clampQty(input.value);
-      if (productId && qty > 0) data[productId] = qty;
-    });
+  function persistCartLocally(state) {
+    state = normalizeCartState(state);
     try {
-      if (Object.keys(data).length) {
-        var serialized = JSON.stringify(data);
+      if (cartStateHasContent(state)) {
+        var serialized = JSON.stringify(state);
         window.localStorage.setItem(cartStorageKey, serialized);
         window.localStorage.setItem(cartStorageBackupKey, serialized);
       } else {
@@ -290,22 +358,85 @@
     } catch (error) {}
   }
 
+  function sendCartToServer(state, synchronous) {
+    if (!orderForm) return;
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/cart-draft', !synchronous);
+      xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+      xhr.send(JSON.stringify({ state: normalizeCartState(state) }));
+    } catch (error) {}
+  }
+
+  function queueServerCartSave(state) {
+    if (serverSaveTimer) window.clearTimeout(serverSaveTimer);
+    serverSaveTimer = window.setTimeout(function () {
+      serverSaveTimer = null;
+      sendCartToServer(state, false);
+    }, 350);
+  }
+
+  function writeStoredCart(options) {
+    if (!orderForm || restoringCart) return;
+    var state = currentCartState();
+    persistCartLocally(state);
+    if (waitingForServerCart) cartChangedWhileLoading = true;
+    if (!options || options.server !== false) queueServerCartSave(state);
+  }
+
   function clearStoredCart() {
+    if (serverSaveTimer) window.clearTimeout(serverSaveTimer);
     try {
       window.localStorage.removeItem(cartStorageKey);
       window.localStorage.removeItem(cartStorageBackupKey);
+    } catch (error) {}
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/cart-draft', false);
+      xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+      xhr.send(JSON.stringify({ action: 'clear' }));
     } catch (error) {}
   }
 
   function restoreStoredCart() {
     if (!orderForm) return;
-    restoringCart = true;
-    var data = readStoredCart();
-    Object.keys(data).forEach(function (productId) {
-      setProductQty(productId, data[productId]);
-    });
-    restoringCart = false;
+    applyCartState(readStoredCart());
     updateOrderCount();
+  }
+
+  function loadServerCart() {
+    if (!orderForm) return;
+    waitingForServerCart = true;
+    try {
+      var localState = readStoredCart();
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/cart-draft', true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        waitingForServerCart = false;
+        if (xhr.status !== 200) {
+          if (cartStateHasContent(localState)) sendCartToServer(localState, false);
+          return;
+        }
+        try {
+          var response = JSON.parse(xhr.responseText || '{}');
+          var serverState = normalizeCartState(response.state || {});
+          if (cartChangedWhileLoading) {
+            sendCartToServer(currentCartState(), false);
+          } else if (cartStateHasContent(serverState)) {
+            applyCartState(serverState);
+            persistCartLocally(serverState);
+          } else if (cartStateHasContent(localState)) {
+            sendCartToServer(localState, false);
+          }
+          cartChangedWhileLoading = false;
+          renderCart();
+        } catch (error) {}
+      };
+      xhr.send();
+    } catch (error) {
+      waitingForServerCart = false;
+    }
   }
 
   function setProductQty(productId, value) {
@@ -402,6 +533,7 @@
     }
     function closeCartReview() {
       if (!cartReview) return;
+      writeStoredCart();
       cartReview.hidden = true;
       document.documentElement.classList.remove('modal-open');
     }
@@ -418,6 +550,10 @@
           renderCart();
           return;
         }
+        if (orderForm.checkValidity && !orderForm.checkValidity()) {
+          if (orderForm.reportValidity) orderForm.reportValidity();
+          return;
+        }
         document.documentElement.classList.remove('modal-open');
         clearStoredCart();
         if (orderForm.requestSubmit) {
@@ -431,15 +567,26 @@
       addLegacyTapListener(link, function (event) {
         if (event) event.preventDefault();
         writeStoredCart();
+        sendCartToServer(currentCartState(), true);
         window.location.href = link.getAttribute('href');
       });
     });
-    window.addEventListener('pagehide', writeStoredCart);
-    window.addEventListener('beforeunload', writeStoredCart);
+    window.addEventListener('pagehide', function () {
+      writeStoredCart({ server: false });
+      sendCartToServer(currentCartState(), true);
+    });
+    window.addEventListener('beforeunload', function () {
+      writeStoredCart({ server: false });
+      sendCartToServer(currentCartState(), true);
+    });
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) writeStoredCart();
+      if (document.hidden) {
+        writeStoredCart({ server: false });
+        sendCartToServer(currentCartState(), true);
+      }
     });
     restoreStoredCart();
+    loadServerCart();
     updateOrderCount();
   }
 

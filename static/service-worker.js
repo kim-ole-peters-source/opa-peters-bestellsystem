@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v16-cart-old-ipad';
+const CACHE_NAME = 'opa-peters-bestellung-v18-mobile-cart-compact';
 const STATIC_ASSETS = [
   '/',
   '/login',

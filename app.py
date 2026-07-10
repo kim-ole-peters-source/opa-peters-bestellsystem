@@ -123,9 +123,10 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-10-cart-old-ipad-fix"
+ASSET_VERSION = "2026-07-10-server-cart-sync-mobile-cart"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
+MAX_CART_DRAFT_BYTES = 220 * 1024
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
 MAX_ORDER_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -456,6 +457,15 @@ def init_db():
             source TEXT NOT NULL,
             quantity INTEGER NOT NULL,
             FOREIGN KEY(order_id) REFERENCES orders(id)
+        )
+    """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cart_drafts (
+            location_id TEXT PRIMARY KEY,
+            cart_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """
     )
@@ -996,6 +1006,86 @@ def get_order_items(order_id):
     rows = con.execute("SELECT * FROM order_items WHERE order_id=? ORDER BY category, product_name", (order_id,)).fetchall()
     con.close()
     return rows
+
+
+def empty_cart_state():
+    return {"items": {}, "details": {"ordered_by": "", "note": ""}}
+
+
+def sanitize_cart_state(raw_state):
+    if not isinstance(raw_state, dict):
+        return empty_cart_state()
+    raw_items = raw_state.get("items")
+    if not isinstance(raw_items, dict):
+        raw_items = raw_state
+    items = {}
+    for product_id, qty in raw_items.items():
+        product_id = str(product_id or "").strip()
+        if not product_id.isdigit():
+            continue
+        try:
+            number = int(qty)
+        except (TypeError, ValueError):
+            number = 0
+        number = max(0, min(number, MAX_ORDER_QUANTITY))
+        if number > 0:
+            items[product_id] = number
+    raw_details = raw_state.get("details") if isinstance(raw_state.get("details"), dict) else {}
+    details = {
+        "ordered_by": str(raw_details.get("ordered_by", ""))[:120].strip(),
+        "note": str(raw_details.get("note", ""))[:2000].strip(),
+    }
+    return {"items": items, "details": details}
+
+
+def cart_state_has_content(state):
+    details = state.get("details") or {}
+    return bool(state.get("items") or details.get("ordered_by") or details.get("note"))
+
+
+def get_cart_draft(location_id):
+    if not location_id:
+        return empty_cart_state(), ""
+    con = db()
+    row = con.execute("SELECT cart_json, updated_at FROM cart_drafts WHERE location_id=?", (location_id,)).fetchone()
+    con.close()
+    if not row:
+        return empty_cart_state(), ""
+    try:
+        state = sanitize_cart_state(json.loads(row["cart_json"] or "{}"))
+    except Exception:
+        state = empty_cart_state()
+    return state, row["updated_at"] or ""
+
+
+def save_cart_draft(location_id, state):
+    if not location_id:
+        return
+    state = sanitize_cart_state(state)
+    con = db()
+    if cart_state_has_content(state):
+        updated_at = berlin_now().isoformat(timespec="seconds")
+        con.execute(
+            """
+            INSERT INTO cart_drafts (location_id, cart_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(location_id) DO UPDATE SET cart_json=excluded.cart_json, updated_at=excluded.updated_at
+            """,
+            (location_id, json.dumps(state, ensure_ascii=False), updated_at),
+        )
+    else:
+        con.execute("DELETE FROM cart_drafts WHERE location_id=?", (location_id,))
+    con.commit()
+    con.close()
+
+
+def delete_cart_draft(location_id):
+    if not location_id:
+        return
+    con = db()
+    con.execute("DELETE FROM cart_drafts WHERE location_id=?", (location_id,))
+    con.commit()
+    con.close()
 
 
 def get_order_by_pdf_filename(pdf_filename):
@@ -1634,6 +1724,14 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html_bytes)
 
+    def send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def redirect(self, path):
         self.send_response(303)
         self.send_header("Cache-Control", "no-store")
@@ -1674,11 +1772,45 @@ class App(BaseHTTPRequestHandler):
         raw = body.decode("utf-8", errors="replace")
         return {k: v[0] if v else "" for k, v in parse_qs(raw, keep_blank_values=True).items()}
 
+    def read_json_payload(self, max_bytes=MAX_CART_DRAFT_BYTES):
+        length = int(self.headers.get("Content-Length", 0))
+        if length > max_bytes:
+            raise RequestTooLarge("Die gespeicherten Warenkorbdaten sind zu groß.")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
     def form_value(self, form, key, default=""):
         item = form.get(key, default)
         if isinstance(item, UploadedFile):
             return default
         return item if item is not None else default
+
+    def show_cart_draft(self):
+        buyer_key = self.current_buyer_key()
+        location = find_location(buyer_key)
+        if not buyer_key or not location_can_order(location):
+            return self.send_json({"ok": False, "error": "Nicht angemeldet."}, 401)
+        state, updated_at = get_cart_draft(buyer_key)
+        return self.send_json({"ok": True, "state": state, "updated_at": updated_at})
+
+    def handle_cart_draft(self):
+        buyer_key = self.current_buyer_key()
+        location = find_location(buyer_key)
+        if not buyer_key or not location_can_order(location):
+            return self.send_json({"ok": False, "error": "Nicht angemeldet."}, 401)
+        payload = self.read_json_payload()
+        if payload.get("action") == "clear":
+            delete_cart_draft(buyer_key)
+            return self.send_json({"ok": True, "cleared": True})
+        state = sanitize_cart_state(payload.get("state") if isinstance(payload.get("state"), dict) else payload)
+        save_cart_draft(buyer_key, state)
+        return self.send_json({"ok": True})
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1690,6 +1822,8 @@ class App(BaseHTTPRequestHandler):
             return self.serve_file(os.path.join(BASE_DIR, "static", "service-worker.js"), "application/javascript")
         if path.startswith("/static/"):
             return self.serve_file(os.path.join(BASE_DIR, path.lstrip("/")), None)
+        if path == "/cart-draft":
+            return self.show_cart_draft()
         if path.startswith("/uploads/"):
             upload_name = os.path.basename(path.replace("/uploads/", "", 1))
             return self.serve_file(os.path.join(UPLOAD_DIR, upload_name), None)
@@ -2781,6 +2915,8 @@ class App(BaseHTTPRequestHandler):
         try:
             if path == "/login":
                 return self.handle_buyer_login()
+            if path == "/cart-draft":
+                return self.handle_cart_draft()
             if path == "/order":
                 return self.handle_order()
             if path == "/time":
@@ -3503,6 +3639,7 @@ class App(BaseHTTPRequestHandler):
             )
         con.commit()
         con.close()
+        delete_cart_draft(location_id)
         order_for_links = dict(order)
         order_for_links["pdf_filename"] = pdf_filename
         order_for_links["base_url"] = self.base_url()
