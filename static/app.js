@@ -283,6 +283,7 @@
   var waitingForServerCart = false;
   var cartChangedWhileLoading = false;
   var serverSaveTimer = null;
+  var orderWasSubmitted = false;
 
   function clampQty(value) {
     var number = parseInt(value || '0', 10);
@@ -389,7 +390,7 @@
   }
 
   function sendCartToServer(state, synchronous) {
-    if (!orderForm) return;
+    if (!orderForm || orderWasSubmitted) return;
     try {
       var xhr = new XMLHttpRequest();
       xhr.open('POST', '/cart-draft', !synchronous);
@@ -399,6 +400,7 @@
   }
 
   function queueServerCartSave(state) {
+    if (orderWasSubmitted) return;
     if (serverSaveTimer) window.clearTimeout(serverSaveTimer);
     serverSaveTimer = window.setTimeout(function () {
       serverSaveTimer = null;
@@ -407,7 +409,7 @@
   }
 
   function writeStoredCart(options) {
-    if (!orderForm || restoringCart) return;
+    if (!orderForm || restoringCart || orderWasSubmitted) return;
     var state = currentCartState();
     persistCartLocally(state);
     if (waitingForServerCart) cartChangedWhileLoading = true;
@@ -416,6 +418,22 @@
 
   function clearStoredCart() {
     if (serverSaveTimer) window.clearTimeout(serverSaveTimer);
+    try {
+      window.localStorage.removeItem(cartStorageKey);
+      window.localStorage.removeItem(cartStorageBackupKey);
+    } catch (error) {}
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/cart-draft', false);
+      xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+      xhr.send(JSON.stringify({ action: 'clear' }));
+    } catch (error) {}
+  }
+
+  function markOrderSubmittedAndClearCart() {
+    orderWasSubmitted = true;
+    if (serverSaveTimer) window.clearTimeout(serverSaveTimer);
+    serverSaveTimer = null;
     try {
       window.localStorage.removeItem(cartStorageKey);
       window.localStorage.removeItem(cartStorageBackupKey);
@@ -587,7 +605,7 @@
           return;
         }
         document.documentElement.classList.remove('modal-open');
-        clearStoredCart();
+        markOrderSubmittedAndClearCart();
         if (orderForm.requestSubmit) {
           orderForm.requestSubmit();
         } else {
@@ -604,15 +622,17 @@
       });
     });
     window.addEventListener('pagehide', function () {
+      if (orderWasSubmitted) return;
       writeStoredCart({ server: false });
       sendCartToServer(currentCartState(), true);
     });
     window.addEventListener('beforeunload', function () {
+      if (orderWasSubmitted) return;
       writeStoredCart({ server: false });
       sendCartToServer(currentCartState(), true);
     });
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) {
+      if (document.hidden && !orderWasSubmitted) {
         writeStoredCart({ server: false });
         sendCartToServer(currentCartState(), true);
       }

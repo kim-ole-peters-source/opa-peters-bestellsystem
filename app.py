@@ -28,7 +28,7 @@ except Exception:
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-10-ios12-cart-button"
+ASSET_VERSION = "2026-07-14-cart-clear-a4-pdf"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -571,6 +571,14 @@ def seed_demo_products():
 
 def esc(s):
     return html.escape(str(s or ""))
+
+
+def pdf_text(value, style):
+    return Paragraph(esc(value), style)
+
+
+def pdf_table_row(values, style):
+    return [pdf_text(value, style) for value in values]
 
 
 def pdf_viewer_href(pdf_filename):
@@ -1498,8 +1506,10 @@ def read_order_pdf_data(pdf_filename):
 def create_pdf(order, items):
     filename = f"bestellung_{order['order_number']}.pdf"
     path = os.path.join(ORDER_DIR, filename)
-    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
     styles = getSampleStyleSheet()
+    table_text = ParagraphStyle("A4TableText", parent=styles["BodyText"], fontSize=8.5, leading=10.5, wordWrap="CJK")
+    table_head = ParagraphStyle("A4TableHead", parent=table_text, fontName="Helvetica-Bold")
     story = []
 
     story.append(Paragraph("Interne Bestellung", styles["Title"]))
@@ -1515,7 +1525,8 @@ def create_pdf(order, items):
         meta.append(["Bemerkung", order["note"]])
     if order.get("order_image_filename"):
         meta.append(["Bild zur Bestellung", "im Adminbereich gespeichert"])
-    t = Table(meta, colWidths=[38 * mm, 120 * mm])
+    meta_rows = [[pdf_text(label, table_head), pdf_text(value, table_text)] for label, value in meta]
+    t = Table(meta_rows, colWidths=[38 * mm, 136 * mm], repeatRows=0, splitByRow=1)
     t.setStyle(
         TableStyle(
             [
@@ -1536,10 +1547,10 @@ def create_pdf(order, items):
 
     for source in sorted(grouped.keys(), key=lambda x: x.lower()):
         story.append(Paragraph(f"Bezugsquelle: {esc(source)}", styles["Heading2"]))
-        data = [["Produkt", "Kategorie", "Gebindegröße", "Menge"]]
+        data = [pdf_table_row(["Produkt", "Kategorie", "Gebindegröße", "Menge"], table_head)]
         for item in sorted(grouped[source], key=lambda x: ((x.get("category") or "").lower(), x["product_name"].lower())):
-            data.append([item["product_name"], item.get("category") or "Allgemein", item["package_size"], str(item["quantity"])])
-        table = Table(data, colWidths=[60 * mm, 38 * mm, 48 * mm, 18 * mm])
+            data.append(pdf_table_row([item["product_name"], item.get("category") or "Allgemein", item["package_size"], str(item["quantity"])], table_text))
+        table = Table(data, colWidths=[76 * mm, 38 * mm, 46 * mm, 14 * mm], repeatRows=1, splitByRow=1)
         table.setStyle(
             TableStyle(
                 [
@@ -1588,8 +1599,10 @@ def create_combined_order_pdf(orders):
         number = berlin_now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
     filename = f"gesamtbestellung_{number}.pdf"
     path = os.path.join(ORDER_DIR, filename)
-    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
     styles = getSampleStyleSheet()
+    table_text = ParagraphStyle("A4CombinedTableText", parent=styles["BodyText"], fontSize=7.6, leading=9.2, wordWrap="CJK")
+    table_head = ParagraphStyle("A4CombinedTableHead", parent=table_text, fontName="Helvetica-Bold")
     story = [
         Paragraph("Gesamtbestellung", styles["Title"]),
         Spacer(1, 5 * mm),
@@ -1598,7 +1611,8 @@ def create_combined_order_pdf(orders):
         Spacer(1, 7 * mm),
         Paragraph("Ausgewählte Einzelbestellungen", styles["Heading2"]),
     ]
-    order_table = Table([["Datum", "Bestellnr.", "Standort", "Besteller"]] + order_rows, colWidths=[35 * mm, 42 * mm, 45 * mm, 42 * mm])
+    order_data = [pdf_table_row(["Datum", "Bestellnr.", "Standort", "Besteller"], table_head)] + [pdf_table_row(row, table_text) for row in order_rows]
+    order_table = Table(order_data, colWidths=[34 * mm, 40 * mm, 50 * mm, 50 * mm], repeatRows=1, splitByRow=1)
     order_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -1621,7 +1635,8 @@ def create_combined_order_pdf(orders):
                 [item["category"], item["product_name"], item["package_size"], str(item["quantity"])]
                 for item in sorted(by_location[location][source], key=lambda x: (x["category"].lower(), x["product_name"].lower(), x["package_size"].lower()))
             ]
-            item_table = Table([["Kategorie", "Produkt", "Gebinde", "Menge"]] + item_rows, colWidths=[36 * mm, 72 * mm, 48 * mm, 18 * mm])
+            item_data = [pdf_table_row(["Kategorie", "Produkt", "Gebinde", "Menge"], table_head)] + [pdf_table_row(row, table_text) for row in item_rows]
+            item_table = Table(item_data, colWidths=[36 * mm, 82 * mm, 42 * mm, 14 * mm], repeatRows=1, splitByRow=1)
             item_table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -3645,6 +3660,23 @@ class App(BaseHTTPRequestHandler):
         order_for_links["base_url"] = self.base_url()
         wa_link = whatsapp_order_link(order_for_links)
         whatsapp_button = f'<a class="button" target="_blank" rel="noopener" href="{esc(wa_link)}">Per WhatsApp senden</a>' if wa_link else ''
+        cart_cleanup_script = f"""
+        <script>
+        (function () {{
+          var locationKey = {json.dumps(location_id)};
+          try {{
+            window.localStorage.removeItem('opaPetersCart:' + locationKey);
+            window.localStorage.removeItem('opaPetersCartBackup:' + locationKey);
+          }} catch (error) {{}}
+          try {{
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/cart-draft', true);
+            xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+            xhr.send(JSON.stringify({{ action: 'clear' }}));
+          }} catch (error) {{}}
+        }})();
+        </script>
+        """
         body = f"""
         <section class="box narrow success">
             <h2>Bestellung gesendet</h2>
@@ -3653,7 +3685,7 @@ class App(BaseHTTPRequestHandler):
             {f'<p>Das Bild zur Bestellung wurde mitgespeichert.</p>' if order_image_filename else ''}
             <p>Die PDF wurde erstellt und kann direkt geöffnet oder gedruckt werden.</p>
             <p><a class="button" href="/">Neue Bestellung erfassen</a> <a class="button primary" href="{esc(pdf_viewer_href(pdf_filename))}">PDF öffnen / drucken</a> {whatsapp_button}</p>
-        </section>"""
+        </section>{cart_cleanup_script}"""
         self.send_html(page("Bestellung gesendet", body, buyer_key=buyer_key))
 
 
