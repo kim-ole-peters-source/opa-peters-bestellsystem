@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-14-cart-clear-a4-pdf"
+ASSET_VERSION = "2026-07-15-combined-pdf-download"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -583,6 +583,14 @@ def pdf_table_row(values, style):
 
 def pdf_viewer_href(pdf_filename):
     return "/pdf-viewer?file=" + quote_plus(os.path.basename(pdf_filename or ""))
+
+
+def pdf_direct_href(pdf_filename):
+    return "/orders/" + quote_plus(os.path.basename(pdf_filename or ""))
+
+
+def pdf_download_href(pdf_filename):
+    return "/orders-download/" + quote_plus(os.path.basename(pdf_filename or ""))
 
 
 def slug_filename(filename):
@@ -1864,6 +1872,21 @@ class App(BaseHTTPRequestHandler):
                 return self.redirect("/admin/login")
             image_name = os.path.basename(path.replace("/order-images/", "", 1))
             return self.serve_file(os.path.join(ORDER_IMAGE_DIR, image_name), None)
+        if path.startswith("/orders-download/"):
+            if not (self.is_admin() or self.current_buyer_key()):
+                return self.redirect("/login")
+            pdf_name = os.path.basename(path.replace("/orders-download/", "", 1))
+            pdf_data = read_order_pdf_data(pdf_name)
+            if not pdf_data:
+                self.send_error(404, "PDF wurde nicht gefunden.")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'attachment; filename="{pdf_name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(pdf_data)
+            return
         if path.startswith("/orders/"):
             # PDF darf vom Admin und vom eingeloggten Standort direkt geöffnet/gedruckt werden.
             if not (self.is_admin() or self.current_buyer_key()):
@@ -2235,7 +2258,11 @@ class App(BaseHTTPRequestHandler):
         <section class="pdf-viewer-shell">
             <div class="pdf-viewer-bar">
                 <strong>{esc(pdf_name)}</strong>
-                <a class="pdf-close-button" href="{close_href}" aria-label="PDF schließen">×</a>
+                <div class="pdf-viewer-actions">
+                    <a class="button" href="{esc(pdf_direct_href(pdf_name))}" target="_blank" rel="noopener">PDF direkt öffnen / drucken</a>
+                    <a class="button primary" href="{esc(pdf_download_href(pdf_name))}">PDF herunterladen</a>
+                    <a class="pdf-close-button" href="{close_href}" aria-label="PDF schließen">×</a>
+                </div>
             </div>
             <iframe class="pdf-frame" src="/orders/{esc(pdf_name)}" title="PDF Vorschau"></iframe>
         </section>
@@ -2667,7 +2694,13 @@ class App(BaseHTTPRequestHandler):
                 </article>
                 """
             )
-        combined_button = f'<a class="button primary" href="{esc(pdf_viewer_href(combined_pdf))}">Gesamtbestellung öffnen / drucken</a>' if combined_pdf else ""
+        combined_button = (
+            f'<span class="inline-actions">'
+            f'<a class="button primary" href="{esc(pdf_download_href(combined_pdf))}">Gesamtbestellung als A4-PDF herunterladen</a>'
+            f'<a class="button" href="{esc(pdf_direct_href(combined_pdf))}" target="_blank" rel="noopener">Direkt öffnen / drucken</a>'
+            f'<a class="button" href="{esc(pdf_viewer_href(combined_pdf))}">Vorschau öffnen</a>'
+            f'</span>'
+        ) if combined_pdf else ""
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)} {combined_button}</div>' if msg else ''}

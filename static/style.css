@@ -670,6 +670,18 @@ tr:hover td { background: var(--primary-soft); }
   white-space: nowrap;
   color: var(--primary);
 }
+.pdf-viewer-actions, .inline-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pdf-viewer-actions .button {
+  min-height: 40px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
 .pdf-close-button {
   width: 42px;
   height: 42px;
@@ -953,6 +965,19 @@ tr:hover td { background: var(--primary-soft); }
     flex-direction: column;
     gap: 8px;
     margin-top: 10px;
+  }
+  .pdf-viewer-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .pdf-viewer-actions,
+  .inline-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .pdf-viewer-actions .button,
+  .inline-actions .button {
+    width: 100%;
   }
   table { display: table; width: max-content; min-width: 720px; max-width: none; white-space: nowrap; border-radius: 16px; }
   .install-app { left: 14px; right: 14px; bottom: calc(84px + var(--safe-bottom)); width: auto; min-height: 52px; }

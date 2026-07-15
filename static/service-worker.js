@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v20-cart-clear-a4-pdf';
+const CACHE_NAME = 'opa-peters-bestellung-v21-combined-pdf-download';
 const STATIC_ASSETS = [
   '/',
   '/login',
