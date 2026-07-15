@@ -1573,8 +1573,11 @@ def create_pdf(order, items):
 def create_combined_order_pdf(orders):
     combined = {}
     order_rows = []
+    note_rows = []
     for order in sorted(orders, key=lambda o: ((o["location"] or "").lower(), o["created_at"] or "", o["order_number"] or "")):
         order_rows.append([order["created_at"], order["order_number"], order["location"], order["ordered_by"]])
+        if (order["note"] or "").strip():
+            note_rows.append([order["created_at"], order["order_number"], order["location"], order["note"]])
         for item in get_order_items(order["id"]):
             key = (
                 order["location"] or "Ohne Standort",
@@ -1603,6 +1606,8 @@ def create_combined_order_pdf(orders):
     styles = getSampleStyleSheet()
     table_text = ParagraphStyle("A4CombinedTableText", parent=styles["BodyText"], fontSize=7.6, leading=9.2, wordWrap="CJK")
     table_head = ParagraphStyle("A4CombinedTableHead", parent=table_text, fontName="Helvetica-Bold")
+    note_text = ParagraphStyle("A4CombinedNoteText", parent=table_text, textColor=colors.red, fontName="Helvetica-Bold")
+    note_head = ParagraphStyle("A4CombinedNoteHead", parent=note_text, fontName="Helvetica-Bold")
     story = [
         Paragraph("Gesamtbestellung", styles["Title"]),
         Spacer(1, 5 * mm),
@@ -1622,6 +1627,18 @@ def create_combined_order_pdf(orders):
         ("PADDING", (0, 0), (-1, -1), 5),
     ]))
     story.append(order_table)
+    if note_rows:
+        story.extend([Spacer(1, 5 * mm), Paragraph("Bemerkungen aus den Einzelbestellungen", styles["Heading2"])])
+        note_data = [pdf_table_row(["Datum", "Bestellnr.", "Standort", "Bemerkung"], note_head)] + [pdf_table_row(row, note_text) for row in note_rows]
+        note_table = Table(note_data, colWidths=[34 * mm, 38 * mm, 42 * mm, 60 * mm], repeatRows=1, splitByRow=1)
+        note_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.mistyrose),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.red),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(note_table)
     story.extend([Spacer(1, 7 * mm), Paragraph("Addierte Produktmengen", styles["Heading2"])])
     by_location = {}
     for item in combined.values():
