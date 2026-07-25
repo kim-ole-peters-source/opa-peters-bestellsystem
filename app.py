@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-time-duplicate-check"
+ASSET_VERSION = "2026-07-25-admin-start-time-select"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2188,7 +2188,7 @@ class App(BaseHTTPRequestHandler):
                 f"""
                 <div class="bulk-time-row" data-bulk-time-row>
                     <label>Datum<input name="shift_date_{index}" type="date" value="{esc(today_iso())}"></label>
-                    <label>Anfang<input name="shift_start_{index}" type="time"></label>
+                    <label>Anfang<select name="shift_start_{index}"><option value="">Bitte auswählen</option>{full_options}</select></label>
                     <label>Ende<select name="shift_end_{index}"><option value="">Bitte auswählen</option>{full_options}</select></label>
                     <label class="bulk-time-note">Hinweis<textarea name="shift_note_{index}" rows="2" placeholder="Optional"></textarea></label>
                 </div>
@@ -2198,12 +2198,12 @@ class App(BaseHTTPRequestHandler):
             """
             <div class="bulk-time-row" data-bulk-time-row>
                 <label>Datum<input name="shift_date___INDEX__" type="date" value="__TODAY__"></label>
-                <label>Anfang<input name="shift_start___INDEX__" type="time"></label>
+                <label>Anfang<select name="shift_start___INDEX__"><option value="">Bitte auswählen</option>__START_OPTIONS__</select></label>
                 <label>Ende<select name="shift_end___INDEX__"><option value="">Bitte auswählen</option>__END_OPTIONS__</select></label>
                 <label class="bulk-time-note">Hinweis<textarea name="shift_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
                 <button class="button danger bulk-time-remove" type="button">Zeile entfernen</button>
             </div>
-            """.replace("__TODAY__", today_iso()).replace("__END_OPTIONS__", full_options)
+            """.replace("__TODAY__", today_iso()).replace("__START_OPTIONS__", full_options).replace("__END_OPTIONS__", full_options)
         )
         summary_employee = "".join(
             f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
@@ -3700,6 +3700,8 @@ class App(BaseHTTPRequestHandler):
                 datetime.strptime(work_date, "%Y-%m-%d")
             except ValueError:
                 return self.redirect("/admin/time?error=" + quote_plus(f"Zeile {row_number}: Bitte ein gültiges Datum verwenden."))
+            if not is_valid_hhmm(start_time):
+                return self.redirect(f"/admin/time?month={quote_plus(work_date[:7])}&error=" + quote_plus(f"Zeile {row_number}: Bitte die Anfangszeit in 15-Minuten-Schritten auswählen."))
             duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=True)
             first_month = work_date[:7] if not shift_rows else first_month
             if error:
