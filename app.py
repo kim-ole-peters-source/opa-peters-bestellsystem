@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-order-status-open-products"
+ASSET_VERSION = "2026-07-25-admin-time-person-tabs"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2167,7 +2167,7 @@ class App(BaseHTTPRequestHandler):
         for employee, locations in sorted(matrix.items(), key=lambda item: item[0].lower()):
             for work_location, minutes in sorted(locations.items(), key=lambda item: item[0].lower()):
                 matrix_rows.append(f"<tr><td>{esc(employee)}</td><td>{esc(work_location)}</td><td>{esc(format_duration(minutes))}</td></tr>")
-        entry_cards = []
+        entries_by_employee = {}
         employee_names_all = get_time_employee_names(active_only=False)
         for entry in entries:
             end_options = option_html(time_options(), entry["end_time"])
@@ -2178,16 +2178,16 @@ class App(BaseHTTPRequestHandler):
             status_text = "bearbeitet" if entry["edited"] else "original"
             if entry["updated_at"]:
                 status_text += f" · {entry['updated_at']}"
-            entry_cards.append(
+            employee_name = entry["employee_name"] or "Ohne Namen"
+            entries_by_employee.setdefault(employee_name, []).append(
                 f"""
-                <details class="time-entry-card">
+                <details class="time-entry-card compact-time-entry">
                     <summary class="time-entry-summary">
                         <span class="time-entry-main">
-                            <strong>{esc(entry['employee_name'])}</strong>
                             <span>{esc(entry['work_date'])} · {esc(entry['start_time'])}-{esc(entry['end_time'])}</span>
+                            <strong>{esc(entry['work_location'])}</strong>
                         </span>
                         <span class="time-entry-meta">
-                            <span>{esc(entry['work_location'])}</span>
                             <strong>{esc(format_duration(entry['duration_minutes']))}</strong>
                         </span>
                     </summary>
@@ -2210,6 +2210,24 @@ class App(BaseHTTPRequestHandler):
                         <button class="danger" type="submit">Zeiteintrag löschen</button>
                     </form>
                     </div>
+                </details>
+                """
+            )
+        employee_entry_panels = []
+        for employee_name, employee_cards in sorted(entries_by_employee.items(), key=lambda item: item[0].lower()):
+            total_minutes = sum(
+                int(entry["duration_minutes"] or 0)
+                for entry in entries
+                if (entry["employee_name"] or "Ohne Namen") == employee_name
+            )
+            employee_entry_panels.append(
+                f"""
+                <details class="time-person-panel">
+                    <summary>
+                        <span><strong>{esc(employee_name)}</strong><small>{len(employee_cards)} Schicht(en)</small></span>
+                        <strong>{esc(format_duration(total_minutes))}</strong>
+                    </summary>
+                    <div class="time-person-shifts">{''.join(employee_cards)}</div>
                 </details>
                 """
             )
@@ -2268,7 +2286,7 @@ class App(BaseHTTPRequestHandler):
         </section>
         <section class="box">
             <h2>Einträge bearbeiten</h2>
-            <div class="time-entry-list">{''.join(entry_cards) if entry_cards else '<p>Keine Zeiteinträge für diesen Filter.</p>'}</div>
+            <div class="time-entry-list person-entry-list">{''.join(employee_entry_panels) if employee_entry_panels else '<p>Keine Zeiteinträge für diesen Filter.</p>'}</div>
         </section>
         <section class="box narrow">
             <h2>Automatischer Monats-Export</h2>
