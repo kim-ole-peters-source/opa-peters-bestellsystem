@@ -30,7 +30,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-admin-start-time-select"
+ASSET_VERSION = "2026-07-25-time-export-pdf-payroll"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -221,6 +221,40 @@ def save_settings(data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def parse_decimal(value, default=0.0):
+    text = str(value or "").strip().replace("€", "").replace(" ", "").replace(",", ".")
+    if not text:
+        return default
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return default
+
+
+def format_decimal(value, digits=2):
+    number = float(value or 0)
+    return f"{number:.{digits}f}".replace(".", ",")
+
+
+def format_money(value):
+    return f"{format_decimal(value, 2)} €"
+
+
+def employee_settings_map():
+    return {normalize_text_key(employee["name"]): employee for employee in get_time_employees(active_only=False)}
+
+
+def employee_payroll_values(employee_name, minutes, employees_by_key=None):
+    employees_by_key = employees_by_key if employees_by_key is not None else employee_settings_map()
+    employee = employees_by_key.get(normalize_text_key(employee_name), {})
+    hours = (minutes or 0) / 60
+    max_hours = parse_decimal(employee.get("monthly_hours", 0))
+    hourly_wage = parse_decimal(employee.get("hourly_wage", 0))
+    overtime = max(0.0, hours - max_hours) if max_hours > 0 else 0.0
+    salary = hours * hourly_wage
+    return hours, overtime, salary
+
+
 def normalize_time_employees(raw_employees):
     normalized = []
     seen = set()
@@ -233,7 +267,14 @@ def normalize_time_employees(raw_employees):
             continue
         seen.add(key)
         active = bool(item.get("active", True)) if isinstance(item, dict) else True
-        normalized.append({"name": name, "active": active})
+        hourly_wage = parse_decimal(item.get("hourly_wage", 0) if isinstance(item, dict) else 0)
+        monthly_hours = parse_decimal(item.get("monthly_hours", 0) if isinstance(item, dict) else 0)
+        normalized.append({
+            "name": name,
+            "active": active,
+            "hourly_wage": hourly_wage,
+            "monthly_hours": monthly_hours,
+        })
     return normalized
 
 
@@ -1369,61 +1410,91 @@ def find_duplicate_time_entry(employee_name, work_date, start_time, end_time, ex
 def build_time_export(month):
     entries = get_time_entries(month)
     by_employee, by_location, matrix = summarize_time_entries(entries)
-    filename = f"zeiterfassung_{month}.xlsx"
-    try:
-        from openpyxl import Workbook
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Einträge"
-        ws.append(["Datum", "Mitarbeiter", "Einsatzort", "Standortzugang", "Anfang", "Ende", "Stunden", "Vorkommnisse", "Bearbeitet"])
-        for entry in entries:
-            ws.append([
-                entry["work_date"],
-                entry["employee_name"],
-                entry["work_location"],
-                entry["location_name"],
-                entry["start_time"],
-                entry["end_time"],
-                round((entry["duration_minutes"] or 0) / 60, 2),
-                entry["note"] or "",
-                "ja" if entry["edited"] else "nein",
+    employees_by_key = employee_settings_map()
+    entries_by_employee = {}
+    for entry in entries:
+        entries_by_employee.setdefault(entry["employee_name"] or "Ohne Namen", []).append(entry)
+
+    filename = f"zeiterfassung_{month}.pdf"
+    out = io.BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=A4, rightMargin=12 * mm, leftMargin=12 * mm, topMargin=12 * mm, bottomMargin=12 * mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TimeExportTitle", parent=styles["Title"], fontSize=18, leading=22, spaceAfter=8)
+    section_style = ParagraphStyle("TimeExportSection", parent=styles["Heading2"], fontSize=12.5, leading=15, spaceBefore=10, spaceAfter=6)
+    small_style = ParagraphStyle("TimeExportSmall", parent=styles["BodyText"], fontSize=7.5, leading=9)
+    normal_style = ParagraphStyle("TimeExportNormal", parent=styles["BodyText"], fontSize=9, leading=11)
+    story = [
+        Paragraph(f"Zeiterfassung {esc(month)}", title_style),
+        Paragraph(f"Erstellt am {esc(berlin_now().strftime('%d.%m.%Y %H:%M'))}", normal_style),
+        Spacer(1, 4 * mm),
+    ]
+
+    def p(value, style=small_style):
+        return Paragraph(esc(str(value or "")), style)
+
+    def styled_table(rows, widths):
+        table = Table(rows, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef3fb")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#24346b")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("LEADING", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d7deea")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fbfcff")]),
+        ]))
+        return table
+
+    story.append(Paragraph("Summe je Mitarbeiter", section_style))
+    employee_rows = [[p("Mitarbeiter"), p("Gesamtstunden"), p("Überstunden"), p("Gehalt")]]
+    for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower()):
+        hours, overtime, salary = employee_payroll_values(name, minutes, employees_by_key)
+        employee_rows.append([p(name), p(format_decimal(hours)), p(format_decimal(overtime)), p(format_money(salary))])
+    if len(employee_rows) == 1:
+        employee_rows.append([p("Keine Daten"), p(""), p(""), p("")])
+    story.append(styled_table(employee_rows, [70 * mm, 35 * mm, 35 * mm, 38 * mm]))
+
+    story.append(Paragraph("Summe je Einsatzort", section_style))
+    location_rows = [[p("Einsatzort"), p("Stunden")]]
+    for name, minutes in sorted(by_location.items(), key=lambda item: item[0].lower()):
+        location_rows.append([p(name), p(format_decimal((minutes or 0) / 60))])
+    if len(location_rows) == 1:
+        location_rows.append([p("Keine Daten"), p("")])
+    story.append(styled_table(location_rows, [120 * mm, 58 * mm]))
+
+    story.append(Paragraph("Schichten je Mitarbeiter", section_style))
+    for employee, employee_entries in sorted(entries_by_employee.items(), key=lambda item: item[0].lower()):
+        employee_minutes = sum(entry["duration_minutes"] or 0 for entry in employee_entries)
+        hours, overtime, salary = employee_payroll_values(employee, employee_minutes, employees_by_key)
+        shift_rows = [[p("Datum"), p("Einsatzort"), p("Anfang"), p("Ende"), p("Stunden"), p("Vorkommnisse"), p("Bearbeitet")]]
+        for entry in sorted(employee_entries, key=lambda item: (item["work_date"], item["start_time"], item["end_time"])):
+            shift_rows.append([
+                p(entry["work_date"]),
+                p(entry["work_location"]),
+                p(entry["start_time"]),
+                p(entry["end_time"]),
+                p(format_decimal((entry["duration_minutes"] or 0) / 60)),
+                p(entry["note"] or ""),
+                p("ja" if entry["edited"] else "nein"),
             ])
-        ws2 = wb.create_sheet("Summen Mitarbeiter")
-        ws2.append(["Mitarbeiter", "Stunden"])
-        for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower()):
-            ws2.append([name, round(minutes / 60, 2)])
-        ws3 = wb.create_sheet("Summen Einsatzorte")
-        ws3.append(["Einsatzort", "Stunden"])
-        for name, minutes in sorted(by_location.items(), key=lambda item: item[0].lower()):
-            ws3.append([name, round(minutes / 60, 2)])
-        ws4 = wb.create_sheet("Mitarbeiter x Ort")
-        ws4.append(["Mitarbeiter", "Einsatzort", "Stunden"])
-        for employee, locations in sorted(matrix.items(), key=lambda item: item[0].lower()):
-            for work_location, minutes in sorted(locations.items(), key=lambda item: item[0].lower()):
-                ws4.append([employee, work_location, round(minutes / 60, 2)])
-        out = io.BytesIO()
-        wb.save(out)
-        return filename, out.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    except Exception:
-        filename = f"zeiterfassung_{month}.csv"
-        out = io.StringIO()
-        writer = csv.writer(out, delimiter=";")
-        writer.writerow(["Datum", "Mitarbeiter", "Einsatzort", "Standortzugang", "Anfang", "Ende", "Stunden", "Vorkommnisse", "Bearbeitet"])
-        for entry in entries:
-            writer.writerow([
-                entry["work_date"], entry["employee_name"], entry["work_location"], entry["location_name"],
-                entry["start_time"], entry["end_time"], f"{(entry['duration_minutes'] or 0) / 60:.2f}",
-                entry["note"] or "", "ja" if entry["edited"] else "nein"
-            ])
-        writer.writerow([])
-        writer.writerow(["Summe Mitarbeiter"])
-        for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower()):
-            writer.writerow([name, f"{minutes / 60:.2f}"])
-        writer.writerow([])
-        writer.writerow(["Summe Einsatzort"])
-        for name, minutes in sorted(by_location.items(), key=lambda item: item[0].lower()):
-            writer.writerow([name, f"{minutes / 60:.2f}"])
-        return filename, out.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8"
+        employee_block = [
+            Paragraph(
+                f"{esc(employee)} - Gesamtstunden: {esc(format_decimal(hours))} - Überstunden: {esc(format_decimal(overtime))} - Gehalt: {esc(format_money(salary))}",
+                section_style,
+            ),
+            styled_table(shift_rows, [22 * mm, 38 * mm, 18 * mm, 18 * mm, 20 * mm, 47 * mm, 15 * mm]),
+        ]
+        story.append(KeepTogether(employee_block))
+    if not entries_by_employee:
+        story.append(Paragraph("Keine Schichten für diesen Monat vorhanden.", normal_style))
+
+    doc.build(story)
+    return filename, out.getvalue(), "application/pdf"
 
 
 def log_time_export(month, filename, sent_to, status, message, auto=False):
@@ -1468,7 +1539,9 @@ def send_time_export_email(month, filename, data, content_type):
     msg["From"] = sender
     msg["To"] = recipient
     msg.set_content(f"Der Monats-Export der Zeiterfassung für {month} befindet sich im Anhang.")
-    if "spreadsheet" in content_type:
+    if content_type == "application/pdf":
+        msg.add_attachment(data, maintype="application", subtype="pdf", filename=filename)
+    elif "spreadsheet" in content_type:
         msg.add_attachment(data, maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=filename)
     else:
         msg.add_attachment(data, maintype="text", subtype="csv", filename=filename)
@@ -2205,10 +2278,14 @@ class App(BaseHTTPRequestHandler):
             </div>
             """.replace("__TODAY__", today_iso()).replace("__START_OPTIONS__", full_options).replace("__END_OPTIONS__", full_options)
         )
-        summary_employee = "".join(
-            f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
-            for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower())
-        )
+        employees_by_key = employee_settings_map()
+        summary_employee_rows = []
+        for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower()):
+            hours, overtime, salary = employee_payroll_values(name, minutes, employees_by_key)
+            summary_employee_rows.append(
+                f"<tr><td>{esc(name)}</td><td>{esc(format_decimal(hours))}</td><td>{esc(format_decimal(overtime))}</td><td>{esc(format_money(salary))}</td></tr>"
+            )
+        summary_employee = "".join(summary_employee_rows)
         summary_location = "".join(
             f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
             for name, minutes in sorted(by_location.items(), key=lambda item: item[0].lower())
@@ -2326,7 +2403,7 @@ class App(BaseHTTPRequestHandler):
         </section>
         <section class="box">
             <h2>Summen je Mitarbeiter</h2>
-            <div class="table-wrap"><table><tr><th>Mitarbeiter</th><th>Stunden</th></tr>{summary_employee if summary_employee else '<tr><td colspan="2">Keine Daten.</td></tr>'}</table></div>
+            <div class="table-wrap"><table><tr><th>Mitarbeiter</th><th>Gesamtstunden</th><th>Überstunden</th><th>Gehalt</th></tr>{summary_employee if summary_employee else '<tr><td colspan="4">Keine Daten.</td></tr>'}</table></div>
         </section>
         <section class="box">
             <h2>Summen je Einsatzort</h2>
@@ -2388,6 +2465,8 @@ class App(BaseHTTPRequestHandler):
                 f"""
                 <tr>
                     <td><input form="employeesForm" type="hidden" name="employee_original_{index}" value="{esc(employee['name'])}"><input form="employeesForm" name="employee_name_{index}" value="{esc(employee['name'])}" required></td>
+                    <td><input form="employeesForm" name="employee_hourly_wage_{index}" value="{esc(format_decimal(employee.get('hourly_wage', 0)))}" inputmode="decimal" placeholder="z. B. 13,50"></td>
+                    <td><input form="employeesForm" name="employee_monthly_hours_{index}" value="{esc(format_decimal(employee.get('monthly_hours', 0)))}" inputmode="decimal" placeholder="z. B. 80"></td>
                     <td><label class="check"><input form="employeesForm" type="checkbox" name="employee_active_{index}" value="1" {checked}> {status}</label></td>
                     <td><label class="check danger-check"><input form="employeesForm" type="checkbox" name="employee_remove_{index}" value="1"> Entfernen</label></td>
                 </tr>
@@ -2409,13 +2488,15 @@ class App(BaseHTTPRequestHandler):
                 <input type="hidden" name="employee_count" value="{len(employees)}">
                 <div class="table-wrap">
                     <table>
-                        <tr><th>Name</th><th>Status</th><th>Entfernen</th></tr>
-                        {''.join(rows) if rows else '<tr><td colspan="3">Noch keine Personen angelegt.</td></tr>'}
+                        <tr><th>Name</th><th>Stundenlohn</th><th>Reguläre Monatsstunden</th><th>Status</th><th>Entfernen</th></tr>
+                        {''.join(rows) if rows else '<tr><td colspan="5">Noch keine Personen angelegt.</td></tr>'}
                     </table>
                 </div>
                 <fieldset class="visibility-box">
                     <legend>Neue Person hinzufügen</legend>
                     <label>Name<input name="new_employee_name" placeholder="z. B. Lisa"></label>
+                    <label>Stundenlohn<input name="new_employee_hourly_wage" inputmode="decimal" placeholder="z. B. 13,50"></label>
+                    <label>Reguläre Monatsstunden<input name="new_employee_monthly_hours" inputmode="decimal" placeholder="z. B. 80"></label>
                 </fieldset>
                 <button class="primary" type="submit">Personen speichern</button>
             </form>
@@ -3512,10 +3593,17 @@ class App(BaseHTTPRequestHandler):
             employees.append({
                 "name": name,
                 "active": bool(self.form_value(form, f"employee_active_{index}")),
+                "hourly_wage": parse_decimal(self.form_value(form, f"employee_hourly_wage_{index}")),
+                "monthly_hours": parse_decimal(self.form_value(form, f"employee_monthly_hours_{index}")),
             })
         new_name = self.form_value(form, "new_employee_name").strip()
         if new_name:
-            employees.append({"name": new_name, "active": True})
+            employees.append({
+                "name": new_name,
+                "active": True,
+                "hourly_wage": parse_decimal(self.form_value(form, "new_employee_hourly_wage")),
+                "monthly_hours": parse_decimal(self.form_value(form, "new_employee_monthly_hours")),
+            })
         employees = normalize_time_employees(employees)
         save_time_employees(employees)
         active_count = sum(1 for employee in employees if employee.get("active"))

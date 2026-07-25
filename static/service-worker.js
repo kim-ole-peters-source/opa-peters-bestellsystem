@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v26-admin-start-time-select';
+const CACHE_NAME = 'opa-peters-bestellung-v27-time-export-pdf-payroll';
 const STATIC_ASSETS = [
   '/',
   '/login',

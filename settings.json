@@ -31,5 +31,6 @@
   "admin_pin_hash": "sha256:52975f1f11a17e6a15f6122cea91a69bbc48e66a3d01b7dda45323a5c6722d82",
   "time_export_email": "info@opapeters",
   "last_auto_time_export_month": "",
-  "last_auto_time_export_status": ""
+  "last_auto_time_export_status": "",
+  "time_employees": []
 }
