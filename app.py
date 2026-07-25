@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-15-combined-pdf-download"
+ASSET_VERSION = "2026-07-25-order-status-open-products"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -441,6 +441,7 @@ def init_db():
             pdf_filename TEXT NOT NULL,
             pdf_data BLOB,
             order_image_filename TEXT,
+            completed_at TEXT,
             created_at TEXT NOT NULL
         )
     """
@@ -521,6 +522,7 @@ def init_db():
     add_column_if_missing(con, "orders", "buyer_group", "TEXT")
     add_column_if_missing(con, "orders", "order_image_filename", "TEXT")
     add_column_if_missing(con, "orders", "pdf_data", "BLOB")
+    add_column_if_missing(con, "orders", "completed_at", "TEXT")
     add_column_if_missing(con, "order_items", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "time_entries", "updated_at", "TEXT")
     add_column_if_missing(con, "time_entries", "edited", "INTEGER NOT NULL DEFAULT 0")
@@ -1015,6 +1017,38 @@ def get_orders():
     rows = con.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 100").fetchall()
     con.close()
     return rows
+
+
+def get_open_order_product_ids(location_name):
+    con = db()
+    rows = con.execute(
+        """
+        SELECT DISTINCT oi.product_id
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.completed_at IS NULL
+          AND oi.product_id IS NOT NULL
+          AND oi.quantity > 0
+          AND o.location = ?
+        """,
+        (location_name or "",),
+    ).fetchall()
+    con.close()
+    return {str(row["product_id"]) for row in rows if row["product_id"] is not None}
+
+
+def set_orders_completed(order_ids, completed=True):
+    order_ids = [str(order_id) for order_id in order_ids if str(order_id).isdigit()]
+    if not order_ids:
+        return 0
+    placeholders = ",".join("?" for _ in order_ids)
+    completed_at = berlin_now().strftime("%d.%m.%Y %H:%M") if completed else None
+    con = db()
+    con.execute(f"UPDATE orders SET completed_at=? WHERE id IN ({placeholders})", [completed_at] + order_ids)
+    con.commit()
+    changed = con.total_changes
+    con.close()
+    return changed
 
 
 def get_order_items(order_id):
@@ -2351,6 +2385,7 @@ class App(BaseHTTPRequestHandler):
         products = filter_products_by_search(products, search_text, include_source=False)
         categories = get_categories_for_buyer(buyer_key)
         location_name = location_data["name"] if location_data else buyer_label(buyer_key)
+        open_order_product_ids = get_open_order_product_ids(location_name)
         contact_name = (location_data or {}).get("contact_name", "").strip()
         role_badge = f"<p class='role-badge'>{esc(role_label((location_data or {}).get('role')))}</p>"
         personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
@@ -2372,10 +2407,14 @@ class App(BaseHTTPRequestHandler):
         def product_card(p):
             img = f'<img src="/uploads/{esc(p["image_filename"])}" alt="">' if p["image_filename"] else '<div class="noimg">kein Bild</div>'
             categories_label = category_text(product_categories(p))
+            already_ordered = str(p["id"]) in open_order_product_ids
+            status_badge = '<div class="ordered-open-badge">Bereits offen bestellt</div>' if already_ordered else ""
+            card_class = "card product-card ordered-open-product" if already_ordered else "card product-card"
             return f"""
-            <article class="card product-card" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}">
+            <article class="{card_class}" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}">
                 {img}
                 <div class="category-badge">{esc(categories_label)}</div>
+                {status_badge}
                 <h3>{esc(p['name'])}</h3>
                 <p class="muted">Gebindegröße: {esc(p['package_size'])}</p>
                 <div class="quantity-control" aria-label="Menge für {esc(p['name'])}">
@@ -2664,6 +2703,19 @@ class App(BaseHTTPRequestHandler):
         cards = []
         for order in orders:
             items = get_order_items(order["id"])
+            is_completed = bool(order["completed_at"])
+            status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
+            status_class = "order-status done" if is_completed else "order-status open"
+            card_class = "box order-card order-completed" if is_completed else "box order-card"
+            complete_form = (
+                f"""
+                <form method="post" action="/admin/orders/status">
+                    <input type="hidden" name="order_{order['id']}" value="1">
+                    <input type="hidden" name="completed" value="{0 if is_completed else 1}">
+                    <button type="submit" class="{'button' if is_completed else 'primary'}">{'Wieder öffnen' if is_completed else 'Als erledigt markieren'}</button>
+                </form>
+                """
+            )
             item_rows = "".join(
                 f"<tr><td>{esc(item['product_name'])}</td><td>{esc(item['category'])}</td><td>{esc(item['package_size'])}</td><td>{esc(item['quantity'])}</td></tr>"
                 for item in items
@@ -2673,15 +2725,17 @@ class App(BaseHTTPRequestHandler):
             image_link = f"<a class='button' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if order["order_image_filename"] else ""
             cards.append(
                 f"""
-                <article class="box order-card">
+                <article class="{card_class}">
                     <div class="section-head">
                         <div>
                             <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
                             <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
+                            <p class="{status_class}">{status_label}</p>
                         </div>
                         <div class="table-actions">
                             <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF öffnen</a>
                             {image_link}
+                            {complete_form}
                             <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
                                 <input type="hidden" name="order_{order['id']}" value="1">
                                 <button type="submit" class="danger">Löschen</button>
@@ -2713,6 +2767,7 @@ class App(BaseHTTPRequestHandler):
                     <label class="check"><input id="selectAllOrders" type="checkbox"> Alle angezeigten Bestellungen auswählen</label>
                     <span class="bulk-selected-count" id="ordersSelectedCount">0 Bestellungen ausgewählt</span>
                     <button class="primary" type="submit">Gesamtbestellung als PDF erstellen</button>
+                    <button type="submit" class="primary" formaction="/admin/orders/status" name="completed" value="1">Ausgewählte als erledigt markieren</button>
                     <button type="submit" class="danger" formaction="/admin/orders/delete">Ausgewählte löschen</button>
                 </div>
             </form>
@@ -2996,6 +3051,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bulk_products()
             if path == "/admin/orders/combined-pdf":
                 return self.handle_combined_order_pdf()
+            if path == "/admin/orders/status":
+                return self.handle_order_status()
             if path == "/admin/orders/delete":
                 return self.handle_delete_orders()
             if path == "/admin/delete-product":
@@ -3246,6 +3303,20 @@ class App(BaseHTTPRequestHandler):
         if not deleted_count:
             return self.redirect(return_to + "?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
         return self.redirect(return_to + "?msg=" + quote_plus(f"{deleted_count} Bestellung(en) gelöscht."))
+
+    def handle_order_status(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
+        if not order_ids:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
+        completed = self.form_value(form, "completed", "1") == "1"
+        changed = set_orders_completed(order_ids, completed=completed)
+        if not changed:
+            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
+        message = "Bestellung als erledigt markiert." if completed else "Bestellung wieder geöffnet."
+        return self.redirect("/admin/orders?msg=" + quote_plus(message))
 
     def handle_add_category(self):
         if not self.is_admin():
