@@ -583,6 +583,40 @@ button:active, .button:active { transform: translateY(1px); }
 .time-entry-form { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 12px; align-items: end; }
 .time-entry-form label { margin: 0; }
 .entry-meta { color: var(--muted); font-size: 13px; font-weight: 700; align-self: center; }
+.admin-time-create-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 14px;
+}
+.admin-time-create-form label { margin: 0; }
+.bulk-time-rows {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+.bulk-time-row {
+  display: grid;
+  grid-template-columns: minmax(135px, .85fr) minmax(120px, .7fr) minmax(150px, .8fr) minmax(190px, 1.2fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.bulk-time-note textarea { min-height: 48px; }
+.bulk-time-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.bulk-time-remove {
+  min-height: 44px;
+  align-self: end;
+  white-space: nowrap;
+}
 
 /* ---------- 6. Produktkarten & Mengen-Auswahl ---------- */
 .card {
@@ -856,10 +890,13 @@ tr:hover td { background: var(--primary-soft); }
   main { padding-bottom: 82px; }
   nav { justify-content: flex-start; overflow-x: auto; width: 100%; padding-bottom: 2px; scrollbar-width: none; }
   nav::-webkit-scrollbar { display: none; }
-  .filters, .two, .inline-form, .stats, .location-row, .new-location, .time-entry-form { grid-template-columns: 1fr; }
+  .filters, .two, .inline-form, .stats, .location-row, .new-location, .time-entry-form, .admin-time-create-form { grid-template-columns: 1fr; }
   .order-search { grid-template-columns: 1fr; }
   .section-head { flex-direction: column; }
   .bulk-editor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-time-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-time-note { grid-column: 1 / -1; }
+  .bulk-time-remove { grid-column: 1 / -1; }
   .order-actions { justify-content: stretch; width: 100%; }
   .order-actions .button { flex: 1 1 180px; }
   .time-entry-summary { grid-template-columns: minmax(0, 1fr) 38px; }
@@ -953,6 +990,9 @@ tr:hover td { background: var(--primary-soft); }
   .box { padding: 15px; border-radius: 20px; margin-bottom: 12px; box-shadow: var(--shadow-tiny); }
   .filters { padding: 10px; border-radius: 18px; gap: 10px; }
   .grid { grid-template-columns: 1fr; gap: 12px; }
+  .bulk-time-row { grid-template-columns: 1fr; padding: 10px; }
+  .bulk-time-note, .bulk-time-remove { grid-column: auto; }
+  .bulk-time-actions { justify-content: stretch; }
 
   .card {
     display: grid;

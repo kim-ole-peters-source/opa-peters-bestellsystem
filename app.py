@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-admin-time-person-tabs"
+ASSET_VERSION = "2026-07-25-admin-time-bulk-create"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2155,6 +2155,29 @@ class App(BaseHTTPRequestHandler):
         location_options = '<option value="">Bitte auswählen</option>' + "".join(
             f'<option value="{esc(location["id"])}">{esc(location["name"])}</option>' for location in get_locations()
         )
+        initial_shift_rows = []
+        for index in range(3):
+            initial_shift_rows.append(
+                f"""
+                <div class="bulk-time-row" data-bulk-time-row>
+                    <label>Datum<input name="shift_date_{index}" type="date" value="{esc(today_iso())}"></label>
+                    <label>Anfang<input name="shift_start_{index}" type="time"></label>
+                    <label>Ende<select name="shift_end_{index}"><option value="">Bitte auswählen</option>{full_options}</select></label>
+                    <label class="bulk-time-note">Hinweis<textarea name="shift_note_{index}" rows="2" placeholder="Optional"></textarea></label>
+                </div>
+                """
+            )
+        bulk_shift_template = esc(
+            """
+            <div class="bulk-time-row" data-bulk-time-row>
+                <label>Datum<input name="shift_date___INDEX__" type="date" value="__TODAY__"></label>
+                <label>Anfang<input name="shift_start___INDEX__" type="time"></label>
+                <label>Ende<select name="shift_end___INDEX__"><option value="">Bitte auswählen</option>__END_OPTIONS__</select></label>
+                <label class="bulk-time-note">Hinweis<textarea name="shift_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                <button class="button danger bulk-time-remove" type="button">Zeile entfernen</button>
+            </div>
+            """.replace("__TODAY__", today_iso()).replace("__END_OPTIONS__", full_options)
+        )
         summary_employee = "".join(
             f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
             for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower())
@@ -2254,16 +2277,18 @@ class App(BaseHTTPRequestHandler):
             </form>
         </section>
         <details class="category-panel admin-toggle-panel">
-            <summary>Schicht manuell nachtragen <span>Admin</span></summary>
-            <form method="post" action="/admin/time/create" class="time-entry-form admin-time-create-form">
-                <label>Datum<input name="work_date" type="date" value="{esc(today_iso())}" required></label>
+            <summary>Schichten manuell nachtragen <span>Admin</span></summary>
+            <form method="post" action="/admin/time/create" class="admin-time-create-form">
                 <label>Standort<select name="location_id" required>{location_options}</select></label>
                 <label>Mitarbeiter<select name="employee_name" required>{add_employee_options}</select></label>
-                <label>Einsatzort / Filiale<input name="work_location" placeholder="z. B. Schwarzenbek" required></label>
-                <label>Anfang<input name="start_time" type="time" required></label>
-                <label>Ende<select name="end_time" required>{full_options}</select></label>
-                <label class="full">Vorkommnisse / Hinweis<textarea name="note" rows="3" placeholder="Optional"></textarea></label>
-                <button class="primary" type="submit"{create_disabled}>Schicht nachtragen</button>
+                <input type="hidden" name="shift_count" id="bulkTimeShiftCount" value="3">
+                <div class="bulk-time-rows" id="bulkTimeRows" data-template="{bulk_shift_template}">
+                    {''.join(initial_shift_rows)}
+                </div>
+                <div class="bulk-time-actions">
+                    <button class="button" type="button" id="addBulkTimeRow">Weitere Schicht hinzufügen</button>
+                    <button class="primary" type="submit"{create_disabled}>Schichten nachtragen</button>
+                </div>
             </form>
             {'' if active_employee_names else '<p class="error">Bitte zuerst unter Personen mindestens eine aktive Person anlegen.</p>'}
         </details>
@@ -3615,11 +3640,6 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
-        work_date = self.form_value(form, "work_date").strip()
-        try:
-            datetime.strptime(work_date, "%Y-%m-%d")
-        except ValueError:
-            return self.redirect("/admin/time?error=" + quote_plus("Bitte ein gültiges Datum verwenden."))
         location_id = self.form_value(form, "location_id").strip()
         location = find_location(location_id)
         if not location:
@@ -3630,26 +3650,48 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/time?error=" + quote_plus("Bitte zuerst unter Personen mindestens eine aktive Person anlegen."))
         if normalize_text_key(employee_name) not in active_employees:
             return self.redirect("/admin/time?error=" + quote_plus("Bitte eine aktive Person aus der Liste auswählen."))
-        work_location = self.form_value(form, "work_location").strip()
-        start_time = self.form_value(form, "start_time").strip()
-        end_time = self.form_value(form, "end_time").strip()
-        note = self.form_value(form, "note").strip()
-        duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=True)
-        month = work_date[:7]
-        if error:
-            return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus(error))
+        try:
+            shift_count = min(max(int(self.form_value(form, "shift_count", "0") or 0), 1), 50)
+        except ValueError:
+            shift_count = 0
+        work_location = location["name"]
+        shift_rows = []
+        first_month = current_month()
+        for index in range(shift_count):
+            work_date = self.form_value(form, f"shift_date_{index}").strip()
+            start_time = self.form_value(form, f"shift_start_{index}").strip()
+            end_time = self.form_value(form, f"shift_end_{index}").strip()
+            note = self.form_value(form, f"shift_note_{index}").strip()
+            if not any([start_time, end_time, note]):
+                continue
+            row_number = index + 1
+            if not work_date or not start_time or not end_time:
+                return self.redirect("/admin/time?error=" + quote_plus(f"Zeile {row_number}: Bitte Datum, Anfang und Ende ausfüllen oder die Zeile leer lassen."))
+            try:
+                datetime.strptime(work_date, "%Y-%m-%d")
+            except ValueError:
+                return self.redirect("/admin/time?error=" + quote_plus(f"Zeile {row_number}: Bitte ein gültiges Datum verwenden."))
+            duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=True)
+            first_month = work_date[:7] if not shift_rows else first_month
+            if error:
+                return self.redirect(f"/admin/time?month={quote_plus(work_date[:7])}&error=" + quote_plus(f"Zeile {row_number}: {error}"))
+            shift_rows.append((work_date, start_time, end_time, duration, note))
+        if not shift_rows:
+            return self.redirect("/admin/time?error=" + quote_plus("Bitte mindestens eine Schicht vollständig ausfüllen."))
         now = berlin_now().strftime("%d.%m.%Y %H:%M")
         con = db()
-        con.execute(
-            """
-            INSERT INTO time_entries (location_id, location_name, employee_name, work_location, work_date, start_time, end_time, duration_minutes, note, created_at, updated_at, edited)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (location_id, location["name"], employee_name, work_location, work_date, start_time, end_time, duration, note, now, now),
-        )
+        for work_date, start_time, end_time, duration, note in shift_rows:
+            con.execute(
+                """
+                INSERT INTO time_entries (location_id, location_name, employee_name, work_location, work_date, start_time, end_time, duration_minutes, note, created_at, updated_at, edited)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (location_id, location["name"], employee_name, work_location, work_date, start_time, end_time, duration, note, now, now),
+            )
         con.commit()
         con.close()
-        self.redirect(f"/admin/time?month={quote_plus(month)}&msg=" + quote_plus("Schicht wurde manuell nachgetragen."))
+        message = "Eine Schicht wurde manuell nachgetragen." if len(shift_rows) == 1 else f"{len(shift_rows)} Schichten wurden manuell nachgetragen."
+        self.redirect(f"/admin/time?month={quote_plus(first_month)}&msg=" + quote_plus(message))
 
     def handle_update_time_entry(self):
         if not self.is_admin():

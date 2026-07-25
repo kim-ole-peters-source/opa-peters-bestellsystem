@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v23-admin-time-person-tabs';
+const CACHE_NAME = 'opa-peters-bestellung-v24-admin-time-bulk-create';
 const STATIC_ASSETS = [
   '/',
   '/login',

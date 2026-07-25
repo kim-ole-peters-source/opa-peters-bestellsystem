@@ -742,4 +742,31 @@
     updateVisibilityCategoryStates();
   }
 
+  var bulkTimeRows = document.getElementById('bulkTimeRows');
+  var addBulkTimeRow = document.getElementById('addBulkTimeRow');
+  var bulkTimeShiftCount = document.getElementById('bulkTimeShiftCount');
+  function setBulkTimeCount(value) {
+    if (bulkTimeShiftCount) bulkTimeShiftCount.value = String(value);
+  }
+  if (bulkTimeRows && addBulkTimeRow && bulkTimeShiftCount) {
+    var nextBulkTimeIndex = parseInt(bulkTimeShiftCount.value, 10) || bulkTimeRows.querySelectorAll('[data-bulk-time-row]').length;
+    addBulkTimeRow.addEventListener('click', function () {
+      var template = bulkTimeRows.getAttribute('data-template') || '';
+      if (!template) return;
+      var wrapper = document.createElement('div');
+      wrapper.innerHTML = template.split('__INDEX__').join(String(nextBulkTimeIndex));
+      while (wrapper.firstElementChild) {
+        bulkTimeRows.appendChild(wrapper.firstElementChild);
+      }
+      nextBulkTimeIndex += 1;
+      setBulkTimeCount(nextBulkTimeIndex);
+    });
+    bulkTimeRows.addEventListener('click', function (event) {
+      var button = event.target.closest ? event.target.closest('.bulk-time-remove') : null;
+      if (!button) return;
+      var row = button.closest ? button.closest('[data-bulk-time-row]') : null;
+      if (row && row.parentNode) row.parentNode.removeChild(row);
+    });
+  }
+
 })();
