@@ -123,7 +123,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-admin-time-bulk-create"
+ASSET_VERSION = "2026-07-25-time-duplicate-check"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1337,6 +1337,33 @@ def time_entry_by_id(entry_id):
     row = con.execute("SELECT * FROM time_entries WHERE id=?", (entry_id,)).fetchone()
     con.close()
     return row
+
+
+def find_duplicate_time_entry(employee_name, work_date, start_time, end_time, exclude_id=None):
+    start_minutes = minutes_from_clock_time(start_time)
+    end_minutes = minutes_from_hhmm(end_time)
+    if start_minutes is None or end_minutes is None:
+        return None
+    q = """
+        SELECT * FROM time_entries
+        WHERE work_date=?
+          AND employee_name = ? COLLATE NOCASE
+    """
+    params = [work_date, employee_name]
+    if exclude_id:
+        q += " AND id<>?"
+        params.append(exclude_id)
+    con = db()
+    rows = con.execute(q, params).fetchall()
+    con.close()
+    for row in rows:
+        existing_start = minutes_from_clock_time(row["start_time"])
+        existing_end = minutes_from_hhmm(row["end_time"])
+        if existing_start is None or existing_end is None:
+            continue
+        if existing_start < end_minutes and start_minutes < existing_end:
+            return row
+    return None
 
 
 def build_time_export(month):
@@ -3613,6 +3640,8 @@ class App(BaseHTTPRequestHandler):
         duration, error = validate_time_entry(location, employee_name, work_location, start_time, end_time, admin=False)
         if error:
             return self.show_time_form(error)
+        if find_duplicate_time_entry(employee_name, today_iso(), start_time, end_time):
+            return self.show_time_form("Schicht bereits registriert.")
         now = berlin_now().strftime("%d.%m.%Y %H:%M")
         con = db()
         con.execute(
@@ -3675,6 +3704,17 @@ class App(BaseHTTPRequestHandler):
             first_month = work_date[:7] if not shift_rows else first_month
             if error:
                 return self.redirect(f"/admin/time?month={quote_plus(work_date[:7])}&error=" + quote_plus(f"Zeile {row_number}: {error}"))
+            for existing_date, existing_start, existing_end, _existing_duration, _existing_note in shift_rows:
+                if existing_date == work_date:
+                    existing_start_minutes = minutes_from_clock_time(existing_start)
+                    existing_end_minutes = minutes_from_hhmm(existing_end)
+                    start_minutes = minutes_from_clock_time(start_time)
+                    end_minutes = minutes_from_hhmm(end_time)
+                    if existing_start_minutes is not None and existing_end_minutes is not None and start_minutes is not None and end_minutes is not None:
+                        if existing_start_minutes < end_minutes and start_minutes < existing_end_minutes:
+                            return self.redirect(f"/admin/time?month={quote_plus(work_date[:7])}&error=" + quote_plus(f"Zeile {row_number}: Schicht bereits registriert."))
+            if find_duplicate_time_entry(employee_name, work_date, start_time, end_time):
+                return self.redirect(f"/admin/time?month={quote_plus(work_date[:7])}&error=" + quote_plus(f"Zeile {row_number}: Schicht bereits registriert."))
             shift_rows.append((work_date, start_time, end_time, duration, note))
         if not shift_rows:
             return self.redirect("/admin/time?error=" + quote_plus("Bitte mindestens eine Schicht vollständig ausfüllen."))
@@ -3715,6 +3755,8 @@ class App(BaseHTTPRequestHandler):
         month = work_date[:7]
         if error:
             return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus(error))
+        if find_duplicate_time_entry(employee_name, work_date, start_time, end_time, exclude_id=entry_id):
+            return self.redirect(f"/admin/time?month={quote_plus(month)}&error=" + quote_plus("Schicht bereits registriert."))
         updated_at = berlin_now().strftime("%d.%m.%Y %H:%M")
         con = db()
         con.execute(
