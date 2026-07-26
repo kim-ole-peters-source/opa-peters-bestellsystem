@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-26-push-notifications"
+ASSET_VERSION = "2026-07-26-admin-push-notifications"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1592,6 +1592,13 @@ def push_private_pem():
     return (os.environ.get("PUSH_VAPID_PRIVATE_KEY") or read_text_file(os.environ.get("PUSH_VAPID_PRIVATE_KEY_FILE", "/etc/opa-peters/push_private.pem"))).strip()
 
 
+def push_private_key_for_webpush():
+    configured_file = os.environ.get("PUSH_VAPID_PRIVATE_KEY_FILE", "/etc/opa-peters/push_private.pem")
+    if configured_file and os.path.exists(configured_file):
+        return configured_file
+    return push_private_pem()
+
+
 def push_contact_email():
     contact = (os.environ.get("PUSH_CONTACT_EMAIL") or "mailto:info@opapeters.de").strip()
     return contact if ":" in contact else f"mailto:{contact}"
@@ -1623,6 +1630,13 @@ def push_subscription_rows(enabled_only=True):
     rows = con.execute(q).fetchall()
     con.close()
     return rows
+
+
+def push_subscription_count(enabled_only=True):
+    try:
+        return len(push_subscription_rows(enabled_only=enabled_only))
+    except sqlite3.Error:
+        return 0
 
 
 def save_push_subscription(subscription, user_agent="", owner=""):
@@ -1672,7 +1686,7 @@ def send_push_notification(payload):
         from pywebpush import WebPushException, webpush
     except Exception:
         return {"sent": 0, "failed": 0, "disabled": 0, "configured": False}
-    private_key = push_private_pem()
+    private_key = push_private_key_for_webpush()
     claims = {"sub": push_contact_email()}
     data = json.dumps(payload, ensure_ascii=False)
     sent = failed = disabled = 0
@@ -1717,6 +1731,17 @@ def send_time_entry_push(employee_name, work_location, work_date, start_time, en
         },
     }
     return send_push_notification(payload)
+
+
+def send_push_test_notification():
+    return send_push_notification({
+        "title": "Push-Test",
+        "body": "Push-Benachrichtigung funktioniert auf diesem Gerät.",
+        "url": "/admin/settings",
+        "tag": "opa-peters-push-test",
+        "icon": "/static/icons/icon-192.png",
+        "badge": "/static/icons/icon-192.png",
+    })
 
 
 def maybe_run_auto_time_export():
@@ -1989,7 +2014,7 @@ def page(title, body, admin=False, buyer_key=None):
   <span id="pushStatus">Push nicht aktiv</span>
   <button type="button" id="pushToggle" class="button">Push aktivieren</button>
 </div>
-""" if (admin or buyer_key) else ""
+""" if admin else ""
     return f"""<!doctype html>
 <html lang="de">
 <head>
@@ -2162,10 +2187,6 @@ class App(BaseHTTPRequestHandler):
     def current_push_owner(self):
         if self.is_admin():
             return "Admin"
-        buyer_key = self.current_buyer_key()
-        location = find_location(buyer_key)
-        if buyer_key and location:
-            return location["name"]
         return ""
 
     def show_push_config(self):
@@ -2197,6 +2218,16 @@ class App(BaseHTTPRequestHandler):
         endpoint = str(payload.get("endpoint") or "").strip()
         disable_push_subscription(endpoint)
         return self.send_json({"ok": True})
+
+    def handle_admin_push_test(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        result = send_push_test_notification()
+        if not result.get("configured"):
+            return self.redirect("/admin/settings?error=" + quote_plus("Push ist auf dem Server noch nicht vollständig eingerichtet."))
+        if result.get("sent", 0) > 0:
+            return self.redirect("/admin/settings?msg=" + quote_plus(f"Push-Test gesendet an {result.get('sent', 0)} Gerät(e)."))
+        return self.redirect("/admin/settings?error=" + quote_plus("Push-Test konnte nicht gesendet werden. Bitte Gerät im Adminbereich neu aktivieren."))
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -2577,6 +2608,9 @@ class App(BaseHTTPRequestHandler):
         if latest_log:
             log_text = f"{latest_log['created_at']}: {latest_log['status']} ({latest_log['export_month']}) {latest_log['message'] or ''}"
         settings = load_settings()
+        push_configured = push_is_configured()
+        push_count = push_subscription_count(enabled_only=True)
+        push_status = "eingerichtet" if push_configured else "nicht eingerichtet"
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -3249,6 +3283,10 @@ class App(BaseHTTPRequestHandler):
             <p><strong>E-Mail-Empfänger:</strong> {esc(settings.get('order_email_to') or 'nicht gesetzt')}</p>
             <p><strong>WhatsApp-Kontakt:</strong> {esc(settings.get('whatsapp_number') or 'nicht gesetzt')}</p>
             <p><strong>Zeiterfassungs-Export:</strong> {esc(settings.get('time_export_email') or 'nicht gesetzt')}</p>
+            <p><strong>Push:</strong> {esc(push_status)} · {push_count} aktive(s) Admin-Gerät(e)</p>
+            <form method="post" action="/admin/push/test">
+                <button class="button primary" type="submit" {"disabled" if not push_configured or push_count == 0 else ""}>Push-Test senden</button>
+            </form>
         </section>"""
         self.send_html(page("Admin Einstellungen", body, admin=True, buyer_key=self.current_buyer_key()))
 
@@ -3413,6 +3451,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_time_entry()
             if path == "/admin/login":
                 return self.handle_admin_login()
+            if path == "/admin/push/test":
+                return self.handle_admin_push_test()
             if path == "/admin/add-product":
                 return self.handle_add_product()
             if path == "/admin/update-product":
