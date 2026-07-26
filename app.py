@@ -10,6 +10,7 @@ import html
 import uuid
 import json
 import hmac
+import base64
 import hashlib
 import sqlite3
 import smtplib
@@ -123,10 +124,11 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-25-time-export-pdf-payroll"
+ASSET_VERSION = "2026-07-26-push-notifications"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
+MAX_PUSH_SUBSCRIPTION_BYTES = 24 * 1024
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
 MAX_ORDER_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -541,6 +543,19 @@ def init_db():
             message TEXT,
             auto INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
+        )
+    """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+            endpoint TEXT PRIMARY KEY,
+            subscription_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            user_agent TEXT,
+            owner TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """
     )
@@ -1061,21 +1076,30 @@ def get_orders():
 
 
 def get_open_order_product_ids(location_name):
+    return set(get_open_order_product_quantities(location_name).keys())
+
+
+def get_open_order_product_quantities(location_name):
     con = db()
     rows = con.execute(
         """
-        SELECT DISTINCT oi.product_id
+        SELECT oi.product_id, SUM(oi.quantity) AS total_quantity
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.completed_at IS NULL
           AND oi.product_id IS NOT NULL
           AND oi.quantity > 0
           AND o.location = ?
+        GROUP BY oi.product_id
         """,
         (location_name or "",),
     ).fetchall()
     con.close()
-    return {str(row["product_id"]) for row in rows if row["product_id"] is not None}
+    return {
+        str(row["product_id"]): int(row["total_quantity"] or 0)
+        for row in rows
+        if row["product_id"] is not None and int(row["total_quantity"] or 0) > 0
+    }
 
 
 def set_orders_completed(order_ids, completed=True):
@@ -1552,6 +1576,149 @@ def send_time_export_email(month, filename, data, content_type):
     return recipient
 
 
+def read_text_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def push_public_pem():
+    return (os.environ.get("PUSH_VAPID_PUBLIC_KEY") or read_text_file(os.environ.get("PUSH_VAPID_PUBLIC_KEY_FILE", "/etc/opa-peters/push_public.pem"))).strip()
+
+
+def push_private_pem():
+    return (os.environ.get("PUSH_VAPID_PRIVATE_KEY") or read_text_file(os.environ.get("PUSH_VAPID_PRIVATE_KEY_FILE", "/etc/opa-peters/push_private.pem"))).strip()
+
+
+def push_contact_email():
+    contact = (os.environ.get("PUSH_CONTACT_EMAIL") or "mailto:info@opapeters.de").strip()
+    return contact if ":" in contact else f"mailto:{contact}"
+
+
+def push_public_application_key():
+    public_pem = push_public_pem()
+    if not public_pem:
+        return ""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        key = serialization.load_pem_public_key(public_pem.encode("utf-8"))
+        numbers = key.public_numbers()
+        raw = b"\x04" + int(numbers.x).to_bytes(32, "big") + int(numbers.y).to_bytes(32, "big")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    except Exception:
+        return ""
+
+
+def push_is_configured():
+    return bool(push_public_application_key() and push_private_pem())
+
+
+def push_subscription_rows(enabled_only=True):
+    con = db()
+    q = "SELECT * FROM push_subscriptions"
+    if enabled_only:
+        q += " WHERE enabled=1"
+    rows = con.execute(q).fetchall()
+    con.close()
+    return rows
+
+
+def save_push_subscription(subscription, user_agent="", owner=""):
+    endpoint = str((subscription or {}).get("endpoint") or "").strip()
+    keys = subscription.get("keys") if isinstance(subscription, dict) else None
+    if not endpoint or not isinstance(keys, dict) or not keys.get("p256dh") or not keys.get("auth"):
+        return False
+    now = berlin_now().strftime("%d.%m.%Y %H:%M")
+    subscription_json = json.dumps(subscription, ensure_ascii=False, separators=(",", ":"))
+    con = db()
+    con.execute(
+        """
+        INSERT INTO push_subscriptions (endpoint, subscription_json, enabled, user_agent, owner, created_at, updated_at)
+        VALUES (?, ?, 1, ?, ?, ?, ?)
+        ON CONFLICT(endpoint) DO UPDATE SET
+            subscription_json=excluded.subscription_json,
+            enabled=1,
+            user_agent=excluded.user_agent,
+            owner=excluded.owner,
+            updated_at=excluded.updated_at
+        """,
+        (endpoint, subscription_json, (user_agent or "")[:500], (owner or "")[:120], now, now),
+    )
+    con.commit()
+    con.close()
+    return True
+
+
+def disable_push_subscription(endpoint):
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        return False
+    con = db()
+    cur = con.execute(
+        "UPDATE push_subscriptions SET enabled=0, updated_at=? WHERE endpoint=?",
+        (berlin_now().strftime("%d.%m.%Y %H:%M"), endpoint),
+    )
+    con.commit()
+    con.close()
+    return cur.rowcount > 0
+
+
+def send_push_notification(payload):
+    if not push_is_configured():
+        return {"sent": 0, "failed": 0, "disabled": 0, "configured": False}
+    try:
+        from pywebpush import WebPushException, webpush
+    except Exception:
+        return {"sent": 0, "failed": 0, "disabled": 0, "configured": False}
+    private_key = push_private_pem()
+    claims = {"sub": push_contact_email()}
+    data = json.dumps(payload, ensure_ascii=False)
+    sent = failed = disabled = 0
+    for row in push_subscription_rows(enabled_only=True):
+        try:
+            webpush(
+                subscription_info=json.loads(row["subscription_json"]),
+                data=data,
+                vapid_private_key=private_key,
+                vapid_claims=claims,
+            )
+            sent += 1
+        except WebPushException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (404, 410):
+                disable_push_subscription(row["endpoint"])
+                disabled += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return {"sent": sent, "failed": failed, "disabled": disabled, "configured": True}
+
+
+def send_time_entry_push(employee_name, work_location, work_date, start_time, end_time, duration_minutes, note="", created_by_admin=False):
+    payload = {
+        "title": "Neue Zeiterfassung",
+        "body": f"{employee_name} · {work_location} · {start_time}-{end_time} · {format_decimal((duration_minutes or 0) / 60)} Std.",
+        "url": "/admin/time?month=" + quote_plus((work_date or current_month())[:7]),
+        "tag": f"time-{normalize_text_key(employee_name)}-{work_date}-{start_time}-{end_time}",
+        "icon": "/static/icons/icon-192.png",
+        "badge": "/static/icons/icon-192.png",
+        "details": {
+            "employee": employee_name,
+            "location": work_location,
+            "date": work_date,
+            "start": start_time,
+            "end": end_time,
+            "duration": format_duration(duration_minutes),
+            "note": note or "",
+            "source": "Admin" if created_by_admin else "Mitarbeiter",
+        },
+    }
+    return send_push_notification(payload)
+
+
 def maybe_run_auto_time_export():
     now = berlin_now()
     last_day = calendar.monthrange(now.year, now.month)[1]
@@ -1817,6 +1984,12 @@ def page(title, body, admin=False, buyer_key=None):
     # Die passenden Aktionen liegen dann direkt in der jeweiligen Ansicht.
     nav = "" if (admin or buyer_key) else '<a href="/">Bestellen</a><a href="/admin/login">Admin</a>'
     subtitle = "" if title == "Besteller Login" else "<p>Opa Peters · internes Bestellsystem</p>"
+    push_control = """
+<div id="pushControl" class="push-control" hidden>
+  <span id="pushStatus">Push nicht aktiv</span>
+  <button type="button" id="pushToggle" class="button">Push aktivieren</button>
+</div>
+""" if (admin or buyer_key) else ""
     return f"""<!doctype html>
 <html lang="de">
 <head>
@@ -1834,7 +2007,7 @@ def page(title, body, admin=False, buyer_key=None):
 </head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/brand-logo.png" alt="Opa Peters Logo"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
-<main>{body}</main>
+<main>{push_control}{body}</main>
 <button id="installApp" class="install-app" hidden>App installieren</button>
 <div id="iosInstallHelp" class="install-help" hidden>
   <div class="install-help-card">
@@ -1986,6 +2159,45 @@ class App(BaseHTTPRequestHandler):
         save_cart_draft(buyer_key, state)
         return self.send_json({"ok": True})
 
+    def current_push_owner(self):
+        if self.is_admin():
+            return "Admin"
+        buyer_key = self.current_buyer_key()
+        location = find_location(buyer_key)
+        if buyer_key and location:
+            return location["name"]
+        return ""
+
+    def show_push_config(self):
+        owner = self.current_push_owner()
+        if not owner:
+            return self.send_json({"ok": False, "error": "Nicht angemeldet."}, 401)
+        public_key = push_public_application_key()
+        return self.send_json({
+            "ok": True,
+            "enabled": bool(public_key and push_private_pem()),
+            "publicKey": public_key,
+        })
+
+    def handle_push_subscribe(self):
+        owner = self.current_push_owner()
+        if not owner:
+            return self.send_json({"ok": False, "error": "Nicht angemeldet."}, 401)
+        payload = self.read_json_payload(max_bytes=MAX_PUSH_SUBSCRIPTION_BYTES)
+        subscription = payload.get("subscription") if isinstance(payload.get("subscription"), dict) else payload
+        if not save_push_subscription(subscription, self.headers.get("User-Agent", ""), owner):
+            return self.send_json({"ok": False, "error": "Push-Abo konnte nicht gespeichert werden."}, 400)
+        return self.send_json({"ok": True})
+
+    def handle_push_unsubscribe(self):
+        owner = self.current_push_owner()
+        if not owner:
+            return self.send_json({"ok": False, "error": "Nicht angemeldet."}, 401)
+        payload = self.read_json_payload(max_bytes=MAX_PUSH_SUBSCRIPTION_BYTES)
+        endpoint = str(payload.get("endpoint") or "").strip()
+        disable_push_subscription(endpoint)
+        return self.send_json({"ok": True})
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1998,6 +2210,8 @@ class App(BaseHTTPRequestHandler):
             return self.serve_file(os.path.join(BASE_DIR, path.lstrip("/")), None)
         if path == "/cart-draft":
             return self.show_cart_draft()
+        if path == "/push/config":
+            return self.show_push_config()
         if path.startswith("/uploads/"):
             upload_name = os.path.basename(path.replace("/uploads/", "", 1))
             return self.serve_file(os.path.join(UPLOAD_DIR, upload_name), None)
@@ -2536,7 +2750,7 @@ class App(BaseHTTPRequestHandler):
         products = filter_products_by_search(products, search_text, include_source=False)
         categories = get_categories_for_buyer(buyer_key)
         location_name = location_data["name"] if location_data else buyer_label(buyer_key)
-        open_order_product_ids = get_open_order_product_ids(location_name)
+        open_order_product_quantities = get_open_order_product_quantities(location_name)
         contact_name = (location_data or {}).get("contact_name", "").strip()
         role_badge = f"<p class='role-badge'>{esc(role_label((location_data or {}).get('role')))}</p>"
         personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
@@ -2558,8 +2772,9 @@ class App(BaseHTTPRequestHandler):
         def product_card(p):
             img = f'<img src="/uploads/{esc(p["image_filename"])}" alt="">' if p["image_filename"] else '<div class="noimg">kein Bild</div>'
             categories_label = category_text(product_categories(p))
-            already_ordered = str(p["id"]) in open_order_product_ids
-            status_badge = '<div class="ordered-open-badge">Bereits offen bestellt</div>' if already_ordered else ""
+            open_quantity = open_order_product_quantities.get(str(p["id"]), 0)
+            already_ordered = open_quantity > 0
+            status_badge = f'<div class="ordered-open-badge">Bereits offen bestellt: {open_quantity}</div>' if already_ordered else ""
             card_class = "card product-card ordered-open-product" if already_ordered else "card product-card"
             return f"""
             <article class="{card_class}" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}">
@@ -3188,6 +3403,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_buyer_login()
             if path == "/cart-draft":
                 return self.handle_cart_draft()
+            if path == "/push/subscribe":
+                return self.handle_push_subscribe()
+            if path == "/push/unsubscribe":
+                return self.handle_push_unsubscribe()
             if path == "/order":
                 return self.handle_order()
             if path == "/time":
@@ -3741,6 +3960,7 @@ class App(BaseHTTPRequestHandler):
         )
         con.commit()
         con.close()
+        send_time_entry_push(employee_name, work_location, today_iso(), start_time, end_time, duration, note, created_by_admin=False)
         order_back_button = '<a class="button primary" href="/">Zurück zum Bestellsystem</a>' if location_can_order(location) else ""
         body = f"""
         <section class="box narrow success">
@@ -3820,6 +4040,8 @@ class App(BaseHTTPRequestHandler):
             )
         con.commit()
         con.close()
+        for work_date, start_time, end_time, duration, note in shift_rows:
+            send_time_entry_push(employee_name, work_location, work_date, start_time, end_time, duration, note, created_by_admin=True)
         message = "Eine Schicht wurde manuell nachgetragen." if len(shift_rows) == 1 else f"{len(shift_rows)} Schichten wurden manuell nachgetragen."
         self.redirect(f"/admin/time?month={quote_plus(first_month)}&msg=" + quote_plus(message))
 

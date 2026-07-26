@@ -95,11 +95,124 @@
     });
   }
 
+  var serviceWorkerReady = null;
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
-      navigator.serviceWorker.register('/service-worker.js').catch(function () {});
+      serviceWorkerReady = navigator.serviceWorker.register('/service-worker.js').then(function () {
+        return navigator.serviceWorker.ready;
+      }).catch(function () { return null; });
     });
   }
+
+  function urlBase64ToUint8Array(base64String) {
+    var padding = repeatText('=', (4 - base64String.length % 4) % 4);
+    var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    var rawData = window.atob(base64);
+    var outputArray = new Uint8Array(rawData.length);
+    for (var i = 0; i < rawData.length; i += 1) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  }
+
+  function postJson(url, data) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(data || {})
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (payload) {
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || 'Aktion fehlgeschlagen.');
+        }
+        return payload;
+      });
+    });
+  }
+
+  var pushControl = document.getElementById('pushControl');
+  var pushToggle = document.getElementById('pushToggle');
+  var pushStatus = document.getElementById('pushStatus');
+  var pushConfig = null;
+  var currentPushSubscription = null;
+
+  function setPushText(text, enabled) {
+    if (pushStatus) pushStatus.textContent = text;
+    if (pushToggle) pushToggle.textContent = enabled ? 'Push deaktivieren' : 'Push aktivieren';
+  }
+
+  function refreshPushState() {
+    if (!pushControl || !pushToggle) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    fetch('/push/config', { credentials: 'same-origin' }).then(function (response) {
+      if (!response.ok) throw new Error('Keine Push-Konfiguration.');
+      return response.json();
+    }).then(function (config) {
+      pushConfig = config;
+      if (!config.enabled || !config.publicKey) {
+        pushControl.hidden = false;
+        pushToggle.disabled = true;
+        setPushText('Push ist auf dem Server noch nicht eingerichtet.', false);
+        return;
+      }
+      pushControl.hidden = false;
+      return (serviceWorkerReady || navigator.serviceWorker.ready).then(function (registration) {
+        if (!registration || !registration.pushManager) return null;
+        return registration.pushManager.getSubscription();
+      }).then(function (subscription) {
+        currentPushSubscription = subscription;
+        if (Notification.permission === 'denied') {
+          pushToggle.disabled = true;
+          setPushText('Push wurde im Browser blockiert.', false);
+        } else if (subscription) {
+          pushToggle.disabled = false;
+          setPushText('Push auf diesem Gerät aktiv.', true);
+        } else {
+          pushToggle.disabled = false;
+          setPushText('Push auf diesem Gerät aus.', false);
+        }
+      });
+    }).catch(function () {});
+  }
+
+  if (pushToggle) {
+    pushToggle.addEventListener('click', function () {
+      if (!pushConfig || !pushConfig.publicKey) return;
+      pushToggle.disabled = true;
+      (serviceWorkerReady || navigator.serviceWorker.ready).then(function (registration) {
+        if (currentPushSubscription) {
+          var endpoint = currentPushSubscription.endpoint;
+          return postJson('/push/unsubscribe', { endpoint: endpoint }).then(function () {
+            return currentPushSubscription.unsubscribe().catch(function () {});
+          }).then(function () {
+            currentPushSubscription = null;
+            setPushText('Push auf diesem Gerät aus.', false);
+          });
+        }
+        return Notification.requestPermission().then(function (permission) {
+          if (permission !== 'granted') {
+            setPushText('Push wurde nicht erlaubt.', false);
+            return null;
+          }
+          return registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(pushConfig.publicKey)
+          }).then(function (subscription) {
+            return postJson('/push/subscribe', { subscription: subscription.toJSON() }).then(function () {
+              currentPushSubscription = subscription;
+              setPushText('Push auf diesem Gerät aktiv.', true);
+            });
+          });
+        });
+      }).catch(function () {
+        setPushText('Push konnte nicht geändert werden.', !!currentPushSubscription);
+      }).then(function () {
+        pushToggle.disabled = false;
+      });
+    });
+  }
+  window.addEventListener('load', refreshPushState);
 
   var deferredPrompt = null;
   var button = document.getElementById('installApp');

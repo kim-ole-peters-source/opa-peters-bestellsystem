@@ -78,6 +78,29 @@ strong { font-weight: 750; }
 
 a { color: var(--primary); }
 
+.push-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-tiny);
+}
+.push-control span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+}
+.push-control .button {
+  min-height: 40px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
 a:focus-visible,
 button:focus-visible,
 .button:focus-visible,
@@ -652,6 +675,7 @@ button:active, .button:active { transform: translateY(1px); }
   color: var(--green-text);
   font-size: 12px;
   font-weight: 850;
+  line-height: 1.2;
 }
 .card img, .noimg {
   width: 100%; height: 150px; object-fit: contain; border-radius: var(--radius-md);
@@ -990,6 +1014,11 @@ tr:hover td { background: var(--primary-soft); }
   .box { padding: 15px; border-radius: 20px; margin-bottom: 12px; box-shadow: var(--shadow-tiny); }
   .filters { padding: 10px; border-radius: 18px; gap: 10px; }
   .grid { grid-template-columns: 1fr; gap: 12px; }
+  .push-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .push-control .button { width: 100%; }
   .bulk-time-row { grid-template-columns: 1fr; padding: 10px; }
   .bulk-time-note, .bulk-time-remove { grid-column: auto; }
   .bulk-time-actions { justify-content: stretch; }
