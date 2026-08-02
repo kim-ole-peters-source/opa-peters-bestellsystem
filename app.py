@@ -3208,6 +3208,7 @@ class App(BaseHTTPRequestHandler):
         msg = (query.get("msg", [""])[0] or "").strip()
         error = (query.get("error", [""])[0] or "").strip()
         combined_pdf = (query.get("pdf", [""])[0] or "").strip()
+        open_location = (query.get("open_location", [""])[0] or "").strip()
         orders = get_orders()
         grouped_orders = {}
         for order in orders:
@@ -3240,12 +3241,16 @@ class App(BaseHTTPRequestHandler):
                     <form method="post" action="/admin/order-items/status">
                         <input type="hidden" name="item_{item['id']}" value="1">
                         <input type="hidden" name="completed" value="{0 if item_completed else 1}">
+                        <input type="hidden" name="return_order" value="{order['id']}">
+                        <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
                         <button type="submit" class="{'button' if item_completed else 'primary'}">{'Wieder öffnen' if item_completed else 'Position erledigt'}</button>
                     </form>
                     """
                     item_delete_form = f"""
                     <form method="post" action="/admin/order-items/delete" data-confirm="Diese Position wirklich aus der Bestellung löschen?">
                         <input type="hidden" name="item_{item['id']}" value="1">
+                        <input type="hidden" name="return_order" value="{order['id']}">
+                        <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
                         <button type="submit" class="danger">Position löschen</button>
                     </form>
                     """
@@ -3266,7 +3271,7 @@ class App(BaseHTTPRequestHandler):
                 image_link = f"<a class='button' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if order["order_image_filename"] else ""
                 cards.append(
                     f"""
-                    <article class="{card_class}">
+                    <article id="order-{order['id']}" class="{card_class}">
                         <div class="section-head">
                             <div>
                                 <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
@@ -3291,7 +3296,7 @@ class App(BaseHTTPRequestHandler):
                 )
             location_panels.append(
                 f"""
-                <details class="category-panel order-location-panel">
+                <details class="category-panel order-location-panel" {"open" if location_name == open_location else ""}>
                     <summary>{esc(location_name)} <span>{len(location_orders)} Bestellung(en)</span></summary>
                     <div class="order-location-content">{''.join(cards)}</div>
                 </details>
@@ -3953,6 +3958,13 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        return_order = self.form_value(form, "return_order").strip()
+        return_location = self.form_value(form, "return_location").strip()
+        return_target = "/admin/orders"
+        if return_location:
+            return_target += "?open_location=" + quote_plus(return_location)
+        if return_order.isdigit():
+            return_target += "#order-" + return_order
         item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
         if not item_ids:
             return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Position auswählen."))
@@ -3960,20 +3972,26 @@ class App(BaseHTTPRequestHandler):
         changed = set_order_items_completed(item_ids, completed=completed)
         if not changed:
             return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
-        message = "Position als erledigt markiert." if completed else "Position wieder geöffnet."
-        return self.redirect("/admin/orders?msg=" + quote_plus(message))
+        return self.redirect(return_target)
 
     def handle_delete_order_items(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        return_order = self.form_value(form, "return_order").strip()
+        return_location = self.form_value(form, "return_location").strip()
+        return_target = "/admin/orders"
+        if return_location:
+            return_target += "?open_location=" + quote_plus(return_location)
+        if return_order.isdigit():
+            return_target += "#order-" + return_order
         item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
         if not item_ids:
             return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Position auswählen."))
         changed = delete_order_items_by_ids(item_ids)
         if not changed:
             return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
-        return self.redirect("/admin/orders?msg=" + quote_plus(f"{changed} Position(en) aus der Bestellung gelöscht."))
+        return self.redirect(return_target)
 
     def handle_add_category(self):
         if not self.is_admin():
