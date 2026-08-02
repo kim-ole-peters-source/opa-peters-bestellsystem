@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-07-26-admin-push-notifications"
+ASSET_VERSION = "2026-08-02-order-items-min-stock"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -300,6 +300,27 @@ def make_location_id(name):
     return base[:40] or "standort"
 
 
+def normalize_min_stock_items(raw_items):
+    normalized = []
+    seen = set()
+    for item in raw_items or []:
+        if not isinstance(item, dict):
+            continue
+        product_id = str(item.get("product_id") or "").strip()
+        if not product_id.isdigit() or product_id in seen:
+            continue
+        try:
+            quantity = int(item.get("quantity") or 0)
+        except (TypeError, ValueError):
+            quantity = 0
+        quantity = max(0, min(quantity, MAX_ORDER_QUANTITY))
+        if quantity <= 0:
+            continue
+        seen.add(product_id)
+        normalized.append({"product_id": product_id, "quantity": quantity})
+    return normalized
+
+
 def normalize_locations(raw_locations):
     normalized = []
     used_ids = set()
@@ -311,6 +332,8 @@ def normalize_locations(raw_locations):
             role = str(item.get("role") or item.get("access_role") or "standard").strip()
             time_tracking_enabled = bool(item.get("time_tracking_enabled"))
             time_tracking_max_end = str(item.get("time_tracking_max_end") or "")
+            min_stock_enabled = bool(item.get("min_stock_enabled"))
+            min_stock_items = normalize_min_stock_items(item.get("min_stock_items", []))
             raw_id = str(item.get("id") or "").strip()
         else:
             name = str(item or "").strip()
@@ -319,6 +342,8 @@ def normalize_locations(raw_locations):
             role = "standard"
             time_tracking_enabled = False
             time_tracking_max_end = ""
+            min_stock_enabled = False
+            min_stock_items = []
             raw_id = ""
         if not name:
             continue
@@ -337,6 +362,8 @@ def normalize_locations(raw_locations):
             "role": role if role in ACCESS_ROLE_KEYS else "standard",
             "time_tracking_enabled": time_tracking_enabled,
             "time_tracking_max_end": time_tracking_max_end if is_valid_hhmm(time_tracking_max_end) else "",
+            "min_stock_enabled": min_stock_enabled,
+            "min_stock_items": min_stock_items,
         })
     return normalized
 
@@ -500,6 +527,8 @@ def init_db():
             category TEXT NOT NULL DEFAULT 'Allgemein',
             source TEXT NOT NULL,
             quantity INTEGER NOT NULL,
+            completed_at TEXT,
+            deleted_at TEXT,
             FOREIGN KEY(order_id) REFERENCES orders(id)
         )
     """
@@ -580,6 +609,8 @@ def init_db():
     add_column_if_missing(con, "orders", "pdf_data", "BLOB")
     add_column_if_missing(con, "orders", "completed_at", "TEXT")
     add_column_if_missing(con, "order_items", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
+    add_column_if_missing(con, "order_items", "completed_at", "TEXT")
+    add_column_if_missing(con, "order_items", "deleted_at", "TEXT")
     add_column_if_missing(con, "time_entries", "updated_at", "TEXT")
     add_column_if_missing(con, "time_entries", "edited", "INTEGER NOT NULL DEFAULT 0")
 
@@ -848,6 +879,22 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     return rows
 
 
+def get_min_stock_items_for_location(location, buyer_key=None):
+    if not location or not location.get("min_stock_enabled"):
+        return []
+    products_by_id = {
+        str(product["id"]): product
+        for product in get_products(True, buyer_key=buyer_key or location.get("id"), sort="category")
+    }
+    items = []
+    for item in normalize_min_stock_items(location.get("min_stock_items", [])):
+        product = products_by_id.get(str(item.get("product_id")))
+        if not product:
+            continue
+        items.append({"product": product, "quantity": int(item.get("quantity") or 0)})
+    return items
+
+
 def get_all_categories(active_only=True, include_deleted=False):
     con = db()
     q = "SELECT * FROM categories"
@@ -1089,6 +1136,8 @@ def get_open_order_product_quantities(location_name):
         WHERE o.completed_at IS NULL
           AND oi.product_id IS NOT NULL
           AND oi.quantity > 0
+          AND oi.completed_at IS NULL
+          AND oi.deleted_at IS NULL
           AND o.location = ?
         GROUP BY oi.product_id
         """,
@@ -1116,9 +1165,45 @@ def set_orders_completed(order_ids, completed=True):
     return changed
 
 
+def set_order_items_completed(item_ids, completed=True):
+    item_ids = [str(item_id) for item_id in item_ids if str(item_id).isdigit()]
+    if not item_ids:
+        return 0
+    placeholders = ",".join("?" for _ in item_ids)
+    completed_at = berlin_now().strftime("%d.%m.%Y %H:%M") if completed else None
+    con = db()
+    con.execute(
+        f"UPDATE order_items SET completed_at=? WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        [completed_at] + item_ids,
+    )
+    con.commit()
+    changed = con.total_changes
+    con.close()
+    return changed
+
+
+def delete_order_items_by_ids(item_ids):
+    item_ids = [str(item_id) for item_id in item_ids if str(item_id).isdigit()]
+    if not item_ids:
+        return 0
+    placeholders = ",".join("?" for _ in item_ids)
+    con = db()
+    con.execute(
+        f"UPDATE order_items SET deleted_at=? WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        [berlin_now().isoformat(timespec="seconds")] + item_ids,
+    )
+    con.commit()
+    changed = con.total_changes
+    con.close()
+    return changed
+
+
 def get_order_items(order_id):
     con = db()
-    rows = con.execute("SELECT * FROM order_items WHERE order_id=? ORDER BY category, product_name", (order_id,)).fetchall()
+    rows = con.execute(
+        "SELECT * FROM order_items WHERE order_id=? AND deleted_at IS NULL ORDER BY category, product_name",
+        (order_id,),
+    ).fetchall()
     con.close()
     return rows
 
@@ -2790,6 +2875,29 @@ class App(BaseHTTPRequestHandler):
         personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
         time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if location_can_time(location_data) else ""
         logout_button = '<a class="button logout-button" href="/logout">Logout</a>'
+        min_stock_items = get_min_stock_items_for_location(location_data, buyer_key=buyer_key)
+        min_stock_html = ""
+        if min_stock_items:
+            min_stock_cards = "".join(
+                f"""
+                <article class="min-stock-info-card">
+                    <strong>{esc(item['product']['name'])}</strong>
+                    <span>{esc(category_text(product_categories(item['product'])))}</span>
+                    <small>{esc(item['product']['package_size'])}</small>
+                    <b>Mindestmenge: {esc(item['quantity'])}</b>
+                </article>
+                """
+                for item in min_stock_items
+            )
+            min_stock_html = f"""
+            <section class="min-stock-info">
+                <div>
+                    <h3>Mindestbestellmengen</h3>
+                    <p class="muted">Diese Mengen sind für deinen Standort als Orientierung hinterlegt.</p>
+                </div>
+                <div class="min-stock-info-grid">{min_stock_cards}</div>
+            </section>
+            """
         cat_options = '<option value="">Alle Kategorien</option>' + "".join(
             f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
         )
@@ -2848,6 +2956,7 @@ class App(BaseHTTPRequestHandler):
                 <button class="primary" type="submit">Suchen</button>
                 <a class="button" href="/">Reset</a>
             </form>
+            {min_stock_html}
             <p class="muted">{len(products)} Produkt(e) gefunden.</p>
         </section>
         <form method="post" action="/order" enctype="multipart/form-data">
@@ -3100,52 +3209,92 @@ class App(BaseHTTPRequestHandler):
         error = (query.get("error", [""])[0] or "").strip()
         combined_pdf = (query.get("pdf", [""])[0] or "").strip()
         orders = get_orders()
-        cards = []
+        grouped_orders = {}
         for order in orders:
-            items = get_order_items(order["id"])
-            is_completed = bool(order["completed_at"])
-            status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
-            status_class = "order-status done" if is_completed else "order-status open"
-            card_class = "box order-card order-completed" if is_completed else "box order-card"
-            complete_form = (
-                f"""
-                <form method="post" action="/admin/orders/status">
-                    <input type="hidden" name="order_{order['id']}" value="1">
-                    <input type="hidden" name="completed" value="{0 if is_completed else 1}">
-                    <button type="submit" class="{'button' if is_completed else 'primary'}">{'Wieder öffnen' if is_completed else 'Als erledigt markieren'}</button>
-                </form>
-                """
-            )
-            item_rows = "".join(
-                f"<tr><td>{esc(item['product_name'])}</td><td>{esc(item['category'])}</td><td>{esc(item['package_size'])}</td><td>{esc(item['quantity'])}</td></tr>"
-                for item in items
-            )
-            position_count = sum(1 for item in items if item["quantity"] > 0)
-            quantity_sum = sum(item["quantity"] for item in items)
-            image_link = f"<a class='button' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if order["order_image_filename"] else ""
-            cards.append(
-                f"""
-                <article class="{card_class}">
-                    <div class="section-head">
-                        <div>
-                            <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
-                            <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
-                            <p class="{status_class}">{status_label}</p>
+            grouped_orders.setdefault(order["location"] or "Ohne Standort", []).append(order)
+        location_panels = []
+        for location_name in sorted(grouped_orders.keys(), key=lambda value: value.lower()):
+            cards = []
+            location_orders = sorted(grouped_orders[location_name], key=lambda row: (row["created_at"] or "", row["id"]), reverse=True)
+            for order in location_orders:
+                items = get_order_items(order["id"])
+                is_completed = bool(order["completed_at"])
+                status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
+                status_class = "order-status done" if is_completed else "order-status open"
+                card_class = "box order-card order-completed" if is_completed else "box order-card"
+                complete_form = (
+                    f"""
+                    <form method="post" action="/admin/orders/status">
+                        <input type="hidden" name="order_{order['id']}" value="1">
+                        <input type="hidden" name="completed" value="{0 if is_completed else 1}">
+                        <button type="submit" class="{'button' if is_completed else 'primary'}">{'Wieder öffnen' if is_completed else 'Als erledigt markieren'}</button>
+                    </form>
+                    """
+                )
+                item_rows = []
+                for item in items:
+                    item_completed = bool(item["completed_at"])
+                    item_status = f"Erledigt am {esc(item['completed_at'])}" if item_completed else "Offen"
+                    item_status_class = "item-status done" if item_completed else "item-status open"
+                    item_complete_form = f"""
+                    <form method="post" action="/admin/order-items/status">
+                        <input type="hidden" name="item_{item['id']}" value="1">
+                        <input type="hidden" name="completed" value="{0 if item_completed else 1}">
+                        <button type="submit" class="{'button' if item_completed else 'primary'}">{'Wieder öffnen' if item_completed else 'Position erledigt'}</button>
+                    </form>
+                    """
+                    item_delete_form = f"""
+                    <form method="post" action="/admin/order-items/delete" data-confirm="Diese Position wirklich aus der Bestellung löschen?">
+                        <input type="hidden" name="item_{item['id']}" value="1">
+                        <button type="submit" class="danger">Position löschen</button>
+                    </form>
+                    """
+                    item_rows.append(
+                        f"""
+                        <tr class="{'order-item-completed' if item_completed else ''}">
+                            <td>{esc(item['product_name'])}</td>
+                            <td>{esc(item['category'])}</td>
+                            <td>{esc(item['package_size'])}</td>
+                            <td>{esc(item['quantity'])}</td>
+                            <td><span class="{item_status_class}">{item_status}</span></td>
+                            <td><div class="table-actions item-actions">{item_complete_form}{item_delete_form}</div></td>
+                        </tr>
+                        """
+                    )
+                position_count = sum(1 for item in items if item["quantity"] > 0)
+                quantity_sum = sum(item["quantity"] for item in items)
+                image_link = f"<a class='button' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if order["order_image_filename"] else ""
+                cards.append(
+                    f"""
+                    <article class="{card_class}">
+                        <div class="section-head">
+                            <div>
+                                <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
+                                <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
+                                <p class="{status_class}">{status_label}</p>
+                            </div>
+                            <div class="table-actions">
+                                <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF öffnen</a>
+                                {image_link}
+                                {complete_form}
+                                <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
+                                    <input type="hidden" name="order_{order['id']}" value="1">
+                                    <button type="submit" class="danger">Löschen</button>
+                                </form>
+                            </div>
                         </div>
-                        <div class="table-actions">
-                            <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF öffnen</a>
-                            {image_link}
-                            {complete_form}
-                            <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
-                                <input type="hidden" name="order_{order['id']}" value="1">
-                                <button type="submit" class="danger">Löschen</button>
-                            </form>
-                        </div>
-                    </div>
-                    <p><strong>Gesamtübersicht:</strong> {position_count} Position(en), {quantity_sum} Gebinde insgesamt.</p>
-                    {f'<p><strong>Bemerkung:</strong> {esc(order["note"])}</p>' if order["note"] else ''}
-                    <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Menge</th></tr>{item_rows if item_rows else '<tr><td colspan="4">Keine Positionen gespeichert.</td></tr>'}</table></div>
-                </article>
+                        <p><strong>Gesamtübersicht:</strong> {position_count} Position(en), {quantity_sum} Gebinde insgesamt.</p>
+                        {f'<p><strong>Bemerkung:</strong> {esc(order["note"])}</p>' if order["note"] else ''}
+                        <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Menge</th><th>Status</th><th>Position</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
+                    </article>
+                    """
+                )
+            location_panels.append(
+                f"""
+                <details class="category-panel order-location-panel">
+                    <summary>{esc(location_name)} <span>{len(location_orders)} Bestellung(en)</span></summary>
+                    <div class="order-location-content">{''.join(cards)}</div>
+                </details>
                 """
             )
         combined_button = (
@@ -3172,7 +3321,7 @@ class App(BaseHTTPRequestHandler):
                 </div>
             </form>
         </section>
-        {''.join(cards) if cards else '<section class="box"><p>Noch keine Bestellungen vorhanden.</p></section>'}
+        <section class="order-location-sections">{''.join(location_panels) if location_panels else '<section class="box"><p>Noch keine Bestellungen vorhanden.</p></section>'}</section>
         """
         self.send_html(page("Bestellungen", body, admin=True, buyer_key=self.current_buyer_key()))
 
@@ -3300,6 +3449,39 @@ class App(BaseHTTPRequestHandler):
         time_limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options())
         categories = get_category_names(True)
         products_for_visibility = get_products(False, sort="category")
+        products_for_min_stock = get_products(False, sort="category")
+        def min_stock_product_options(selected_product_id=""):
+            selected_product_id = str(selected_product_id or "")
+            options = ['<option value="">Produkt auswählen</option>']
+            for product in products_for_min_stock:
+                label = f"{product['name']} · {product['package_size']} · {category_text(product_categories(product))}"
+                selected = "selected" if str(product["id"]) == selected_product_id else ""
+                options.append(f'<option value="{product["id"]}" {selected}>{esc(label)}</option>')
+            return "".join(options)
+        def min_stock_rows(prefix, items, product_options_blank):
+            normalized_items = normalize_min_stock_items(items)
+            row_items = normalized_items if normalized_items else [{"product_id": "", "quantity": ""}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                rows_html.append(
+                    f"""
+                    <div class="min-stock-row" data-min-stock-row>
+                        <label>Produkt<select name="{prefix}_product_{row_index}">{min_stock_product_options(item.get('product_id'))}</select></label>
+                        <label>Mindestmenge<input type="number" name="{prefix}_qty_{row_index}" min="1" max="{MAX_ORDER_QUANTITY}" step="1" inputmode="numeric" value="{esc(item.get('quantity', ''))}"></label>
+                        <button class="button min-stock-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_template">
+                <div class="min-stock-row" data-min-stock-row>
+                    <label>Produkt<select name="{prefix}_product___INDEX__">{product_options_blank}</select></label>
+                    <label>Mindestmenge<input type="number" name="{prefix}_qty___INDEX__" min="1" max="{MAX_ORDER_QUANTITY}" step="1" inputmode="numeric"></label>
+                    <button class="button min-stock-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
         category_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
             for category in categories
@@ -3315,6 +3497,13 @@ class App(BaseHTTPRequestHandler):
                 location_category_checks.append(
                     f'<label class="visibility-option"><input type="checkbox" name="location_category_{index}_{esc(category)}" value="1" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
                 )
+            min_stock_prefix = f"location_min_stock_{index}"
+            min_stock_enabled = bool(location.get("min_stock_enabled"))
+            min_stock_row_html, min_stock_count, min_stock_template = min_stock_rows(
+                min_stock_prefix,
+                location.get("min_stock_items", []),
+                min_stock_product_options(""),
+            )
             rows.append(
                 f"""
                 <div class="location-row">
@@ -3331,9 +3520,26 @@ class App(BaseHTTPRequestHandler):
                         <div class="visibility-grid">{''.join(location_category_checks)}</div>
                         <p class="muted">Hier steuerst du Kategorien. Einzelne Produkte kannst du zusätzlich unter <a href="/admin/visibility?location={esc(location['id'])}">Sichtbarkeit</a> bearbeiten.</p>
                     </fieldset>
+                    <fieldset class="visibility-box min-stock-admin full">
+                        <legend>Mindestbestand</legend>
+                        <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="location_min_stock_enabled_{index}" value="1" data-target="min_stock_content_{index}" {"checked" if min_stock_enabled else ""}> Mindestbestellmengen für diesen Standort aktivieren</label>
+                        <div id="min_stock_content_{index}" class="min-stock-admin-content" {"hidden" if not min_stock_enabled else ""}>
+                            <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
+                            <input type="hidden" id="{min_stock_prefix}_count" name="{min_stock_prefix}_count" value="{min_stock_count}">
+                            <div id="{min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{min_stock_prefix}_template" data-count-id="{min_stock_prefix}_count">{min_stock_row_html}</div>
+                            {min_stock_template}
+                            <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
+                        </div>
+                    </fieldset>
                 </div>
                 """
             )
+        new_min_stock_prefix = "new_location_min_stock"
+        new_min_stock_row_html, new_min_stock_count, new_min_stock_template = min_stock_rows(
+            new_min_stock_prefix,
+            [],
+            min_stock_product_options(""),
+        )
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -3353,6 +3559,17 @@ class App(BaseHTTPRequestHandler):
                         <legend>Produktkategorien für neuen Standort</legend>
                         <div class="visibility-grid">{category_visibility_checks}</div>
                         <p class="muted">Nur Produkte aus diesen Kategorien werden für den neuen Standort sichtbar.</p>
+                    </fieldset>
+                    <fieldset class="visibility-box min-stock-admin full">
+                        <legend>Mindestbestand</legend>
+                        <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="new_location_min_stock_enabled" value="1" data-target="new_location_min_stock_content"> Mindestbestellmengen für diesen Standort aktivieren</label>
+                        <div id="new_location_min_stock_content" class="min-stock-admin-content" hidden>
+                            <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
+                            <input type="hidden" id="{new_min_stock_prefix}_count" name="{new_min_stock_prefix}_count" value="{new_min_stock_count}">
+                            <div id="{new_min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{new_min_stock_prefix}_template" data-count-id="{new_min_stock_prefix}_count">{new_min_stock_row_html}</div>
+                            {new_min_stock_template}
+                            <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
+                        </div>
                     </fieldset>
                 </div>
                 <button class="primary" type="submit">Standorte speichern</button>
@@ -3465,6 +3682,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_order_status()
             if path == "/admin/orders/delete":
                 return self.handle_delete_orders()
+            if path == "/admin/order-items/status":
+                return self.handle_order_item_status()
+            if path == "/admin/order-items/delete":
+                return self.handle_delete_order_items()
             if path == "/admin/delete-product":
                 return self.handle_delete_product()
             if path == "/admin/add-category":
@@ -3728,6 +3949,32 @@ class App(BaseHTTPRequestHandler):
         message = "Bestellung als erledigt markiert." if completed else "Bestellung wieder geöffnet."
         return self.redirect("/admin/orders?msg=" + quote_plus(message))
 
+    def handle_order_item_status(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
+        if not item_ids:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Position auswählen."))
+        completed = self.form_value(form, "completed", "1") == "1"
+        changed = set_order_items_completed(item_ids, completed=completed)
+        if not changed:
+            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
+        message = "Position als erledigt markiert." if completed else "Position wieder geöffnet."
+        return self.redirect("/admin/orders?msg=" + quote_plus(message))
+
+    def handle_delete_order_items(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
+        if not item_ids:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Position auswählen."))
+        changed = delete_order_items_by_ids(item_ids)
+        if not changed:
+            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
+        return self.redirect("/admin/orders?msg=" + quote_plus(f"{changed} Position(en) aus der Bestellung gelöscht."))
+
     def handle_add_category(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -3869,6 +4116,21 @@ class App(BaseHTTPRequestHandler):
         self.redirect("/admin/employees?msg=" + quote_plus(f"Personen gespeichert. {active_count} aktive Person(en) verfügbar."))
 
 
+    def collect_min_stock_items(self, form, prefix):
+        try:
+            count = int(self.form_value(form, f"{prefix}_count", "0") or "0")
+        except ValueError:
+            count = 0
+        items = []
+        for row_index in range(count):
+            product_id = self.form_value(form, f"{prefix}_product_{row_index}").strip()
+            quantity = self.form_value(form, f"{prefix}_qty_{row_index}").strip()
+            if not product_id and not quantity:
+                continue
+            items.append({"product_id": product_id, "quantity": quantity})
+        return normalize_min_stock_items(items)
+
+
     def handle_locations(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -3896,6 +4158,8 @@ class App(BaseHTTPRequestHandler):
                     "password": self.form_value(form, f"location_password_{index}").strip(),
                     "time_tracking_enabled": bool(self.form_value(form, f"location_time_tracking_{index}")),
                     "time_tracking_max_end": self.form_value(form, f"location_time_tracking_max_end_{index}").strip(),
+                    "min_stock_enabled": bool(self.form_value(form, f"location_min_stock_enabled_{index}")),
+                    "min_stock_items": self.collect_min_stock_items(form, f"location_min_stock_{index}"),
                 }
             )
             existing_category_updates[location_id] = [
@@ -3917,6 +4181,8 @@ class App(BaseHTTPRequestHandler):
                     "password": self.form_value(form, "new_location_password").strip(),
                     "time_tracking_enabled": bool(self.form_value(form, "new_location_time_tracking")),
                     "time_tracking_max_end": self.form_value(form, "new_location_time_tracking_max_end").strip(),
+                    "min_stock_enabled": bool(self.form_value(form, "new_location_min_stock_enabled")),
+                    "min_stock_items": self.collect_min_stock_items(form, "new_location_min_stock"),
                 }
             )
         if not locations:
