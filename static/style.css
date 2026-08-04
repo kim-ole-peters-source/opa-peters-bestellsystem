@@ -921,13 +921,14 @@ tr:hover td { background: var(--primary-soft); }
 .min-stock-row label { margin: 0; }
 .min-stock-remove { white-space: nowrap; }
 .min-stock-info {
-  display: grid; gap: 12px; margin-top: 14px; padding: 14px; border: 1px solid #b9d7c4; border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(240, 253, 244, .94), rgba(255, 255, 255, .95));
+  display: grid; gap: 12px; margin-top: 16px; padding: 16px; border: 2px solid #86c8a0; border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(232, 247, 238, .98), rgba(255, 255, 255, .96));
+  box-shadow: 0 12px 30px rgba(31, 122, 73, .12);
 }
-.min-stock-info h3 { margin: 0 0 3px; color: var(--green-text); }
+.min-stock-info h3 { margin: 0 0 3px; color: var(--green-text); font-size: 20px; }
 .min-stock-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
 .min-stock-info-card {
-  display: grid; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid #b9d7c4; background: #fff;
+  display: grid; gap: 5px; padding: 12px; border-radius: var(--radius-md); border: 1px solid #b9d7c4; background: #fff;
 }
 .min-stock-info-card strong { color: var(--text); }
 .min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; }

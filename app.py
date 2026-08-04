@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-02-order-items-min-stock"
+ASSET_VERSION = "2026-08-02-min-stock-visible"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -884,7 +884,7 @@ def get_min_stock_items_for_location(location, buyer_key=None):
         return []
     products_by_id = {
         str(product["id"]): product
-        for product in get_products(True, buyer_key=buyer_key or location.get("id"), sort="category")
+        for product in get_products(False, sort="category")
     }
     items = []
     for item in normalize_min_stock_items(location.get("min_stock_items", [])):
@@ -2883,8 +2883,8 @@ class App(BaseHTTPRequestHandler):
                 <article class="min-stock-info-card">
                     <strong>{esc(item['product']['name'])}</strong>
                     <span>{esc(category_text(product_categories(item['product'])))}</span>
-                    <small>{esc(item['product']['package_size'])}</small>
-                    <b>Mindestmenge: {esc(item['quantity'])}</b>
+                    <small>{esc(item['product']['package_size'])} · {esc(item['product']['source'])}</small>
+                    <b>{esc(item['quantity'])} mindestens bestellen</b>
                 </article>
                 """
                 for item in min_stock_items
@@ -2892,8 +2892,8 @@ class App(BaseHTTPRequestHandler):
             min_stock_html = f"""
             <section class="min-stock-info">
                 <div>
-                    <h3>Mindestbestellmengen</h3>
-                    <p class="muted">Diese Mengen sind für deinen Standort als Orientierung hinterlegt.</p>
+                    <h3>Mindestbestellmengen für {esc(location_name)}</h3>
+                    <p class="muted">Diese Produkte sind im Adminbereich für deinen Standort als Orientierung hinterlegt.</p>
                 </div>
                 <div class="min-stock-info-grid">{min_stock_cards}</div>
             </section>
