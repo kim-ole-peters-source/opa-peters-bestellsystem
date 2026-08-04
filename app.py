@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-02-min-stock-visible"
+ASSET_VERSION = "2026-08-04-compact-min-stock-location-tabs"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2890,13 +2890,11 @@ class App(BaseHTTPRequestHandler):
                 for item in min_stock_items
             )
             min_stock_html = f"""
-            <section class="min-stock-info">
-                <div>
-                    <h3>Mindestbestellmengen für {esc(location_name)}</h3>
-                    <p class="muted">Diese Produkte sind im Adminbereich für deinen Standort als Orientierung hinterlegt.</p>
-                </div>
+            <details class="category-panel min-stock-info">
+                <summary>Mindestbestellmengen <span>{len(min_stock_items)} Produkt(e)</span></summary>
+                <p class="muted">Orientierung für {esc(location_name)}.</p>
                 <div class="min-stock-info-grid">{min_stock_cards}</div>
-            </section>
+            </details>
             """
         cat_options = '<option value="">Alle Kategorien</option>' + "".join(
             f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
@@ -3511,32 +3509,35 @@ class App(BaseHTTPRequestHandler):
             )
             rows.append(
                 f"""
-                <div class="location-row">
-                    <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
-                    <label>Standortname<input name="location_name_{index}" value="{esc(location['name'])}" required></label>
-                    <label>Rolle<select name="location_role_{index}">{current_role_options}</select></label>
-                    <label>Name der bestellenden Person<input name="location_contact_name_{index}" value="{esc(location.get('contact_name', ''))}" placeholder="z. B. Lisa"></label>
-                    <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                    <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
-                    <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
-                    <label class="check remove-check"><input type="checkbox" name="location_remove_{index}" value="1"> Standort entfernen</label>
-                    <fieldset class="visibility-box location-category-visibility">
-                        <legend>Produktkategorien für diesen Standort</legend>
-                        <div class="visibility-grid">{''.join(location_category_checks)}</div>
-                        <p class="muted">Hier steuerst du Kategorien. Einzelne Produkte kannst du zusätzlich unter <a href="/admin/visibility?location={esc(location['id'])}">Sichtbarkeit</a> bearbeiten.</p>
-                    </fieldset>
-                    <fieldset class="visibility-box min-stock-admin full">
-                        <legend>Mindestbestand</legend>
-                        <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="location_min_stock_enabled_{index}" value="1" data-target="min_stock_content_{index}" {"checked" if min_stock_enabled else ""}> Mindestbestellmengen für diesen Standort aktivieren</label>
-                        <div id="min_stock_content_{index}" class="min-stock-admin-content" {"hidden" if not min_stock_enabled else ""}>
-                            <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
-                            <input type="hidden" id="{min_stock_prefix}_count" name="{min_stock_prefix}_count" value="{min_stock_count}">
-                            <div id="{min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{min_stock_prefix}_template" data-count-id="{min_stock_prefix}_count">{min_stock_row_html}</div>
-                            {min_stock_template}
-                            <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
-                        </div>
-                    </fieldset>
-                </div>
+                <details class="category-panel location-panel">
+                    <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
+                    <div class="location-row">
+                        <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
+                        <label>Standortname<input name="location_name_{index}" value="{esc(location['name'])}" required></label>
+                        <label>Rolle<select name="location_role_{index}">{current_role_options}</select></label>
+                        <label>Name der bestellenden Person<input name="location_contact_name_{index}" value="{esc(location.get('contact_name', ''))}" placeholder="z. B. Lisa"></label>
+                        <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                        <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
+                        <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
+                        <label class="check remove-check"><input type="checkbox" name="location_remove_{index}" value="1"> Standort entfernen</label>
+                        <fieldset class="visibility-box location-category-visibility">
+                            <legend>Produktkategorien für diesen Standort</legend>
+                            <div class="visibility-grid">{''.join(location_category_checks)}</div>
+                            <p class="muted">Hier steuerst du Kategorien. Einzelne Produkte kannst du zusätzlich unter <a href="/admin/visibility?location={esc(location['id'])}">Sichtbarkeit</a> bearbeiten.</p>
+                        </fieldset>
+                        <fieldset class="visibility-box min-stock-admin full">
+                            <legend>Mindestbestand</legend>
+                            <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="location_min_stock_enabled_{index}" value="1" data-target="min_stock_content_{index}" {"checked" if min_stock_enabled else ""}> Mindestbestellmengen für diesen Standort aktivieren</label>
+                            <div id="min_stock_content_{index}" class="min-stock-admin-content" {"hidden" if not min_stock_enabled else ""}>
+                                <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
+                                <input type="hidden" id="{min_stock_prefix}_count" name="{min_stock_prefix}_count" value="{min_stock_count}">
+                                <div id="{min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{min_stock_prefix}_template" data-count-id="{min_stock_prefix}_count">{min_stock_row_html}</div>
+                                {min_stock_template}
+                                <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
+                            </div>
+                        </fieldset>
+                    </div>
+                </details>
                 """
             )
         new_min_stock_prefix = "new_location_min_stock"
@@ -3553,30 +3554,33 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/admin/locations">
                 <input type="hidden" name="location_count" value="{len(locations)}">
                 <div class="location-list">{''.join(rows) if rows else '<p>Noch keine Standorte.</p>'}</div>
-                <div class="location-row new-location">
-                    <label>Neuer Standort<input name="new_location_name" placeholder="z. B. Filiale 4"></label>
-                    <label>Rolle<select name="new_location_role">{role_options("standard")}</select></label>
-                    <label>Name der bestellenden Person<input name="new_location_contact_name" placeholder="Optional"></label>
-                    <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="new_location_password" autocomplete="new-password" placeholder="Optional"><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                    <label class="check feature-check"><input type="checkbox" name="new_location_time_tracking" value="1"> Zeiterfassung aktivieren</label>
-                    <label>Maximale Endzeit<select name="new_location_time_tracking_max_end">{time_limit_options}</select></label>
-                    <fieldset class="visibility-box location-category-visibility">
-                        <legend>Produktkategorien für neuen Standort</legend>
-                        <div class="visibility-grid">{category_visibility_checks}</div>
-                        <p class="muted">Nur Produkte aus diesen Kategorien werden für den neuen Standort sichtbar.</p>
-                    </fieldset>
-                    <fieldset class="visibility-box min-stock-admin full">
-                        <legend>Mindestbestand</legend>
-                        <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="new_location_min_stock_enabled" value="1" data-target="new_location_min_stock_content"> Mindestbestellmengen für diesen Standort aktivieren</label>
-                        <div id="new_location_min_stock_content" class="min-stock-admin-content" hidden>
-                            <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
-                            <input type="hidden" id="{new_min_stock_prefix}_count" name="{new_min_stock_prefix}_count" value="{new_min_stock_count}">
-                            <div id="{new_min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{new_min_stock_prefix}_template" data-count-id="{new_min_stock_prefix}_count">{new_min_stock_row_html}</div>
-                            {new_min_stock_template}
-                            <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
-                        </div>
-                    </fieldset>
-                </div>
+                <details class="category-panel location-panel new-location-panel">
+                    <summary>Neuen Standort anlegen <span>+</span></summary>
+                    <div class="location-row new-location">
+                        <label>Neuer Standort<input name="new_location_name" placeholder="z. B. Filiale 4"></label>
+                        <label>Rolle<select name="new_location_role">{role_options("standard")}</select></label>
+                        <label>Name der bestellenden Person<input name="new_location_contact_name" placeholder="Optional"></label>
+                        <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="new_location_password" autocomplete="new-password" placeholder="Optional"><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                        <label class="check feature-check"><input type="checkbox" name="new_location_time_tracking" value="1"> Zeiterfassung aktivieren</label>
+                        <label>Maximale Endzeit<select name="new_location_time_tracking_max_end">{time_limit_options}</select></label>
+                        <fieldset class="visibility-box location-category-visibility">
+                            <legend>Produktkategorien für neuen Standort</legend>
+                            <div class="visibility-grid">{category_visibility_checks}</div>
+                            <p class="muted">Nur Produkte aus diesen Kategorien werden für den neuen Standort sichtbar.</p>
+                        </fieldset>
+                        <fieldset class="visibility-box min-stock-admin full">
+                            <legend>Mindestbestand</legend>
+                            <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="new_location_min_stock_enabled" value="1" data-target="new_location_min_stock_content"> Mindestbestellmengen für diesen Standort aktivieren</label>
+                            <div id="new_location_min_stock_content" class="min-stock-admin-content" hidden>
+                                <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
+                                <input type="hidden" id="{new_min_stock_prefix}_count" name="{new_min_stock_prefix}_count" value="{new_min_stock_count}">
+                                <div id="{new_min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{new_min_stock_prefix}_template" data-count-id="{new_min_stock_prefix}_count">{new_min_stock_row_html}</div>
+                                {new_min_stock_template}
+                                <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
+                            </div>
+                        </fieldset>
+                    </div>
+                </details>
                 <button class="primary" type="submit">Standorte speichern</button>
             </form>
             <p class="muted">Das Passwort wird bei der Bestellung für den gewählten Standort abgefragt. Leeres Passwort bedeutet: keine Passwortprüfung für diesen Standort.</p>

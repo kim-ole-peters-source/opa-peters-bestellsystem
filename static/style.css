@@ -920,19 +920,29 @@ tr:hover td { background: var(--primary-soft); }
 }
 .min-stock-row label { margin: 0; }
 .min-stock-remove { white-space: nowrap; }
+.location-list { display: grid; gap: 12px; }
+.location-panel .location-row { margin-top: 12px; }
+.location-panel summary span { background: #eef4ff; color: var(--primary); }
+.new-location-panel summary span { background: var(--green-bg); color: var(--green-text); }
 .min-stock-info {
-  display: grid; gap: 12px; margin-top: 16px; padding: 16px; border: 2px solid #86c8a0; border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(232, 247, 238, .98), rgba(255, 255, 255, .96));
-  box-shadow: 0 12px 30px rgba(31, 122, 73, .12);
+  display: grid; gap: 8px; margin-top: 12px; padding: 8px; border: 1px solid #b9d7c4; border-radius: var(--radius-md);
+  background: rgba(232, 247, 238, .72);
+  box-shadow: var(--shadow-tiny);
 }
-.min-stock-info h3 { margin: 0 0 3px; color: var(--green-text); font-size: 20px; }
-.min-stock-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.min-stock-info summary {
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #fff;
+}
+.min-stock-info .muted { margin: 2px 8px 0; font-size: 13px; }
+.min-stock-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; padding: 2px 2px 4px; }
 .min-stock-info-card {
-  display: grid; gap: 5px; padding: 12px; border-radius: var(--radius-md); border: 1px solid #b9d7c4; background: #fff;
+  display: grid; gap: 3px; padding: 9px 10px; border-radius: 12px; border: 1px solid #c6e3d0; background: #fff;
 }
-.min-stock-info-card strong { color: var(--text); }
-.min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; }
-.min-stock-info-card b { color: var(--green-text); }
+.min-stock-info-card strong { color: var(--text); font-size: 14px; }
+.min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; font-size: 12px; }
+.min-stock-info-card b { color: var(--green-text); font-size: 13px; }
 
 /* ---------- 10. Statusmeldungen ---------- */
 .error, .success { border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 16px; border: 1px solid transparent; font-weight: 700; box-shadow: var(--shadow-tiny); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
