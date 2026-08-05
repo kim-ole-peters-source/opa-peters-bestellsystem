@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-04-compact-min-stock-location-tabs"
+ASSET_VERSION = "2026-08-05-product-bulk-admin-min-stock-cart"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -877,6 +877,15 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     else:
         rows.sort(key=name_key)
     return rows
+
+
+def get_source_names():
+    con = db()
+    rows = con.execute(
+        "SELECT DISTINCT source FROM products WHERE deleted_at IS NULL AND TRIM(source) != '' ORDER BY LOWER(source)"
+    ).fetchall()
+    con.close()
+    return [row["source"] for row in rows if row["source"]]
 
 
 def get_min_stock_items_for_location(location, buyer_key=None):
@@ -2885,6 +2894,7 @@ class App(BaseHTTPRequestHandler):
                     <span>{esc(category_text(product_categories(item['product'])))}</span>
                     <small>{esc(item['product']['package_size'])} · {esc(item['product']['source'])}</small>
                     <b>{esc(item['quantity'])} mindestens bestellen</b>
+                    <button class="button min-stock-cart-button" type="button" data-product-id="{item['product']['id']}" data-min-qty="{esc(item['quantity'])}">In den Warenkorb</button>
                 </article>
                 """
                 for item in min_stock_items
@@ -2929,9 +2939,12 @@ class App(BaseHTTPRequestHandler):
                     <button type="button" class="qty-plus" data-product-id="{p['id']}">+</button>
                 </div>
             </article>"""
+        hidden_products = {str(p["id"]): p for p in all_order_products}
+        for item in min_stock_items:
+            hidden_products[str(item["product"]["id"])] = item["product"]
         hidden_qty_inputs = "".join(
             f'<input type="hidden" name="qty_{p["id"]}" id="qty_{p["id"]}" value="0" data-product-id="{p["id"]}" data-product-name="{esc(p["name"])}" data-product-package="{esc(p["package_size"])}">'
-            for p in all_order_products
+            for p in hidden_products.values()
         )
         category_panels = []
         all_cards = "".join(product_card(p) for p in products)
@@ -3006,6 +3019,7 @@ class App(BaseHTTPRequestHandler):
         error = (query.get("error", [""])[0] or "").strip()
         all_products = get_products(False)
         products = filter_products_by_search(all_products, search_text, include_source=True)
+        source_options = "".join(f'<option value="{esc(source)}"></option>' for source in get_source_names())
         orders = get_orders()
         active_count = sum(1 for p in all_products if p["active"])
         inactive_count = len(all_products) - active_count
@@ -3023,7 +3037,8 @@ class App(BaseHTTPRequestHandler):
                 f"</div>"
             )
             categories_label = category_text(product_categories(p))
-            row_html = f"<tr><td class='select-cell'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'> {img}</td><td>{esc(p['name'])}</td><td>{esc(categories_label)}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
+            category_keys = " ".join(normalize_text_key(category) for category in product_categories(p))
+            row_html = f"<tr class='product-row' data-category-keys='{esc(category_keys)}'><td class='select-cell'><label class='bulk-select-label'><input form='bulkProductForm' class='bulk-product-check' type='checkbox' name='selected_{p['id']}' value='1' aria-label='Produkt auswählen'><span class='bulk-checkmark'>✓</span></label> {img}</td><td>{esc(p['name'])}</td><td>{esc(categories_label)}</td><td>{esc(p['package_size'])}</td><td>{esc(p['source'])}</td><td>{esc(visibility)}</td><td>{status}</td><td>{actions}</td></tr>"
             rows.append(row_html)
             for category in product_categories(p):
                 rows_by_category.setdefault(category, []).append(row_html)
@@ -3049,6 +3064,10 @@ class App(BaseHTTPRequestHandler):
         )
         category_checks = category_checkboxes("category", ["Allgemein"])
         bulk_category_checks = category_checkboxes("bulk_category")
+        bulk_category_select_buttons = "".join(
+            f'<button class="button bulk-category-select" type="button" data-category-key="{esc(normalize_text_key(category))}">{esc(category)}</button>'
+            for category in get_category_names(True)
+        )
         bulk_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="bulk_visible_{esc(location["id"])}" value="1"><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
@@ -3075,6 +3094,7 @@ class App(BaseHTTPRequestHandler):
         <details class="category-panel admin-toggle-panel">
             <summary>Produkte anlegen <span>+</span></summary>
             <form method="post" action="/admin/add-product" enctype="multipart/form-data" class="two">
+                <datalist id="sourceSuggestions">{source_options}</datalist>
                 <p class="muted full">Kategorien legst du separat an und wählst sie hier aus.</p>
                 <label>Produktname *<input name="name" required></label>
                 <fieldset class="visibility-box full">
@@ -3082,7 +3102,7 @@ class App(BaseHTTPRequestHandler):
                     <div class="visibility-grid">{category_checks}</div>
                 </fieldset>
                 <label>Gebindegröße *<input name="package_size" required placeholder="z. B. Karton à 12 Stück"></label>
-                <label>Bezugsquelle *<input name="source" required placeholder="z. B. Lieferant A"></label>
+                <label>Bezugsquelle *<input name="source" list="sourceSuggestions" required placeholder="Vorhandene wählen oder neue eintragen"></label>
                 <label>Produktbild<input type="file" name="image" accept="image/*"></label>
                 <fieldset class="visibility-box">
                     <legend>Sichtbar für Standorte *</legend>
@@ -3091,6 +3111,46 @@ class App(BaseHTTPRequestHandler):
                 <button class="primary" type="submit">Produkt speichern</button>
                 <a class="button" href="/admin/categories">Kategorien verwalten</a>
             </form>
+            <details class="category-panel bulk-add-panel">
+                <summary>Mehrere Produkte gleichzeitig anlegen <span>+</span></summary>
+                <form method="post" action="/admin/add-product" class="bulk-add-products">
+                    <input type="hidden" id="bulkAddProductCount" name="bulk_add_count" value="3">
+                    <p class="muted">Trage mehrere Produkte untereinander ein. Leere Zeilen werden automatisch übersprungen. Kategorien können mit Komma getrennt werden.</p>
+                    <div id="bulkAddProductRows" class="bulk-add-product-rows">
+                        <div class="bulk-add-product-row" data-bulk-add-row>
+                            <label>Produktname<input name="bulk_name_0" placeholder="Produktname"></label>
+                            <label>Kategorien<input name="bulk_category_0" placeholder="z. B. Getränke, Verpackung"></label>
+                            <label>Gebinde<input name="bulk_package_size_0" placeholder="z. B. Karton à 12 Stück"></label>
+                            <label>Bezugsquelle<input name="bulk_source_0" list="sourceSuggestions" placeholder="Vorhandene wählen oder neu eintragen"></label>
+                        </div>
+                        <div class="bulk-add-product-row" data-bulk-add-row>
+                            <label>Produktname<input name="bulk_name_1" placeholder="Produktname"></label>
+                            <label>Kategorien<input name="bulk_category_1" placeholder="z. B. Getränke, Verpackung"></label>
+                            <label>Gebinde<input name="bulk_package_size_1" placeholder="z. B. Karton à 12 Stück"></label>
+                            <label>Bezugsquelle<input name="bulk_source_1" list="sourceSuggestions" placeholder="Vorhandene wählen oder neu eintragen"></label>
+                        </div>
+                        <div class="bulk-add-product-row" data-bulk-add-row>
+                            <label>Produktname<input name="bulk_name_2" placeholder="Produktname"></label>
+                            <label>Kategorien<input name="bulk_category_2" placeholder="z. B. Getränke, Verpackung"></label>
+                            <label>Gebinde<input name="bulk_package_size_2" placeholder="z. B. Karton à 12 Stück"></label>
+                            <label>Bezugsquelle<input name="bulk_source_2" list="sourceSuggestions" placeholder="Vorhandene wählen oder neu eintragen"></label>
+                        </div>
+                    </div>
+                    <template id="bulkAddProductTemplate">
+                        <div class="bulk-add-product-row" data-bulk-add-row>
+                            <label>Produktname<input name="bulk_name___INDEX__" placeholder="Produktname"></label>
+                            <label>Kategorien<input name="bulk_category___INDEX__" placeholder="z. B. Getränke, Verpackung"></label>
+                            <label>Gebinde<input name="bulk_package_size___INDEX__" placeholder="z. B. Karton à 12 Stück"></label>
+                            <label>Bezugsquelle<input name="bulk_source___INDEX__" list="sourceSuggestions" placeholder="Vorhandene wählen oder neu eintragen"></label>
+                            <button class="button bulk-add-remove" type="button">Zeile entfernen</button>
+                        </div>
+                    </template>
+                    <div class="table-actions">
+                        <button class="button" id="addBulkProductRow" type="button">Weitere Zeile hinzufügen</button>
+                        <button class="primary" type="submit">Mehrere Produkte speichern</button>
+                    </div>
+                </form>
+            </details>
         </details>
         <section class="box">
             <h2>Produkte</h2>
@@ -3102,6 +3162,12 @@ class App(BaseHTTPRequestHandler):
                     <span class="muted">Produkte unten anhaken, gewünschte Felder setzen und anwenden.</span>
                 </div>
                 <div class="bulk-editor-grid">
+                    <fieldset class="visibility-box bulk-visibility bulk-category-tools">
+                        <legend>Produkte nach Kategorie auswählen</legend>
+                        <label>Kategorie suchen<input id="bulkCategorySearch" type="search" placeholder="Kategorie suchen"></label>
+                        <div class="bulk-category-buttons">{bulk_category_select_buttons}</div>
+                        <p class="muted">Ein Klick wählt alle sichtbaren Produkte dieser Kategorie aus.</p>
+                    </fieldset>
                     <label>Aktion
                         <select name="bulk_action">
                             <option value="update">Ausgewählte bearbeiten</option>
@@ -3114,7 +3180,7 @@ class App(BaseHTTPRequestHandler):
                         <p class="muted">Leer lassen = Kategorien behalten.</p>
                     </fieldset>
                     <label>Bezugsquelle
-                        <input name="bulk_source" placeholder="leer lassen = behalten">
+                        <input name="bulk_source" list="sourceSuggestions" placeholder="leer lassen = behalten">
                     </label>
                     <label>Status
                         <select name="bulk_active">
@@ -3170,6 +3236,7 @@ class App(BaseHTTPRequestHandler):
             for location in get_locations()
         )
         category_checks = category_checkboxes("category", product_categories(product))
+        source_options = "".join(f'<option value="{esc(source)}"></option>' for source in get_source_names())
         current_image = f'<p><img class="edit-preview" src="/uploads/{esc(product["image_filename"])}" alt=""></p>' if product["image_filename"] else "<p class='muted'>Für dieses Produkt ist noch kein Bild hinterlegt.</p>"
         body = f"""
         {admin_menu()}
@@ -3178,6 +3245,7 @@ class App(BaseHTTPRequestHandler):
         <section class="box">
             <div class="section-head"><div><h2>Produkt bearbeiten</h2><p class="muted">Änderungen sind nach dem Speichern sofort im Bestellmenü sichtbar.</p></div><a class="button" href="/admin">Zurück zu Produkten</a></div>
             <form method="post" action="/admin/update-product" enctype="multipart/form-data" class="two">
+                <datalist id="sourceSuggestions">{source_options}</datalist>
                 <input type="hidden" name="id" value="{esc(product['id'])}">
                 <label>Produktname *<input name="name" required value="{esc(product['name'])}"></label>
                 <fieldset class="visibility-box full">
@@ -3185,7 +3253,7 @@ class App(BaseHTTPRequestHandler):
                     <div class="visibility-grid">{category_checks}</div>
                 </fieldset>
                 <label>Gebindegröße *<input name="package_size" required value="{esc(product['package_size'])}"></label>
-                <label>Bezugsquelle *<input name="source" required value="{esc(product['source'])}"></label>
+                <label>Bezugsquelle *<input name="source" list="sourceSuggestions" required value="{esc(product['source'])}"></label>
                 <label>Status<select name="active"><option value="1" {"selected" if product["active"] else ""}>aktiv</option><option value="0" {"selected" if not product["active"] else ""}>deaktiviert</option></select></label>
                 <label>Neues Produktbild<input type="file" name="image" accept="image/*"></label>
                 <div>{current_image}</div>
@@ -3759,6 +3827,39 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        try:
+            bulk_count = int(self.form_value(form, "bulk_add_count", "0") or "0")
+        except ValueError:
+            bulk_count = 0
+        if bulk_count > 0:
+            prepared = []
+            for index in range(bulk_count):
+                name = self.form_value(form, f"bulk_name_{index}").strip()
+                category_value = self.form_value(form, f"bulk_category_{index}").strip() or "Allgemein"
+                package_size = self.form_value(form, f"bulk_package_size_{index}").strip()
+                source = self.form_value(form, f"bulk_source_{index}").strip()
+                if not any([name, category_value and category_value != "Allgemein", package_size, source]):
+                    continue
+                if not (name and package_size and source):
+                    continue
+                categories = ensure_categories(split_categories(category_value))
+                prepared.append((name, category_text(categories), package_size, source))
+            if not prepared:
+                return self.redirect("/admin?error=" + quote_plus("Bitte mindestens eine vollständige Produktzeile ausfüllen."))
+            visible_to_text = ALL_LOCATIONS_KEY
+            con = db()
+            now = datetime.now().isoformat(timespec="seconds")
+            for name, category, package_size, source in prepared:
+                con.execute(
+                    """
+                    INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (name, package_size, category, source, visible_to_text, None, now),
+                )
+            con.commit()
+            con.close()
+            return self.redirect("/admin?msg=" + quote_plus(f"{len(prepared)} Produkt(e) angelegt."))
         name = self.form_value(form, "name").strip()
         categories = ensure_categories(form_categories(form, "category"))
         category = category_text(categories)

@@ -887,14 +887,36 @@ tr:hover td { background: var(--primary-soft); }
 .bulk-editor-grid { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; align-items: end; }
 .bulk-editor-grid label { margin: 0; }
 .bulk-visibility { grid-column: 1 / -1; }
+.bulk-category-tools { display: grid; gap: 10px; }
+.bulk-category-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.bulk-category-buttons .button { min-height: 38px; padding: 7px 12px; border-radius: 999px; }
 .bulk-editor-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 2px; }
 .select-cell { white-space: nowrap; min-width: 100px; }
 .select-cell input[type="checkbox"], .bulk-editor input[type="checkbox"] {
   width: 22px; height: 22px; min-height: 22px; margin: 0 8px 0 0; vertical-align: middle;
   accent-color: var(--primary); cursor: pointer;
 }
+.bulk-select-label { position: relative; display: inline-flex; align-items: center; justify-content: center; margin: 0 8px 0 0; vertical-align: middle; }
+.bulk-select-label input { position: absolute; opacity: 0; pointer-events: none; }
+.bulk-checkmark {
+  width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; border: 2px solid var(--line-strong); color: transparent; background: #fff; font-weight: 900;
+}
+.bulk-select-label input:checked + .bulk-checkmark { background: var(--green-text); border-color: var(--green-text); color: #fff; }
+.product-row.bulk-selected td { background: rgba(232, 247, 238, .92); }
+.product-row.bulk-selected td:first-child { box-shadow: inset 4px 0 0 var(--green-text); }
 .bulk-editor .check { display: inline-flex; align-items: center; min-height: 48px; padding: 8px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; color: var(--text); font-weight: 750; }
 .bulk-selected-count { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 14px; border-radius: 999px; background: var(--green-bg); color: var(--green-text); font-weight: 800; }
+
+.bulk-add-panel { margin-top: 14px; }
+.bulk-add-products { display: grid; gap: 12px; padding-top: 10px; }
+.bulk-add-product-rows { display: grid; gap: 10px; }
+.bulk-add-product-row {
+  display: grid; grid-template-columns: minmax(170px, 1.1fr) minmax(170px, 1fr) minmax(150px, .9fr) minmax(170px, 1fr) auto;
+  gap: 10px; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff;
+}
+.bulk-add-product-row label { margin: 0; }
+.bulk-add-remove { white-space: nowrap; }
 
 .order-location-sections { display: grid; gap: 14px; }
 .order-location-panel { background: transparent; }
@@ -943,6 +965,7 @@ tr:hover td { background: var(--primary-soft); }
 .min-stock-info-card strong { color: var(--text); font-size: 14px; }
 .min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; font-size: 12px; }
 .min-stock-info-card b { color: var(--green-text); font-size: 13px; }
+.min-stock-cart-button { min-height: 36px; padding: 7px 10px; margin-top: 3px; font-size: 12.5px; }
 
 /* ---------- 10. Statusmeldungen ---------- */
 .error, .success { border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 16px; border: 1px solid transparent; font-weight: 700; box-shadow: var(--shadow-tiny); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -966,6 +989,8 @@ tr:hover td { background: var(--primary-soft); }
   .order-search { grid-template-columns: 1fr; }
   .section-head { flex-direction: column; }
   .bulk-editor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-add-product-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-add-remove { grid-column: 1 / -1; }
   .min-stock-row { grid-template-columns: 1fr 160px; }
   .min-stock-remove { grid-column: 1 / -1; }
   .bulk-time-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1224,6 +1249,8 @@ tr:hover td { background: var(--primary-soft); }
   form[action="/order"] > button.primary:active { transform: translateY(1px); }
 
   .bulk-editor-grid { grid-template-columns: 1fr; }
+  .bulk-category-buttons .button { width: 100%; }
+  .bulk-add-product-row { grid-template-columns: 1fr; padding: 10px; }
   .min-stock-row { grid-template-columns: 1fr; padding: 10px; }
   .min-stock-info { padding: 11px; }
   .min-stock-info-grid { grid-template-columns: 1fr; }
