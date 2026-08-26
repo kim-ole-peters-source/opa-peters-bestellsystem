@@ -928,6 +928,20 @@ tr:hover td { background: var(--primary-soft); }
 .item-status.open { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
 .item-status.done { background: var(--green-bg); color: var(--green-text); border: 1px solid #9ad6b5; }
 .order-item-completed td { background: rgba(220, 252, 231, .55); }
+.order-completed-row td { background: rgba(220, 252, 231, .5); }
+.order-day-card h3 { margin: 0 0 4px; font-size: 20px; }
+.order-day-panel { margin-top: 12px; background: #fff; }
+.order-note-list {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-md);
+  background: #fff7f7;
+  color: #991b1b;
+  font-weight: 700;
+}
+.order-note-list ul { margin: 8px 0 0; padding-left: 20px; }
+.button.tiny { min-height: 34px; padding: 7px 10px; font-size: 12px; }
 .item-actions { gap: 6px; }
 .item-actions form { margin: 0; }
 .item-actions button, .item-actions .button { min-height: 38px; padding: 8px 10px; font-size: 12.5px; }
@@ -959,6 +973,7 @@ tr:hover td { background: var(--primary-soft); }
   background: #fff;
 }
 .cockpit-admin-order-row { grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.2fr) auto auto; }
+.cockpit-admin-production-row { grid-template-columns: minmax(150px, .7fr) minmax(220px, 1.2fr) minmax(150px, .7fr) minmax(220px, 1fr) auto auto; }
 .cockpit-admin-row label { margin: 0; }
 .cockpit-row-remove { white-space: nowrap; }
 .new-location-panel summary span { background: var(--green-bg); color: var(--green-text); }
@@ -1050,6 +1065,60 @@ tr:hover td { background: var(--primary-soft); }
 }
 .cockpit-order-actions form { margin: 0; }
 .cockpit-order-actions button { width: 100%; min-height: 42px; padding: 8px 10px; font-size: 12.5px; }
+.production-cockpit { margin-top: 16px; }
+.production-panel { margin-top: 12px; background: #fff; }
+.production-week {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.production-day {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 170px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #f8fafc;
+}
+.production-day h4 { margin: 0; font-size: 15px; }
+.production-day > span { color: var(--muted); font-size: 12px; font-weight: 800; }
+.production-day-list { display: grid; gap: 8px; }
+.production-subgrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.production-job {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+  box-shadow: var(--shadow-tiny);
+}
+.production-job.is-done {
+  background: var(--green-bg);
+  border-color: #9ad6b5;
+}
+.production-job p { margin: 4px 0 0; color: var(--muted); }
+.production-job span {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+}
 
 /* ---------- 10. Statusmeldungen ---------- */
 .error, .success { border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 16px; border: 1px solid transparent; font-weight: 700; box-shadow: var(--shadow-tiny); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -1079,8 +1148,11 @@ tr:hover td { background: var(--primary-soft); }
   .min-stock-remove { grid-column: 1 / -1; }
   .cockpit-grid { grid-template-columns: 1fr; }
   .cockpit-admin-row,
-  .cockpit-admin-order-row { grid-template-columns: 1fr; }
+  .cockpit-admin-order-row,
+  .cockpit-admin-production-row { grid-template-columns: 1fr; }
   .cockpit-order-actions { grid-template-columns: 1fr; }
+  .production-week { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .production-subgrid { grid-template-columns: 1fr; }
   .bulk-time-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bulk-time-note { grid-column: 1 / -1; }
   .bulk-time-remove { grid-column: 1 / -1; }
@@ -1115,6 +1187,12 @@ tr:hover td { background: var(--primary-soft); }
   .order-search { gap: 8px; }
   .search-main input { min-height: 50px; }
   .cart-details { padding: 12px; }
+  .production-week { grid-template-columns: 1fr; }
+  .production-day { min-height: auto; }
+  .production-job { padding: 9px; }
+  .order-day-card .table-actions { width: 100%; }
+  .order-day-card .table-actions form,
+  .order-day-card .table-actions button { width: 100%; }
 
   nav {
     position: fixed;

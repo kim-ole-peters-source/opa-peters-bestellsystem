@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-26-location-cockpit"
+ASSET_VERSION = "2026-08-26-production-cockpit-daily-orders"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -134,6 +134,12 @@ MAX_ORDER_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_ORDER_QUANTITY = 9999
 BERLIN_TZ = ZoneInfo("Europe/Berlin") if ZoneInfo else None
+COCKPIT_API_TOKEN = os.environ.get("COCKPIT_API_TOKEN", "").strip()
+PRODUCTION_SECTIONS = {
+    "backen": "Backen",
+    "eisvitrinen": "Eisvitrinen",
+    "eistorten": "Eistorten",
+}
 
 
 class UploadedFile:
@@ -370,6 +376,42 @@ def normalize_cockpit_orders(raw_orders):
     return normalized
 
 
+def is_valid_iso_date(value):
+    try:
+        datetime.strptime(value or "", "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_production_jobs(raw_jobs):
+    normalized = []
+    seen = set()
+    for item in raw_jobs or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        due_date = str(item.get("due_date") or "").strip()
+        section = str(item.get("section") or "").strip().lower()
+        note = str(item.get("note") or "").strip()
+        if not title or section not in PRODUCTION_SECTIONS or not is_valid_iso_date(due_date):
+            continue
+        item_id = str(item.get("id") or "").strip() or make_cockpit_item_id("production")
+        if item_id in seen:
+            item_id = make_cockpit_item_id("production")
+        seen.add(item_id)
+        normalized.append({
+            "id": item_id,
+            "section": section,
+            "title": title[:180],
+            "due_date": due_date,
+            "note": note[:500],
+            "active": bool(item.get("active", True)),
+            "source": str(item.get("source") or "admin").strip()[:40] or "admin",
+        })
+    return sorted(normalized, key=lambda item: (item["due_date"], item["section"], item["title"].lower()))
+
+
 def normalize_locations(raw_locations):
     normalized = []
     used_ids = set()
@@ -385,6 +427,7 @@ def normalize_locations(raw_locations):
             min_stock_items = normalize_min_stock_items(item.get("min_stock_items", []))
             cockpit_tasks = normalize_cockpit_tasks(item.get("cockpit_tasks", []))
             cockpit_orders = normalize_cockpit_orders(item.get("cockpit_orders", []))
+            production_jobs = normalize_production_jobs(item.get("production_jobs", []))
             raw_id = str(item.get("id") or "").strip()
         else:
             name = str(item or "").strip()
@@ -397,6 +440,7 @@ def normalize_locations(raw_locations):
             min_stock_items = []
             cockpit_tasks = []
             cockpit_orders = []
+            production_jobs = []
             raw_id = ""
         if not name:
             continue
@@ -419,6 +463,7 @@ def normalize_locations(raw_locations):
             "min_stock_items": min_stock_items,
             "cockpit_tasks": cockpit_tasks,
             "cockpit_orders": cockpit_orders,
+            "production_jobs": production_jobs,
         })
     return normalized
 
@@ -451,6 +496,18 @@ def location_ids():
 def location_label(location_id):
     location = find_location(location_id)
     return location["name"] if location else (location_id or "")
+
+
+def is_production_location(location):
+    key = normalize_text_key((location or {}).get("id") or "")
+    name = normalize_text_key((location or {}).get("name") or "")
+    return key == "produktion" or name == "produktion"
+
+
+def current_workweek():
+    today = berlin_now().date()
+    monday = today - timedelta(days=today.weekday())
+    return [monday + timedelta(days=offset) for offset in range(5)]
 
 
 def location_labels_from_keys(keys):
@@ -1222,6 +1279,34 @@ def get_orders():
     return rows
 
 
+def order_day_key(order):
+    dt = parse_order_created_at(order["created_at"] if "created_at" in order.keys() else "")
+    if dt == datetime.min:
+        return "ohne-datum"
+    return dt.strftime("%Y-%m-%d")
+
+
+def order_day_label(day_key):
+    try:
+        return datetime.strptime(day_key, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return "Ohne Datum"
+
+
+def format_iso_date(value):
+    try:
+        return datetime.strptime(value or "", "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return value or ""
+
+
+def order_day_sort_key(day_key):
+    try:
+        return datetime.strptime(day_key, "%Y-%m-%d")
+    except ValueError:
+        return datetime.min
+
+
 def get_open_order_product_ids(location_name):
     return set(get_open_order_product_quantities(location_name).keys())
 
@@ -1401,12 +1486,13 @@ def get_cockpit_states(location_id):
 
 
 def set_cockpit_state(location_id, item_type, item_id, state):
-    if not location_id or item_type not in ["task", "order"] or not item_id:
+    if not location_id or item_type not in ["task", "order", "production_job"] or not item_id:
         return False
     state = str(state or "").strip()
     valid_states = {
         "task": ["open", "done"],
         "order": ["open", "paid_picked", "picked_invoice"],
+        "production_job": ["open", "done"],
     }
     if state not in valid_states[item_type]:
         state = "open"
@@ -2338,6 +2424,9 @@ class App(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2399,6 +2488,17 @@ class App(BaseHTTPRequestHandler):
         if isinstance(item, UploadedFile):
             return default
         return item if item is not None else default
+
+    def do_OPTIONS(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/production-job":
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.end_headers()
+            return
+        self.send_error(404)
 
     def show_cart_draft(self):
         buyer_key = self.current_buyer_key()
@@ -2740,6 +2840,67 @@ class App(BaseHTTPRequestHandler):
             quick_actions.append('<a class="button primary" href="/">Shop öffnen</a>')
         if location_can_time(location):
             quick_actions.append('<a class="button primary" href="/time">Zeiterfassung öffnen</a>')
+        production_section = ""
+        if is_production_location(location):
+            weekday_labels = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
+            week_days = current_workweek()
+            active_jobs = [job for job in normalize_production_jobs(location.get("production_jobs", [])) if job.get("active")]
+            jobs_by_section = {key: [] for key in PRODUCTION_SECTIONS}
+            for job in active_jobs:
+                jobs_by_section.setdefault(job["section"], []).append(job)
+
+            def production_job_card(job):
+                done = states.get(("production_job", job["id"])) == "done"
+                return f"""
+                <form method="post" action="/cockpit/production-job" class="production-job {'is-done' if done else ''}">
+                    <input type="hidden" name="job_id" value="{esc(job['id'])}">
+                    <input type="hidden" name="state" value="{'open' if done else 'done'}">
+                    <button type="submit" class="cockpit-check" aria-label="Auftrag abhaken">{'✓' if done else ''}</button>
+                    <div>
+                        <strong>{esc(job['title'])}</strong>
+                        {f'<p>{esc(job["note"])}</p>' if job.get("note") else ''}
+                        <span>{'erledigt' if done else esc(format_iso_date(job['due_date']))}</span>
+                    </div>
+                </form>
+                """
+
+            week_columns = []
+            for day, label in zip(week_days, weekday_labels):
+                iso = day.strftime("%Y-%m-%d")
+                day_jobs = [job for job in jobs_by_section.get("backen", []) if job["due_date"] == iso]
+                week_columns.append(
+                    f"""
+                    <div class="production-day">
+                        <h4>{label}</h4>
+                        <span>{day.strftime('%d.%m.')}</span>
+                        <div class="production-day-list">{''.join(production_job_card(job) for job in day_jobs) if day_jobs else '<p class="muted">Keine Aufträge</p>'}</div>
+                    </div>
+                    """
+                )
+
+            def production_list(section_key):
+                jobs = sorted(jobs_by_section.get(section_key, []), key=lambda job: (job["due_date"], job["title"].lower()))
+                return ''.join(production_job_card(job) for job in jobs) if jobs else '<p class="muted">Aktuell keine Aufträge hinterlegt.</p>'
+
+            production_section = f"""
+            <section class="box production-cockpit">
+                <div class="section-head"><div><h2>Produktion</h2><p class="muted">Wochenübersicht und Aufträge für Backen, Eisvitrinen und Eistorten.</p></div></div>
+                <details class="category-panel production-panel" open>
+                    <summary>Backen <span>Wochenansicht</span></summary>
+                    <div class="production-week">{''.join(week_columns)}</div>
+                </details>
+                <section class="production-subgrid">
+                    <details class="category-panel production-panel" open>
+                        <summary>Eisvitrinen <span>{len(jobs_by_section.get('eisvitrinen', []))}</span></summary>
+                        <div class="cockpit-list">{production_list('eisvitrinen')}</div>
+                    </details>
+                    <details class="category-panel production-panel" open>
+                        <summary>Eistorten <span>{len(jobs_by_section.get('eistorten', []))}</span></summary>
+                        <div class="cockpit-list">{production_list('eistorten')}</div>
+                    </details>
+                </section>
+            </section>
+            """
         body = f"""
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
         <section class="box cockpit-hero">
@@ -2759,6 +2920,7 @@ class App(BaseHTTPRequestHandler):
                 <div class="cockpit-list">{''.join(order_cards) if order_cards else '<p class="muted">Für diesen Standort sind aktuell keine Bestellinformationen hinterlegt.</p>'}</div>
             </section>
         </section>
+        {production_section}
         """
         self.send_html(page("Cockpit", body, buyer_key=buyer_key))
 
@@ -3513,89 +3675,158 @@ class App(BaseHTTPRequestHandler):
             grouped_orders.setdefault(order["location"] or "Ohne Standort", []).append(order)
         location_panels = []
         for location_name in sorted(grouped_orders.keys(), key=lambda value: value.lower()):
-            cards = []
             location_orders = sorted(grouped_orders[location_name], key=order_created_sort_key, reverse=True)
+            day_groups = {}
             for order in location_orders:
-                items = get_order_items(order["id"])
-                is_completed = bool(order["completed_at"])
-                status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
-                status_class = "order-status done" if is_completed else "order-status open"
-                card_class = "box order-card order-completed" if is_completed else "box order-card"
-                complete_form = (
-                    f"""
-                    <form method="post" action="/admin/orders/status">
-                        <input type="hidden" name="order_{order['id']}" value="1">
-                        <input type="hidden" name="completed" value="{0 if is_completed else 1}">
-                        <button type="submit" class="{'button' if is_completed else 'primary'}">{'Wieder öffnen' if is_completed else 'Als erledigt markieren'}</button>
-                    </form>
-                    """
-                )
-                item_rows = []
-                for item in items:
-                    item_completed = bool(item["completed_at"])
-                    item_status = f"Erledigt am {esc(item['completed_at'])}" if item_completed else "Offen"
-                    item_status_class = "item-status done" if item_completed else "item-status open"
-                    item_complete_form = f"""
-                    <form method="post" action="/admin/order-items/status">
-                        <input type="hidden" name="item_{item['id']}" value="1">
-                        <input type="hidden" name="completed" value="{0 if item_completed else 1}">
-                        <input type="hidden" name="return_order" value="{order['id']}">
-                        <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
-                        <button type="submit" class="{'button' if item_completed else 'primary'}">{'Wieder öffnen' if item_completed else 'Position erledigt'}</button>
-                    </form>
-                    """
-                    item_delete_form = f"""
-                    <form method="post" action="/admin/order-items/delete" data-confirm="Diese Position wirklich aus der Bestellung löschen?">
-                        <input type="hidden" name="item_{item['id']}" value="1">
-                        <input type="hidden" name="return_order" value="{order['id']}">
-                        <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
-                        <button type="submit" class="danger">Position löschen</button>
-                    </form>
-                    """
-                    item_rows.append(
+                day_groups.setdefault(order_day_key(order), []).append(order)
+            cards = []
+            for day_key in sorted(day_groups.keys(), key=order_day_sort_key, reverse=True):
+                day_orders = sorted(day_groups[day_key], key=order_created_sort_key, reverse=True)
+                aggregated = {}
+                order_rows = []
+                individual_item_rows = []
+                note_rows = []
+                hidden_inputs = []
+                for order in day_orders:
+                    hidden_inputs.append(f'<input type="hidden" name="order_{order["id"]}" value="1">')
+                    is_completed = bool(order["completed_at"])
+                    status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
+                    status_class = "order-status done" if is_completed else "order-status open"
+                    image_link = f"<a class='button tiny' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild</a>" if order["order_image_filename"] else ""
+                    order_rows.append(
                         f"""
-                        <tr class="{'order-item-completed' if item_completed else ''}">
-                            <td>{esc(item['product_name'])}</td>
-                            <td>{esc(item['category'])}</td>
-                            <td>{esc(item['package_size'])}</td>
-                            <td>{esc(item['quantity'])}</td>
-                            <td><span class="{item_status_class}">{item_status}</span></td>
-                            <td><div class="table-actions item-actions">{item_complete_form}{item_delete_form}</div></td>
+                        <tr class="{'order-completed-row' if is_completed else ''}">
+                            <td><label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label></td>
+                            <td>{esc(order['created_at'])}</td>
+                            <td>{esc(order['ordered_by'])}</td>
+                            <td><span class="{status_class}">{status_label}</span></td>
+                            <td><div class="table-actions"><a class="button tiny" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF</a>{image_link}</div></td>
                         </tr>
                         """
                     )
-                position_count = sum(1 for item in items if item["quantity"] > 0)
-                quantity_sum = sum(item["quantity"] for item in items)
-                image_link = f"<a class='button' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if order["order_image_filename"] else ""
+                    if order["note"]:
+                        note_rows.append(f"<li><strong>{esc(order['order_number'])}:</strong> {esc(order['note'])}</li>")
+                    for item in get_order_items(order["id"]):
+                        item_completed = bool(item["completed_at"])
+                        item_status = f"Erledigt am {esc(item['completed_at'])}" if item_completed else "Offen"
+                        item_status_class = "item-status done" if item_completed else "item-status open"
+                        item_complete_form = f"""
+                        <form method="post" action="/admin/order-items/status">
+                            <input type="hidden" name="item_{item['id']}" value="1">
+                            <input type="hidden" name="completed" value="{0 if item_completed else 1}">
+                            <input type="hidden" name="return_order" value="{order['id']}">
+                            <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
+                            <button type="submit" class="{'button' if item_completed else 'primary'}">{'Wieder öffnen' if item_completed else 'Position erledigt'}</button>
+                        </form>
+                        """
+                        item_delete_form = f"""
+                        <form method="post" action="/admin/order-items/delete" data-confirm="Diese Position wirklich aus der Bestellung löschen?">
+                            <input type="hidden" name="item_{item['id']}" value="1">
+                            <input type="hidden" name="return_order" value="{order['id']}">
+                            <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
+                            <button type="submit" class="danger">Position löschen</button>
+                        </form>
+                        """
+                        individual_item_rows.append(
+                            f"""
+                            <tr class="{'order-item-completed' if item_completed else ''}">
+                                <td>{esc(order['order_number'])}</td>
+                                <td>{esc(item['product_name'])}</td>
+                                <td>{esc(item['category'])}</td>
+                                <td>{esc(item['package_size'])}</td>
+                                <td>{esc(item['quantity'])}</td>
+                                <td><span class="{item_status_class}">{item_status}</span></td>
+                                <td><div class="table-actions item-actions">{item_complete_form}{item_delete_form}</div></td>
+                            </tr>
+                            """
+                        )
+                        key = (
+                            item["product_id"] or "",
+                            item["product_name"] or "",
+                            item["category"] or "",
+                            item["package_size"] or "",
+                            item["source"] or "",
+                        )
+                        entry = aggregated.setdefault(
+                            key,
+                            {
+                                "product_name": item["product_name"] or "",
+                                "category": item["category"] or "",
+                                "package_size": item["package_size"] or "",
+                                "source": item["source"] or "",
+                                "quantity": 0,
+                                "completed": 0,
+                                "open": 0,
+                                "item_ids": [],
+                            },
+                        )
+                        quantity = int(item["quantity"] or 0)
+                        entry["quantity"] += quantity
+                        entry["completed" if item["completed_at"] else "open"] += quantity
+                        entry["item_ids"].append(str(item["id"]))
+                item_rows = []
+                for entry in sorted(aggregated.values(), key=lambda value: (value["source"].lower(), value["category"].lower(), value["product_name"].lower())):
+                    item_rows.append(
+                        f"""
+                        <tr class="{'order-item-completed' if entry['open'] <= 0 and entry['quantity'] > 0 else ''}">
+                            <td>{esc(entry['product_name'])}</td>
+                            <td>{esc(entry['category'])}</td>
+                            <td>{esc(entry['package_size'])}</td>
+                            <td>{esc(entry['source'])}</td>
+                            <td>{esc(entry['quantity'])}</td>
+                            <td>{esc(entry['completed'])} erledigt · {esc(entry['open'])} offen</td>
+                        </tr>
+                        """
+                    )
+                position_count = len(aggregated)
+                quantity_sum = sum(entry["quantity"] for entry in aggregated.values())
+                day_label = order_day_label(day_key)
+                day_completed = all(bool(order["completed_at"]) for order in day_orders)
+                card_class = "box order-card order-day-card order-completed" if day_completed else "box order-card order-day-card"
                 cards.append(
                     f"""
-                    <article id="order-{order['id']}" class="{card_class}">
+                    <article class="{card_class}">
                         <div class="section-head">
                             <div>
-                                <label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label>
-                                <p class="muted">{esc(order['created_at'])} · Standort {esc(order['location'])} · {esc(order['ordered_by'])}</p>
-                                <p class="{status_class}">{status_label}</p>
+                                <h3>{esc(day_label)}</h3>
+                                <p class="muted">{len(day_orders)} Einzelbestellung(en) · {position_count} zusammengefasste Position(en) · {quantity_sum} Gebinde</p>
                             </div>
                             <div class="table-actions">
-                                <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF öffnen</a>
-                                {image_link}
-                                {complete_form}
-                                <form method="post" action="/admin/orders/delete" data-confirm="Diese Bestellung wirklich löschen? Die Bestellpositionen und gespeicherten Unterlagen werden entfernt.">
-                                    <input type="hidden" name="order_{order['id']}" value="1">
-                                    <button type="submit" class="danger">Löschen</button>
+                                <form method="post" action="/admin/orders/combined-pdf">
+                                    {''.join(hidden_inputs)}
+                                    <button class="primary" type="submit">Tagesbestellung als PDF</button>
+                                </form>
+                                <form method="post" action="/admin/orders/status">
+                                    {''.join(hidden_inputs)}
+                                    <input type="hidden" name="completed" value="{0 if day_completed else 1}">
+                                    <button type="submit" class="{'button' if day_completed else 'primary'}">{'Tag wieder öffnen' if day_completed else 'Tag erledigt'}</button>
+                                </form>
+                                <form method="post" action="/admin/orders/delete" data-confirm="Alle Einzelbestellungen dieses Tages wirklich löschen?">
+                                    {''.join(hidden_inputs)}
+                                    <button type="submit" class="danger">Tag löschen</button>
                                 </form>
                             </div>
                         </div>
-                        <p><strong>Gesamtübersicht:</strong> {position_count} Position(en), {quantity_sum} Gebinde insgesamt.</p>
-                        {f'<p><strong>Bemerkung:</strong> {esc(order["note"])}</p>' if order["note"] else ''}
-                        <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Menge</th><th>Status</th><th>Position</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
+                        <details class="category-panel order-day-panel" open>
+                            <summary>Zusammengefasste Produkte <span>{position_count}</span></summary>
+                            <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Menge</th><th>Status</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
+                        </details>
+                        <details class="category-panel order-day-panel">
+                            <summary>Einzelbestellungen <span>{len(day_orders)}</span></summary>
+                            <div class="table-wrap"><table><tr><th>Bestellnummer</th><th>Zeitpunkt</th><th>Von</th><th>Status</th><th>Dateien</th></tr>{''.join(order_rows)}</table></div>
+                        </details>
+                        <details class="category-panel order-day-panel">
+                            <summary>Einzelpositionen bearbeiten <span>{len(individual_item_rows)}</span></summary>
+                            <div class="table-wrap"><table><tr><th>Bestellung</th><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Menge</th><th>Status</th><th>Position</th></tr>{''.join(individual_item_rows) if individual_item_rows else '<tr><td colspan="7">Keine Positionen gespeichert.</td></tr>'}</table></div>
+                        </details>
+                        {f'<div class="order-note-list"><strong>Bemerkungen:</strong><ul>{"".join(note_rows)}</ul></div>' if note_rows else ''}
                     </article>
                     """
                 )
             location_panels.append(
                 f"""
                 <details class="category-panel order-location-panel" {"open" if location_name == open_location else ""}>
-                    <summary>{esc(location_name)} <span>{len(location_orders)} Bestellung(en)</span></summary>
+                    <summary>{esc(location_name)} <span>{len(day_groups)} Tag(e), {len(location_orders)} Bestellung(en)</span></summary>
                     <div class="order-location-content">{''.join(cards)}</div>
                 </details>
                 """
@@ -3839,6 +4070,41 @@ class App(BaseHTTPRequestHandler):
             </template>
             """
             return "".join(rows_html), len(row_items), template
+        def production_job_rows(prefix, jobs):
+            section_options = lambda selected="": "".join(
+                f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
+                for key, label in PRODUCTION_SECTIONS.items()
+            )
+            row_items = normalize_production_jobs(jobs) or [{"id": "", "section": "backen", "title": "", "due_date": "", "note": "", "active": True}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
+                        <input type="hidden" name="{prefix}_production_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <label>Bereich<select name="{prefix}_production_section_{row_index}">{section_options(item.get('section', 'backen'))}</select></label>
+                        <label>Auftrag<input name="{prefix}_production_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kuchen für Freitag"></label>
+                        <label>Datum<input type="date" name="{prefix}_production_due_date_{row_index}" value="{esc(item.get('due_date', ''))}"></label>
+                        <label>Hinweis<textarea name="{prefix}_production_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label class="check"><input type="checkbox" name="{prefix}_production_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_production_template">
+                <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
+                    <input type="hidden" name="{prefix}_production_id___INDEX__" value="">
+                    <label>Bereich<select name="{prefix}_production_section___INDEX__">{section_options('backen')}</select></label>
+                    <label>Auftrag<input name="{prefix}_production_title___INDEX__" placeholder="z. B. Kuchen für Freitag"></label>
+                    <label>Datum<input type="date" name="{prefix}_production_due_date___INDEX__"></label>
+                    <label>Hinweis<textarea name="{prefix}_production_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_production_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
         category_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
             for category in categories
@@ -3864,6 +4130,7 @@ class App(BaseHTTPRequestHandler):
             cockpit_prefix = f"location_cockpit_{index}"
             cockpit_task_html, cockpit_task_count, cockpit_task_template = cockpit_task_rows(cockpit_prefix, location.get("cockpit_tasks", []))
             cockpit_order_html, cockpit_order_count, cockpit_order_template = cockpit_order_rows(cockpit_prefix, location.get("cockpit_orders", []))
+            production_job_html, production_job_count, production_job_template = production_job_rows(cockpit_prefix, location.get("production_jobs", []))
             rows.append(
                 f"""
                 <details class="category-panel location-panel">
@@ -3911,6 +4178,14 @@ class App(BaseHTTPRequestHandler):
                                 {cockpit_order_template}
                                 <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
                             </details>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Produktion <span>{production_job_count}</span></summary>
+                                <p class="muted">Diese Aufträge erscheinen nur im Cockpit des Standorts Produktion.</p>
+                                <input type="hidden" id="{cockpit_prefix}_production_count" name="{cockpit_prefix}_production_count" value="{production_job_count}">
+                                <div id="{cockpit_prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_production_template" data-count-id="{cockpit_prefix}_production_count">{production_job_html}</div>
+                                {production_job_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_production_rows">Produktionsauftrag hinzufügen</button>
+                            </details>
                         </fieldset>
                     </div>
                 </details>
@@ -3925,6 +4200,7 @@ class App(BaseHTTPRequestHandler):
         new_cockpit_prefix = "new_location_cockpit"
         new_cockpit_task_html, new_cockpit_task_count, new_cockpit_task_template = cockpit_task_rows(new_cockpit_prefix, [])
         new_cockpit_order_html, new_cockpit_order_count, new_cockpit_order_template = cockpit_order_rows(new_cockpit_prefix, [])
+        new_production_job_html, new_production_job_count, new_production_job_template = production_job_rows(new_cockpit_prefix, [])
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -3973,6 +4249,14 @@ class App(BaseHTTPRequestHandler):
                                 <div id="{new_cockpit_prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_order_template" data-count-id="{new_cockpit_prefix}_order_count">{new_cockpit_order_html}</div>
                                 {new_cockpit_order_template}
                                 <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
+                            </details>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Produktion <span>{new_production_job_count}</span></summary>
+                                <p class="muted">Diese Aufträge erscheinen nur im Cockpit des Standorts Produktion.</p>
+                                <input type="hidden" id="{new_cockpit_prefix}_production_count" name="{new_cockpit_prefix}_production_count" value="{new_production_job_count}">
+                                <div id="{new_cockpit_prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_production_template" data-count-id="{new_cockpit_prefix}_production_count">{new_production_job_html}</div>
+                                {new_production_job_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_production_rows">Produktionsauftrag hinzufügen</button>
                             </details>
                         </fieldset>
                     </div>
@@ -4067,6 +4351,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_cockpit_task_state()
             if path == "/cockpit/order-state":
                 return self.handle_cockpit_order_state()
+            if path == "/cockpit/production-job":
+                return self.handle_cockpit_production_job_state()
+            if path == "/api/production-job":
+                return self.handle_api_production_job()
             if path == "/push/subscribe":
                 return self.handle_push_subscribe()
             if path == "/push/unsubscribe":
@@ -4165,6 +4453,76 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/cockpit?msg=" + quote_plus("Bestellinformation wurde nicht gefunden."))
         set_cockpit_state(buyer_key, "order", order_id, state)
         return self.redirect("/cockpit")
+
+    def handle_cockpit_production_job_state(self):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location or not is_production_location(location):
+            return self.redirect("/cockpit?msg=" + quote_plus("Produktionsauftrag wurde nicht gefunden."))
+        form = self.read_form()
+        job_id = self.form_value(form, "job_id").strip()
+        state = self.form_value(form, "state", "open").strip()
+        valid_ids = {item["id"] for item in normalize_production_jobs(location.get("production_jobs", []))}
+        if job_id not in valid_ids:
+            return self.redirect("/cockpit?msg=" + quote_plus("Produktionsauftrag wurde nicht gefunden."))
+        set_cockpit_state(buyer_key, "production_job", job_id, state)
+        return self.redirect("/cockpit")
+
+    def handle_api_production_job(self):
+        if not COCKPIT_API_TOKEN:
+            return self.send_json({"ok": False, "error": "Schnittstelle ist nicht eingerichtet."}, 403)
+        auth = self.headers.get("Authorization", "")
+        api_key = self.headers.get("X-API-Key", "")
+        expected = f"Bearer {COCKPIT_API_TOKEN}"
+        if not (hmac.compare_digest(auth, expected) or hmac.compare_digest(api_key, COCKPIT_API_TOKEN)):
+            return self.send_json({"ok": False, "error": "Nicht erlaubt."}, 401)
+        payload = self.read_json_payload(max_bytes=64 * 1024)
+        section = str(payload.get("section") or "").strip().lower()
+        title = str(payload.get("title") or "").strip()
+        due_date = str(payload.get("due_date") or "").strip()
+        note = str(payload.get("note") or "").strip()
+        location_hint = str(payload.get("location") or "produktion").strip()
+        if section not in PRODUCTION_SECTIONS:
+            return self.send_json({"ok": False, "error": "Bereich muss backen, eisvitrinen oder eistorten sein."}, 400)
+        if not title:
+            return self.send_json({"ok": False, "error": "Titel fehlt."}, 400)
+        if not is_valid_iso_date(due_date):
+            return self.send_json({"ok": False, "error": "Datum muss im Format JJJJ-MM-TT angegeben werden."}, 400)
+        locations = get_locations()
+        target_location = None
+        normalized_hint = normalize_text_key(location_hint)
+        for location in locations:
+            if normalize_text_key(location.get("id", "")) == normalized_hint or normalize_text_key(location.get("name", "")) == normalized_hint:
+                target_location = location
+                break
+        if not target_location:
+            for location in locations:
+                if is_production_location(location):
+                    target_location = location
+                    break
+        if not target_location:
+            return self.send_json({"ok": False, "error": "Standort Produktion wurde nicht gefunden."}, 404)
+        job = {
+            "id": make_cockpit_item_id("production"),
+            "section": section,
+            "title": title,
+            "due_date": due_date,
+            "note": note,
+            "active": True,
+            "source": str(payload.get("source") or "api").strip()[:40] or "api",
+        }
+        updated_locations = []
+        for location in locations:
+            if location["id"] == target_location["id"]:
+                jobs = normalize_production_jobs(location.get("production_jobs", []))
+                jobs.append(job)
+                location = dict(location)
+                location["production_jobs"] = normalize_production_jobs(jobs)
+            updated_locations.append(location)
+        save_locations(updated_locations)
+        return self.send_json({"ok": True, "id": job["id"], "location": target_location["name"]})
 
     def handle_admin_login(self):
         form = self.read_form()
@@ -4646,6 +5004,31 @@ class App(BaseHTTPRequestHandler):
         return normalize_cockpit_orders(items)
 
 
+    def collect_production_jobs(self, form, prefix):
+        try:
+            count = int(self.form_value(form, f"{prefix}_production_count", "0") or "0")
+        except ValueError:
+            count = 0
+        items = []
+        for row_index in range(count):
+            title = self.form_value(form, f"{prefix}_production_title_{row_index}").strip()
+            due_date = self.form_value(form, f"{prefix}_production_due_date_{row_index}").strip()
+            section = self.form_value(form, f"{prefix}_production_section_{row_index}").strip()
+            note = self.form_value(form, f"{prefix}_production_note_{row_index}").strip()
+            if not title and not due_date and not note:
+                continue
+            items.append({
+                "id": self.form_value(form, f"{prefix}_production_id_{row_index}").strip(),
+                "section": section,
+                "title": title,
+                "due_date": due_date,
+                "note": note,
+                "active": bool(self.form_value(form, f"{prefix}_production_active_{row_index}")),
+                "source": "admin",
+            })
+        return normalize_production_jobs(items)
+
+
     def handle_locations(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -4677,6 +5060,7 @@ class App(BaseHTTPRequestHandler):
                     "min_stock_items": self.collect_min_stock_items(form, f"location_min_stock_{index}"),
                     "cockpit_tasks": self.collect_cockpit_tasks(form, f"location_cockpit_{index}"),
                     "cockpit_orders": self.collect_cockpit_orders(form, f"location_cockpit_{index}"),
+                    "production_jobs": self.collect_production_jobs(form, f"location_cockpit_{index}"),
                 }
             )
             existing_category_updates[location_id] = [
@@ -4702,6 +5086,7 @@ class App(BaseHTTPRequestHandler):
                     "min_stock_items": self.collect_min_stock_items(form, "new_location_min_stock"),
                     "cockpit_tasks": self.collect_cockpit_tasks(form, "new_location_cockpit"),
                     "cockpit_orders": self.collect_cockpit_orders(form, "new_location_cockpit"),
+                    "production_jobs": self.collect_production_jobs(form, "new_location_cockpit"),
                 }
             )
         if not locations:
