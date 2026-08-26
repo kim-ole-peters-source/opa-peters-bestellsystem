@@ -964,7 +964,7 @@ tr:hover td { background: var(--primary-soft); }
 .cockpit-admin-rows { display: grid; gap: 10px; margin: 10px 0; }
 .cockpit-admin-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) auto auto auto;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(180px, .9fr) auto auto auto auto;
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -972,10 +972,33 @@ tr:hover td { background: var(--primary-soft); }
   border-radius: var(--radius-md);
   background: #fff;
 }
-.cockpit-admin-order-row { grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.2fr) auto auto; }
-.cockpit-admin-production-row { grid-template-columns: minmax(150px, .7fr) minmax(220px, 1.2fr) minmax(150px, .7fr) minmax(220px, 1fr) auto auto; }
+.cockpit-admin-order-row { grid-template-columns: minmax(200px, 1fr) minmax(220px, 1.1fr) minmax(180px, .9fr) auto auto auto; }
+.cockpit-admin-production-row { grid-template-columns: minmax(130px, .7fr) minmax(200px, 1.1fr) minmax(145px, .7fr) minmax(200px, 1fr) minmax(180px, .9fr) auto auto auto; }
 .cockpit-admin-row label { margin: 0; }
 .cockpit-row-remove { white-space: nowrap; }
+.cockpit-row-save { white-space: nowrap; }
+.cockpit-image-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+.cockpit-image-preview img,
+.cockpit-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.cockpit-thumb {
+  display: block;
+  margin-bottom: 8px;
+}
 .new-location-panel summary span { background: var(--green-bg); color: var(--green-text); }
 .min-stock-info {
   display: grid; gap: 8px; margin-top: 12px; padding: 8px; border: 1px solid #b9d7c4; border-radius: var(--radius-md);

@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-26-production-cockpit-daily-orders"
+ASSET_VERSION = "2026-08-26-cockpit-images-row-save"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -349,6 +349,7 @@ def normalize_cockpit_tasks(raw_tasks):
             "title": title[:180],
             "template": bool(item.get("template")),
             "active": bool(item.get("active", True)),
+            "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
         })
     return normalized
 
@@ -372,6 +373,7 @@ def normalize_cockpit_orders(raw_orders):
             "title": title[:180] or "Bestellung",
             "note": note[:500],
             "active": bool(item.get("active", True)),
+            "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
         })
     return normalized
 
@@ -408,6 +410,7 @@ def normalize_production_jobs(raw_jobs):
             "note": note[:500],
             "active": bool(item.get("active", True)),
             "source": str(item.get("source") or "admin").strip()[:40] or "admin",
+            "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
         })
     return sorted(normalized, key=lambda item: (item["due_date"], item["section"], item["title"].lower()))
 
@@ -2790,19 +2793,21 @@ class App(BaseHTTPRequestHandler):
         task_cards = []
         for task in tasks:
             done = states.get(("task", task["id"])) == "done"
+            image = f'<img class="cockpit-thumb" src="/uploads/{esc(task["image_filename"])}" alt="">' if task.get("image_filename") else ""
             task_cards.append(
                 f"""
                 <form method="post" action="/cockpit/task" class="cockpit-item {'is-done' if done else ''}">
                     <input type="hidden" name="task_id" value="{esc(task['id'])}">
                     <input type="hidden" name="state" value="{'open' if done else 'done'}">
                     <button type="submit" class="cockpit-check" aria-label="Aufgabe abhaken">{'✓' if done else ''}</button>
-                    <div><strong>{esc(task['title'])}</strong>{'<span>erledigt</span>' if done else '<span>offen</span>'}</div>
+                    <div>{image}<strong>{esc(task['title'])}</strong>{'<span>erledigt</span>' if done else '<span>offen</span>'}</div>
                 </form>
                 """
             )
         order_cards = []
         for item in cockpit_orders:
             state = states.get(("order", item["id"]), "open")
+            image = f'<img class="cockpit-thumb" src="/uploads/{esc(item["image_filename"])}" alt="">' if item.get("image_filename") else ""
             state_label = {
                 "paid_picked": "bezahlt & abgeholt",
                 "picked_invoice": "abgeholt & Rechnungsstellung",
@@ -2811,6 +2816,7 @@ class App(BaseHTTPRequestHandler):
                 f"""
                 <article class="cockpit-order {'is-done' if state != 'open' else ''}">
                     <div>
+                        {image}
                         <strong>{esc(item['title'])}</strong>
                         {f'<p>{esc(item["note"])}</p>' if item.get("note") else ''}
                         <span class="cockpit-state">{esc(state_label)}</span>
@@ -2851,12 +2857,14 @@ class App(BaseHTTPRequestHandler):
 
             def production_job_card(job):
                 done = states.get(("production_job", job["id"])) == "done"
+                image = f'<img class="cockpit-thumb" src="/uploads/{esc(job["image_filename"])}" alt="">' if job.get("image_filename") else ""
                 return f"""
                 <form method="post" action="/cockpit/production-job" class="production-job {'is-done' if done else ''}">
                     <input type="hidden" name="job_id" value="{esc(job['id'])}">
                     <input type="hidden" name="state" value="{'open' if done else 'done'}">
                     <button type="submit" class="cockpit-check" aria-label="Auftrag abhaken">{'✓' if done else ''}</button>
                     <div>
+                        {image}
                         <strong>{esc(job['title'])}</strong>
                         {f'<p>{esc(job["note"])}</p>' if job.get("note") else ''}
                         <span>{'erledigt' if done else esc(format_iso_date(job['due_date']))}</span>
@@ -4017,17 +4025,22 @@ class App(BaseHTTPRequestHandler):
             """
             return "".join(rows_html), len(row_items), template
         def cockpit_task_rows(prefix, tasks):
-            row_items = normalize_cockpit_tasks(tasks) or [{"id": "", "title": "", "template": False, "active": True}]
+            row_items = normalize_cockpit_tasks(tasks) or [{"id": "", "title": "", "template": False, "active": True, "image_filename": ""}]
             rows_html = []
             for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
                 rows_html.append(
                     f"""
                     <div class="cockpit-admin-row" data-cockpit-task-row>
                         <input type="hidden" name="{prefix}_task_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_task_image_current_{row_index}" value="{esc(image_filename)}">
                         <label>Aufgabe<input name="{prefix}_task_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kühlschrank prüfen"></label>
+                        <label>Bild<input type="file" name="{prefix}_task_image_{row_index}" accept="image/*">{image_preview}</label>
                         <label class="check"><input type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
                         <label class="check"><input type="checkbox" name="{prefix}_task_template_{row_index}" value="1" {"checked" if item.get('template') else ""}> Als Muster speichern</label>
                         <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                        <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
                     </div>
                     """
                 )
@@ -4035,26 +4048,34 @@ class App(BaseHTTPRequestHandler):
             <template id="{prefix}_task_template">
                 <div class="cockpit-admin-row" data-cockpit-task-row>
                     <input type="hidden" name="{prefix}_task_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_task_image_current___INDEX__" value="">
                     <label>Aufgabe<input name="{prefix}_task_title___INDEX__" placeholder="z. B. Kühlschrank prüfen"></label>
+                    <label>Bild<input type="file" name="{prefix}_task_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
                     <label class="check"><input type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
                     <label class="check"><input type="checkbox" name="{prefix}_task_template___INDEX__" value="1"> Als Muster speichern</label>
                     <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
                 </div>
             </template>
             """
             return "".join(rows_html), len(row_items), template
         def cockpit_order_rows(prefix, orders):
-            row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True}]
+            row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True, "image_filename": ""}]
             rows_html = []
             for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
                 rows_html.append(
                     f"""
                     <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
                         <input type="hidden" name="{prefix}_order_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_order_image_current_{row_index}" value="{esc(image_filename)}">
                         <label>Bestellung<input name="{prefix}_order_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Tortenbestellung Müller"></label>
                         <label>Hinweis<textarea name="{prefix}_order_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label>Bild<input type="file" name="{prefix}_order_image_{row_index}" accept="image/*">{image_preview}</label>
                         <label class="check"><input type="checkbox" name="{prefix}_order_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
                         <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                        <button class="primary cockpit-row-save" type="submit">Diese Bestellung speichern</button>
                     </div>
                     """
                 )
@@ -4062,10 +4083,13 @@ class App(BaseHTTPRequestHandler):
             <template id="{prefix}_order_template">
                 <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
                     <input type="hidden" name="{prefix}_order_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_order_image_current___INDEX__" value="">
                     <label>Bestellung<input name="{prefix}_order_title___INDEX__" placeholder="z. B. Tortenbestellung Müller"></label>
                     <label>Hinweis<textarea name="{prefix}_order_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label>Bild<input type="file" name="{prefix}_order_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
                     <label class="check"><input type="checkbox" name="{prefix}_order_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
                     <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    <button class="primary cockpit-row-save" type="submit">Diese Bestellung speichern</button>
                 </div>
             </template>
             """
@@ -4075,19 +4099,24 @@ class App(BaseHTTPRequestHandler):
                 f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
                 for key, label in PRODUCTION_SECTIONS.items()
             )
-            row_items = normalize_production_jobs(jobs) or [{"id": "", "section": "backen", "title": "", "due_date": "", "note": "", "active": True}]
+            row_items = normalize_production_jobs(jobs) or [{"id": "", "section": "backen", "title": "", "due_date": "", "note": "", "active": True, "image_filename": ""}]
             rows_html = []
             for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
                 rows_html.append(
                     f"""
                     <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
                         <input type="hidden" name="{prefix}_production_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_production_image_current_{row_index}" value="{esc(image_filename)}">
                         <label>Bereich<select name="{prefix}_production_section_{row_index}">{section_options(item.get('section', 'backen'))}</select></label>
                         <label>Auftrag<input name="{prefix}_production_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kuchen für Freitag"></label>
                         <label>Datum<input type="date" name="{prefix}_production_due_date_{row_index}" value="{esc(item.get('due_date', ''))}"></label>
                         <label>Hinweis<textarea name="{prefix}_production_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label>Bild<input type="file" name="{prefix}_production_image_{row_index}" accept="image/*">{image_preview}</label>
                         <label class="check"><input type="checkbox" name="{prefix}_production_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
                         <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                        <button class="primary cockpit-row-save" type="submit">Diesen Auftrag speichern</button>
                     </div>
                     """
                 )
@@ -4095,12 +4124,15 @@ class App(BaseHTTPRequestHandler):
             <template id="{prefix}_production_template">
                 <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
                     <input type="hidden" name="{prefix}_production_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_production_image_current___INDEX__" value="">
                     <label>Bereich<select name="{prefix}_production_section___INDEX__">{section_options('backen')}</select></label>
                     <label>Auftrag<input name="{prefix}_production_title___INDEX__" placeholder="z. B. Kuchen für Freitag"></label>
                     <label>Datum<input type="date" name="{prefix}_production_due_date___INDEX__"></label>
                     <label>Hinweis<textarea name="{prefix}_production_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label>Bild<input type="file" name="{prefix}_production_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
                     <label class="check"><input type="checkbox" name="{prefix}_production_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
                     <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    <button class="primary cockpit-row-save" type="submit">Diesen Auftrag speichern</button>
                 </div>
             </template>
             """
@@ -4206,7 +4238,7 @@ class App(BaseHTTPRequestHandler):
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
         <section class="box">
             <h2>Standorte bearbeiten</h2>
-            <form method="post" action="/admin/locations">
+            <form method="post" action="/admin/locations" enctype="multipart/form-data">
                 <input type="hidden" name="location_count" value="{len(locations)}">
                 <div class="location-list">{''.join(rows) if rows else '<p>Noch keine Standorte.</p>'}</div>
                 <details class="category-panel location-panel new-location-panel">
@@ -4981,6 +5013,11 @@ class App(BaseHTTPRequestHandler):
                 "title": title,
                 "template": bool(self.form_value(form, f"{prefix}_task_template_{row_index}")),
                 "active": bool(self.form_value(form, f"{prefix}_task_active_{row_index}")),
+                "image_filename": self.save_cockpit_image_upload(
+                    form,
+                    f"{prefix}_task_image_{row_index}",
+                    self.form_value(form, f"{prefix}_task_image_current_{row_index}").strip(),
+                ),
             })
         return normalize_cockpit_tasks(items)
 
@@ -5000,8 +5037,26 @@ class App(BaseHTTPRequestHandler):
                 "title": title,
                 "note": note,
                 "active": bool(self.form_value(form, f"{prefix}_order_active_{row_index}")),
+                "image_filename": self.save_cockpit_image_upload(
+                    form,
+                    f"{prefix}_order_image_{row_index}",
+                    self.form_value(form, f"{prefix}_order_image_current_{row_index}").strip(),
+                ),
             })
         return normalize_cockpit_orders(items)
+
+
+    def save_cockpit_image_upload(self, form, field_name, current_filename=""):
+        current_filename = os.path.basename(str(current_filename or "").strip())
+        uploaded = form.get(field_name)
+        if not isinstance(uploaded, UploadedFile) or not uploaded.filename or not uploaded.content:
+            return current_filename
+        if len(uploaded.content) > MAX_IMAGE_BYTES:
+            raise RequestTooLarge("Das Bild ist zu groß. Bitte maximal 6 MB hochladen.")
+        image_filename = slug_filename(uploaded.filename)
+        with open(os.path.join(UPLOAD_DIR, image_filename), "wb") as f:
+            f.write(uploaded.content)
+        return image_filename
 
 
     def collect_production_jobs(self, form, prefix):
@@ -5025,6 +5080,11 @@ class App(BaseHTTPRequestHandler):
                 "note": note,
                 "active": bool(self.form_value(form, f"{prefix}_production_active_{row_index}")),
                 "source": "admin",
+                "image_filename": self.save_cockpit_image_upload(
+                    form,
+                    f"{prefix}_production_image_{row_index}",
+                    self.form_value(form, f"{prefix}_production_image_current_{row_index}").strip(),
+                ),
             })
         return normalize_production_jobs(items)
 

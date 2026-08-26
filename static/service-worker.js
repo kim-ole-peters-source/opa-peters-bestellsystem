@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v36-production-cockpit-daily-orders';
+const CACHE_NAME = 'opa-peters-bestellung-v37-cockpit-images-row-save';
 const STATIC_ASSETS = [
   '/',
   '/login',
