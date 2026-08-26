@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v34-product-bulk-admin-min-stock-cart';
+const CACHE_NAME = 'opa-peters-bestellung-v35-location-cockpit';
 const STATIC_ASSETS = [
   '/',
   '/login',

@@ -945,6 +945,22 @@ tr:hover td { background: var(--primary-soft); }
 .location-list { display: grid; gap: 12px; }
 .location-panel .location-row { margin-top: 12px; }
 .location-panel summary span { background: #eef4ff; color: var(--primary); }
+.cockpit-admin { grid-column: 1 / -1; }
+.cockpit-admin-panel { margin-top: 10px; background: #fff; }
+.cockpit-admin-rows { display: grid; gap: 10px; margin: 10px 0; }
+.cockpit-admin-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) auto auto auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.cockpit-admin-order-row { grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.2fr) auto auto; }
+.cockpit-admin-row label { margin: 0; }
+.cockpit-row-remove { white-space: nowrap; }
 .new-location-panel summary span { background: var(--green-bg); color: var(--green-text); }
 .min-stock-info {
   display: grid; gap: 8px; margin-top: 12px; padding: 8px; border: 1px solid #b9d7c4; border-radius: var(--radius-md);
@@ -966,6 +982,74 @@ tr:hover td { background: var(--primary-soft); }
 .min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; font-size: 12px; }
 .min-stock-info-card b { color: var(--green-text); font-size: 13px; }
 .min-stock-cart-button { min-height: 36px; padding: 7px 10px; margin-top: 3px; font-size: 12.5px; }
+
+.cockpit-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.cockpit-actions { justify-content: flex-end; }
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.cockpit-panel { align-self: start; }
+.cockpit-list { display: grid; gap: 10px; }
+.cockpit-item,
+.cockpit-order {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+  box-shadow: var(--shadow-tiny);
+}
+.cockpit-item.is-done,
+.cockpit-order.is-done {
+  background: var(--green-bg);
+  border-color: #9ad6b5;
+}
+.cockpit-check {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid var(--green-text);
+  background: #fff;
+  color: var(--green-text);
+  font-size: 24px;
+  font-weight: 900;
+}
+.cockpit-item span,
+.cockpit-state {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+.cockpit-order {
+  grid-template-columns: minmax(0, 1fr);
+}
+.cockpit-order p { margin: 4px 0 0; color: var(--muted); }
+.cockpit-order-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.cockpit-order-actions form { margin: 0; }
+.cockpit-order-actions button { width: 100%; min-height: 42px; padding: 8px 10px; font-size: 12.5px; }
 
 /* ---------- 10. Statusmeldungen ---------- */
 .error, .success { border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 16px; border: 1px solid transparent; font-weight: 700; box-shadow: var(--shadow-tiny); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -993,6 +1077,10 @@ tr:hover td { background: var(--primary-soft); }
   .bulk-add-remove { grid-column: 1 / -1; }
   .min-stock-row { grid-template-columns: 1fr 160px; }
   .min-stock-remove { grid-column: 1 / -1; }
+  .cockpit-grid { grid-template-columns: 1fr; }
+  .cockpit-admin-row,
+  .cockpit-admin-order-row { grid-template-columns: 1fr; }
+  .cockpit-order-actions { grid-template-columns: 1fr; }
   .bulk-time-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bulk-time-note { grid-column: 1 / -1; }
   .bulk-time-remove { grid-column: 1 / -1; }
@@ -1252,6 +1340,10 @@ tr:hover td { background: var(--primary-soft); }
   .bulk-category-buttons .button { width: 100%; }
   .bulk-add-product-row { grid-template-columns: 1fr; padding: 10px; }
   .min-stock-row { grid-template-columns: 1fr; padding: 10px; }
+  .cockpit-hero { align-items: stretch; }
+  .cockpit-actions, .cockpit-actions .button { width: 100%; }
+  .cockpit-item, .cockpit-order { padding: 10px; }
+  .cockpit-admin-row { padding: 10px; }
   .min-stock-info { padding: 11px; }
   .min-stock-info-grid { grid-template-columns: 1fr; }
   .item-actions { flex-direction: column; align-items: stretch; }

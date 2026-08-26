@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-05-product-bulk-admin-min-stock-cart"
+ASSET_VERSION = "2026-08-26-location-cockpit"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -321,6 +321,55 @@ def normalize_min_stock_items(raw_items):
     return normalized
 
 
+def make_cockpit_item_id(prefix="item"):
+    return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def normalize_cockpit_tasks(raw_tasks):
+    normalized = []
+    seen = set()
+    for item in raw_tasks or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        item_id = str(item.get("id") or "").strip() or make_cockpit_item_id("task")
+        if item_id in seen:
+            item_id = make_cockpit_item_id("task")
+        seen.add(item_id)
+        normalized.append({
+            "id": item_id,
+            "title": title[:180],
+            "template": bool(item.get("template")),
+            "active": bool(item.get("active", True)),
+        })
+    return normalized
+
+
+def normalize_cockpit_orders(raw_orders):
+    normalized = []
+    seen = set()
+    for item in raw_orders or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        note = str(item.get("note") or "").strip()
+        if not title and not note:
+            continue
+        item_id = str(item.get("id") or "").strip() or make_cockpit_item_id("order")
+        if item_id in seen:
+            item_id = make_cockpit_item_id("order")
+        seen.add(item_id)
+        normalized.append({
+            "id": item_id,
+            "title": title[:180] or "Bestellung",
+            "note": note[:500],
+            "active": bool(item.get("active", True)),
+        })
+    return normalized
+
+
 def normalize_locations(raw_locations):
     normalized = []
     used_ids = set()
@@ -334,6 +383,8 @@ def normalize_locations(raw_locations):
             time_tracking_max_end = str(item.get("time_tracking_max_end") or "")
             min_stock_enabled = bool(item.get("min_stock_enabled"))
             min_stock_items = normalize_min_stock_items(item.get("min_stock_items", []))
+            cockpit_tasks = normalize_cockpit_tasks(item.get("cockpit_tasks", []))
+            cockpit_orders = normalize_cockpit_orders(item.get("cockpit_orders", []))
             raw_id = str(item.get("id") or "").strip()
         else:
             name = str(item or "").strip()
@@ -344,6 +395,8 @@ def normalize_locations(raw_locations):
             time_tracking_max_end = ""
             min_stock_enabled = False
             min_stock_items = []
+            cockpit_tasks = []
+            cockpit_orders = []
             raw_id = ""
         if not name:
             continue
@@ -364,6 +417,8 @@ def normalize_locations(raw_locations):
             "time_tracking_max_end": time_tracking_max_end if is_valid_hhmm(time_tracking_max_end) else "",
             "min_stock_enabled": min_stock_enabled,
             "min_stock_items": min_stock_items,
+            "cockpit_tasks": cockpit_tasks,
+            "cockpit_orders": cockpit_orders,
         })
     return normalized
 
@@ -539,6 +594,18 @@ def init_db():
             location_id TEXT PRIMARY KEY,
             cart_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        )
+    """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cockpit_item_states (
+            location_id TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(location_id, item_type, item_id)
         )
     """
     )
@@ -1124,10 +1191,34 @@ def parse_import_file(uploaded_file):
     raise RuntimeError("Bitte eine CSV- oder Excel-Datei auswählen.")
 
 
+def parse_order_created_at(value):
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.min
+
+
+def order_created_sort_key(order):
+    try:
+        order_id = int(order["id"])
+    except (TypeError, ValueError, KeyError):
+        order_id = 0
+    return (parse_order_created_at(order["created_at"] if "created_at" in order.keys() else ""), order_id)
+
+
 def get_orders():
     con = db()
-    rows = con.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 100").fetchall()
+    rows = con.execute("SELECT * FROM orders").fetchall()
     con.close()
+    rows = sorted(rows, key=order_created_sort_key, reverse=True)
     return rows
 
 
@@ -1295,6 +1386,48 @@ def delete_cart_draft(location_id):
     con.execute("DELETE FROM cart_drafts WHERE location_id=?", (location_id,))
     con.commit()
     con.close()
+
+
+def get_cockpit_states(location_id):
+    if not location_id:
+        return {}
+    con = db()
+    rows = con.execute(
+        "SELECT item_type, item_id, state FROM cockpit_item_states WHERE location_id=?",
+        (location_id,),
+    ).fetchall()
+    con.close()
+    return {(row["item_type"], row["item_id"]): row["state"] for row in rows}
+
+
+def set_cockpit_state(location_id, item_type, item_id, state):
+    if not location_id or item_type not in ["task", "order"] or not item_id:
+        return False
+    state = str(state or "").strip()
+    valid_states = {
+        "task": ["open", "done"],
+        "order": ["open", "paid_picked", "picked_invoice"],
+    }
+    if state not in valid_states[item_type]:
+        state = "open"
+    con = db()
+    if state == "open":
+        con.execute(
+            "DELETE FROM cockpit_item_states WHERE location_id=? AND item_type=? AND item_id=?",
+            (location_id, item_type, item_id),
+        )
+    else:
+        con.execute(
+            """
+            INSERT INTO cockpit_item_states (location_id, item_type, item_id, state, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(location_id, item_type, item_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at
+            """,
+            (location_id, item_type, item_id, state, berlin_now().strftime("%d.%m.%Y %H:%M")),
+        )
+    con.commit()
+    con.close()
+    return True
 
 
 def get_order_by_pdf_filename(pdf_filename):
@@ -2099,9 +2232,19 @@ def create_combined_order_pdf(orders):
 
 
 def page(title, body, admin=False, buyer_key=None):
-    # Nach der Anmeldung verschwindet die obere Umschaltung zwischen Bestellung und Admin.
-    # Die passenden Aktionen liegen dann direkt in der jeweiligen Ansicht.
-    nav = "" if (admin or buyer_key) else '<a href="/">Bestellen</a><a href="/admin/login">Admin</a>'
+    if admin:
+        nav = ""
+    elif buyer_key:
+        location = find_location(buyer_key)
+        nav_links = ['<a href="/cockpit">Cockpit</a>']
+        if location_can_order(location):
+            nav_links.append('<a href="/">Shop</a>')
+        if location_can_time(location):
+            nav_links.append('<a href="/time">Zeiterfassung</a>')
+        nav_links.append('<a href="/logout">Logout</a>')
+        nav = "".join(nav_links)
+    else:
+        nav = '<a href="/login">Standort Login</a><a href="/admin/login">Admin</a>'
     subtitle = "" if title == "Besteller Login" else "<p>Opa Peters · internes Bestellsystem</p>"
     push_control = """
 <div id="pushControl" class="push-control" hidden>
@@ -2378,6 +2521,8 @@ class App(BaseHTTPRequestHandler):
             return
         if path == "/":
             return self.show_order_form(query=parse_qs(parsed.query))
+        if path == "/cockpit":
+            return self.show_location_cockpit(query=parse_qs(parsed.query))
         if path == "/choose":
             return self.show_buyer_choice()
         if path == "/time":
@@ -2515,7 +2660,7 @@ class App(BaseHTTPRequestHandler):
         location = find_location(buyer_key)
         if not location:
             return self.redirect("/login")
-        order_button = '<a class="button primary" href="/">Bestellung</a>' if location_can_order(location) else ""
+        order_button = '<a class="button primary" href="/">Shop</a>' if location_can_order(location) else ""
         time_button = '<a class="button primary" href="/time">Zeiterfassung</a>' if location_can_time(location) else ""
         body = f"""
         <section class="box narrow choice-box">
@@ -2529,6 +2674,93 @@ class App(BaseHTTPRequestHandler):
         </section>
         """
         self.send_html(page("Auswahl", body, buyer_key=buyer_key))
+
+    def show_location_cockpit(self, query=None):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        states = get_cockpit_states(buyer_key)
+        tasks = [task for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])) if task.get("active")]
+        cockpit_orders = [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
+        task_cards = []
+        for task in tasks:
+            done = states.get(("task", task["id"])) == "done"
+            task_cards.append(
+                f"""
+                <form method="post" action="/cockpit/task" class="cockpit-item {'is-done' if done else ''}">
+                    <input type="hidden" name="task_id" value="{esc(task['id'])}">
+                    <input type="hidden" name="state" value="{'open' if done else 'done'}">
+                    <button type="submit" class="cockpit-check" aria-label="Aufgabe abhaken">{'✓' if done else ''}</button>
+                    <div><strong>{esc(task['title'])}</strong>{'<span>erledigt</span>' if done else '<span>offen</span>'}</div>
+                </form>
+                """
+            )
+        order_cards = []
+        for item in cockpit_orders:
+            state = states.get(("order", item["id"]), "open")
+            state_label = {
+                "paid_picked": "bezahlt & abgeholt",
+                "picked_invoice": "abgeholt & Rechnungsstellung",
+            }.get(state, "offen")
+            order_cards.append(
+                f"""
+                <article class="cockpit-order {'is-done' if state != 'open' else ''}">
+                    <div>
+                        <strong>{esc(item['title'])}</strong>
+                        {f'<p>{esc(item["note"])}</p>' if item.get("note") else ''}
+                        <span class="cockpit-state">{esc(state_label)}</span>
+                    </div>
+                    <div class="cockpit-order-actions">
+                        <form method="post" action="/cockpit/order-state">
+                            <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                            <input type="hidden" name="state" value="paid_picked">
+                            <button class="button" type="submit">bezahlt & abgeholt</button>
+                        </form>
+                        <form method="post" action="/cockpit/order-state">
+                            <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                            <input type="hidden" name="state" value="picked_invoice">
+                            <button class="button" type="submit">abgeholt & Rechnungsstellung</button>
+                        </form>
+                        <form method="post" action="/cockpit/order-state">
+                            <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                            <input type="hidden" name="state" value="open">
+                            <button class="button" type="submit">zurücksetzen</button>
+                        </form>
+                    </div>
+                </article>
+                """
+            )
+        quick_actions = []
+        if location_can_order(location):
+            quick_actions.append('<a class="button primary" href="/">Shop öffnen</a>')
+        if location_can_time(location):
+            quick_actions.append('<a class="button primary" href="/time">Zeiterfassung öffnen</a>')
+        body = f"""
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        <section class="box cockpit-hero">
+            <div>
+                <h2>Cockpit {esc(location['name'])}</h2>
+                <p class="muted">Übersicht für Tagesaufgaben und Bestellinformationen.</p>
+            </div>
+            <div class="table-actions cockpit-actions">{''.join(quick_actions)}</div>
+        </section>
+        <section class="cockpit-grid">
+            <section class="box cockpit-panel">
+                <div class="section-head"><div><h2>Tagesaufgaben</h2><p class="muted">Zum Erledigen antippen.</p></div><span class="pill">{len(tasks)}</span></div>
+                <div class="cockpit-list">{''.join(task_cards) if task_cards else '<p class="muted">Für diesen Standort sind aktuell keine Tagesaufgaben hinterlegt.</p>'}</div>
+            </section>
+            <section class="box cockpit-panel">
+                <div class="section-head"><div><h2>Bestellungen</h2><p class="muted">Status für hinterlegte Bestellinformationen setzen.</p></div><span class="pill">{len(cockpit_orders)}</span></div>
+                <div class="cockpit-list">{''.join(order_cards) if order_cards else '<p class="muted">Für diesen Standort sind aktuell keine Bestellinformationen hinterlegt.</p>'}</div>
+            </section>
+        </section>
+        """
+        self.send_html(page("Cockpit", body, buyer_key=buyer_key))
 
     def show_time_form(self, error="", query=None):
         buyer_key = self.current_buyer_key()
@@ -2549,7 +2781,7 @@ class App(BaseHTTPRequestHandler):
             else '<div class="error full">Es sind noch keine Personen für die Zeiterfassung angelegt. Bitte im Adminbereich unter Personen mindestens eine Person anlegen.</div>'
         )
         submit_disabled = "" if employee_names else " disabled"
-        order_link = '<a class="button" href="/">Zum Bestellsystem</a>' if location_can_order(location) else ""
+        order_link = '<a class="button" href="/">Zum Shop</a>' if location_can_order(location) else ""
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -3282,7 +3514,7 @@ class App(BaseHTTPRequestHandler):
         location_panels = []
         for location_name in sorted(grouped_orders.keys(), key=lambda value: value.lower()):
             cards = []
-            location_orders = sorted(grouped_orders[location_name], key=lambda row: (row["created_at"] or "", row["id"]), reverse=True)
+            location_orders = sorted(grouped_orders[location_name], key=order_created_sort_key, reverse=True)
             for order in location_orders:
                 items = get_order_items(order["id"])
                 is_completed = bool(order["completed_at"])
@@ -3553,6 +3785,60 @@ class App(BaseHTTPRequestHandler):
             </template>
             """
             return "".join(rows_html), len(row_items), template
+        def cockpit_task_rows(prefix, tasks):
+            row_items = normalize_cockpit_tasks(tasks) or [{"id": "", "title": "", "template": False, "active": True}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row" data-cockpit-task-row>
+                        <input type="hidden" name="{prefix}_task_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <label>Aufgabe<input name="{prefix}_task_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kühlschrank prüfen"></label>
+                        <label class="check"><input type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <label class="check"><input type="checkbox" name="{prefix}_task_template_{row_index}" value="1" {"checked" if item.get('template') else ""}> Als Muster speichern</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_task_template">
+                <div class="cockpit-admin-row" data-cockpit-task-row>
+                    <input type="hidden" name="{prefix}_task_id___INDEX__" value="">
+                    <label>Aufgabe<input name="{prefix}_task_title___INDEX__" placeholder="z. B. Kühlschrank prüfen"></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <label class="check"><input type="checkbox" name="{prefix}_task_template___INDEX__" value="1"> Als Muster speichern</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
+        def cockpit_order_rows(prefix, orders):
+            row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
+                        <input type="hidden" name="{prefix}_order_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <label>Bestellung<input name="{prefix}_order_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Tortenbestellung Müller"></label>
+                        <label>Hinweis<textarea name="{prefix}_order_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label class="check"><input type="checkbox" name="{prefix}_order_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_order_template">
+                <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
+                    <input type="hidden" name="{prefix}_order_id___INDEX__" value="">
+                    <label>Bestellung<input name="{prefix}_order_title___INDEX__" placeholder="z. B. Tortenbestellung Müller"></label>
+                    <label>Hinweis<textarea name="{prefix}_order_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_order_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
         category_visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
             for category in categories
@@ -3575,6 +3861,9 @@ class App(BaseHTTPRequestHandler):
                 location.get("min_stock_items", []),
                 min_stock_product_options(""),
             )
+            cockpit_prefix = f"location_cockpit_{index}"
+            cockpit_task_html, cockpit_task_count, cockpit_task_template = cockpit_task_rows(cockpit_prefix, location.get("cockpit_tasks", []))
+            cockpit_order_html, cockpit_order_count, cockpit_order_template = cockpit_order_rows(cockpit_prefix, location.get("cockpit_orders", []))
             rows.append(
                 f"""
                 <details class="category-panel location-panel">
@@ -3604,6 +3893,25 @@ class App(BaseHTTPRequestHandler):
                                 <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
                             </div>
                         </fieldset>
+                        <fieldset class="visibility-box cockpit-admin full">
+                            <legend>Cockpit</legend>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Tagesaufgaben <span>{cockpit_task_count}</span></summary>
+                                <p class="muted">Aufgaben werden im Standort-Cockpit angezeigt und können dort abgehakt werden.</p>
+                                <input type="hidden" id="{cockpit_prefix}_task_count" name="{cockpit_prefix}_task_count" value="{cockpit_task_count}">
+                                <div id="{cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_task_template" data-count-id="{cockpit_prefix}_task_count">{cockpit_task_html}</div>
+                                {cockpit_task_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
+                            </details>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Bestellungen <span>{cockpit_order_count}</span></summary>
+                                <p class="muted">Diese Bestellinformationen erscheinen im Cockpit mit Statusauswahl.</p>
+                                <input type="hidden" id="{cockpit_prefix}_order_count" name="{cockpit_prefix}_order_count" value="{cockpit_order_count}">
+                                <div id="{cockpit_prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_order_template" data-count-id="{cockpit_prefix}_order_count">{cockpit_order_html}</div>
+                                {cockpit_order_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
+                            </details>
+                        </fieldset>
                     </div>
                 </details>
                 """
@@ -3614,6 +3922,9 @@ class App(BaseHTTPRequestHandler):
             [],
             min_stock_product_options(""),
         )
+        new_cockpit_prefix = "new_location_cockpit"
+        new_cockpit_task_html, new_cockpit_task_count, new_cockpit_task_template = cockpit_task_rows(new_cockpit_prefix, [])
+        new_cockpit_order_html, new_cockpit_order_count, new_cockpit_order_template = cockpit_order_rows(new_cockpit_prefix, [])
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -3646,6 +3957,23 @@ class App(BaseHTTPRequestHandler):
                                 {new_min_stock_template}
                                 <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
                             </div>
+                        </fieldset>
+                        <fieldset class="visibility-box cockpit-admin full">
+                            <legend>Cockpit</legend>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Tagesaufgaben <span>{new_cockpit_task_count}</span></summary>
+                                <input type="hidden" id="{new_cockpit_prefix}_task_count" name="{new_cockpit_prefix}_task_count" value="{new_cockpit_task_count}">
+                                <div id="{new_cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_task_template" data-count-id="{new_cockpit_prefix}_task_count">{new_cockpit_task_html}</div>
+                                {new_cockpit_task_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
+                            </details>
+                            <details class="category-panel cockpit-admin-panel">
+                                <summary>Bestellungen <span>{new_cockpit_order_count}</span></summary>
+                                <input type="hidden" id="{new_cockpit_prefix}_order_count" name="{new_cockpit_prefix}_order_count" value="{new_cockpit_order_count}">
+                                <div id="{new_cockpit_prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_order_template" data-count-id="{new_cockpit_prefix}_order_count">{new_cockpit_order_html}</div>
+                                {new_cockpit_order_template}
+                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
+                            </details>
                         </fieldset>
                     </div>
                 </details>
@@ -3735,6 +4063,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_buyer_login()
             if path == "/cart-draft":
                 return self.handle_cart_draft()
+            if path == "/cockpit/task":
+                return self.handle_cockpit_task_state()
+            if path == "/cockpit/order-state":
+                return self.handle_cockpit_order_state()
             if path == "/push/subscribe":
                 return self.handle_push_subscribe()
             if path == "/push/unsubscribe":
@@ -3796,20 +4128,43 @@ class App(BaseHTTPRequestHandler):
         location = find_location(buyer_key)
         expected_password = (location or {}).get("password", "")
         if location and pin == expected_password:
-            if location_can_order(location) and location_can_time(location):
-                target = "/choose"
-            elif location_can_time(location):
-                target = "/time"
-            elif location_can_order(location):
-                target = "/"
-            else:
+            if not (location_can_order(location) or location_can_time(location)):
                 return self.show_buyer_login("Für diese Rolle ist aktuell kein Bereich freigeschaltet.")
+            target = "/cockpit"
             self.send_response(303)
             self.send_header("Set-Cookie", f"buyer={make_buyer_token(buyer_key)}; HttpOnly; SameSite=Lax; Path=/")
             self.send_header("Location", target)
             self.end_headers()
         else:
             self.show_buyer_login("Falscher Standort oder falsches Standort-Passwort.")
+
+    def handle_cockpit_task_state(self):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        form = self.read_form()
+        task_id = self.form_value(form, "task_id").strip()
+        state = self.form_value(form, "state", "open").strip()
+        valid_ids = {task["id"] for task in normalize_cockpit_tasks((location or {}).get("cockpit_tasks", []))}
+        if task_id not in valid_ids:
+            return self.redirect("/cockpit?msg=" + quote_plus("Aufgabe wurde nicht gefunden."))
+        set_cockpit_state(buyer_key, "task", task_id, state)
+        return self.redirect("/cockpit")
+
+    def handle_cockpit_order_state(self):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        form = self.read_form()
+        order_id = self.form_value(form, "order_id").strip()
+        state = self.form_value(form, "state", "open").strip()
+        valid_ids = {item["id"] for item in normalize_cockpit_orders((location or {}).get("cockpit_orders", []))}
+        if order_id not in valid_ids:
+            return self.redirect("/cockpit?msg=" + quote_plus("Bestellinformation wurde nicht gefunden."))
+        set_cockpit_state(buyer_key, "order", order_id, state)
+        return self.redirect("/cockpit")
 
     def handle_admin_login(self):
         form = self.read_form()
@@ -4253,6 +4608,43 @@ class App(BaseHTTPRequestHandler):
             items.append({"product_id": product_id, "quantity": quantity})
         return normalize_min_stock_items(items)
 
+    def collect_cockpit_tasks(self, form, prefix):
+        try:
+            count = int(self.form_value(form, f"{prefix}_task_count", "0") or "0")
+        except ValueError:
+            count = 0
+        items = []
+        for row_index in range(count):
+            title = self.form_value(form, f"{prefix}_task_title_{row_index}").strip()
+            if not title:
+                continue
+            items.append({
+                "id": self.form_value(form, f"{prefix}_task_id_{row_index}").strip(),
+                "title": title,
+                "template": bool(self.form_value(form, f"{prefix}_task_template_{row_index}")),
+                "active": bool(self.form_value(form, f"{prefix}_task_active_{row_index}")),
+            })
+        return normalize_cockpit_tasks(items)
+
+    def collect_cockpit_orders(self, form, prefix):
+        try:
+            count = int(self.form_value(form, f"{prefix}_order_count", "0") or "0")
+        except ValueError:
+            count = 0
+        items = []
+        for row_index in range(count):
+            title = self.form_value(form, f"{prefix}_order_title_{row_index}").strip()
+            note = self.form_value(form, f"{prefix}_order_note_{row_index}").strip()
+            if not title and not note:
+                continue
+            items.append({
+                "id": self.form_value(form, f"{prefix}_order_id_{row_index}").strip(),
+                "title": title,
+                "note": note,
+                "active": bool(self.form_value(form, f"{prefix}_order_active_{row_index}")),
+            })
+        return normalize_cockpit_orders(items)
+
 
     def handle_locations(self):
         if not self.is_admin():
@@ -4283,6 +4675,8 @@ class App(BaseHTTPRequestHandler):
                     "time_tracking_max_end": self.form_value(form, f"location_time_tracking_max_end_{index}").strip(),
                     "min_stock_enabled": bool(self.form_value(form, f"location_min_stock_enabled_{index}")),
                     "min_stock_items": self.collect_min_stock_items(form, f"location_min_stock_{index}"),
+                    "cockpit_tasks": self.collect_cockpit_tasks(form, f"location_cockpit_{index}"),
+                    "cockpit_orders": self.collect_cockpit_orders(form, f"location_cockpit_{index}"),
                 }
             )
             existing_category_updates[location_id] = [
@@ -4306,6 +4700,8 @@ class App(BaseHTTPRequestHandler):
                     "time_tracking_max_end": self.form_value(form, "new_location_time_tracking_max_end").strip(),
                     "min_stock_enabled": bool(self.form_value(form, "new_location_min_stock_enabled")),
                     "min_stock_items": self.collect_min_stock_items(form, "new_location_min_stock"),
+                    "cockpit_tasks": self.collect_cockpit_tasks(form, "new_location_cockpit"),
+                    "cockpit_orders": self.collect_cockpit_orders(form, "new_location_cockpit"),
                 }
             )
         if not locations:

@@ -995,4 +995,28 @@
     if (row && row.parentNode) row.parentNode.removeChild(row);
   });
 
+  var addCockpitButtons = Array.prototype.slice.call(document.querySelectorAll('.add-cockpit-row'));
+  addCockpitButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var rows = document.getElementById(button.getAttribute('data-target') || '');
+      if (!rows) return;
+      var template = document.getElementById(rows.getAttribute('data-template-id') || '');
+      var countInput = document.getElementById(rows.getAttribute('data-count-id') || '');
+      if (!template || !countInput) return;
+      var nextIndex = parseInt(countInput.value, 10) || rows.children.length;
+      var wrapper = document.createElement('div');
+      wrapper.innerHTML = template.innerHTML.split('__INDEX__').join(String(nextIndex));
+      while (wrapper.firstElementChild) {
+        rows.appendChild(wrapper.firstElementChild);
+      }
+      countInput.value = String(nextIndex + 1);
+    });
+  });
+  document.addEventListener('click', function (event) {
+    var button = event.target.closest ? event.target.closest('.cockpit-row-remove') : null;
+    if (!button) return;
+    var row = button.closest ? button.closest('.cockpit-admin-row') : null;
+    if (row && row.parentNode) row.parentNode.removeChild(row);
+  });
+
 })();
