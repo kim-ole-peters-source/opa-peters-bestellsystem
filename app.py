@@ -5326,6 +5326,7 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        requested_open_location = self.form_value(form, "open_location").strip()
         try:
             location_count = int(self.form_value(form, "location_count", "0") or "0")
         except ValueError:
