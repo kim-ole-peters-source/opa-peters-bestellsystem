@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-27-production-weekly-cockpit"
+ASSET_VERSION = "2026-08-27-task-progress-order-cleanup"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -514,7 +514,8 @@ def is_production_location(location):
 def is_schwarzenbek_location(location):
     key = normalize_text_key((location or {}).get("id") or "")
     name = normalize_text_key((location or {}).get("name") or "")
-    return key == "schwarzenbek" or name == "schwarzenbek"
+    variants = {"schwarzenbek", "schwarzenbeck", "schwareznbek", "schwareznbeck"}
+    return key in variants or name in variants
 
 
 def current_workweek(offset=0):
@@ -691,6 +692,7 @@ def init_db():
             item_type TEXT NOT NULL,
             item_id TEXT NOT NULL,
             state TEXT NOT NULL,
+            completed_by TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY(location_id, item_type, item_id)
         )
@@ -765,6 +767,7 @@ def init_db():
     add_column_if_missing(con, "order_items", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
     add_column_if_missing(con, "order_items", "completed_at", "TEXT")
     add_column_if_missing(con, "order_items", "deleted_at", "TEXT")
+    add_column_if_missing(con, "cockpit_item_states", "completed_by", "TEXT")
     add_column_if_missing(con, "time_entries", "updated_at", "TEXT")
     add_column_if_missing(con, "time_entries", "edited", "INTEGER NOT NULL DEFAULT 0")
 
@@ -1515,14 +1518,41 @@ def get_cockpit_states(location_id):
     return {(row["item_type"], row["item_id"]): row["state"] for row in rows}
 
 
-def set_cockpit_state(location_id, item_type, item_id, state):
+def get_cockpit_state_details(location_id):
+    if not location_id:
+        return {}
+    con = db()
+    rows = con.execute(
+        "SELECT item_type, item_id, state, completed_by, updated_at FROM cockpit_item_states WHERE location_id=?",
+        (location_id,),
+    ).fetchall()
+    con.close()
+    return {
+        (row["item_type"], row["item_id"]): {
+            "state": row["state"],
+            "completed_by": row["completed_by"] or "",
+            "updated_at": row["updated_at"] or "",
+        }
+        for row in rows
+    }
+
+
+def cockpit_state_is_from_today(state_info):
+    updated_at = (state_info or {}).get("updated_at", "")
+    try:
+        return datetime.strptime(updated_at, "%d.%m.%Y %H:%M").date() == berlin_now().date()
+    except ValueError:
+        return False
+
+
+def set_cockpit_state(location_id, item_type, item_id, state, completed_by=""):
     if not location_id or item_type not in ["task", "order", "production_job"] or not item_id:
         return False
     state = str(state or "").strip()
     valid_states = {
         "task": ["open", "done"],
         "order": ["open", "paid_picked", "picked_invoice"],
-        "production_job": ["open", "done"],
+        "production_job": ["open", "started", "done"],
     }
     if state not in valid_states[item_type]:
         state = "open"
@@ -1535,11 +1565,11 @@ def set_cockpit_state(location_id, item_type, item_id, state):
     else:
         con.execute(
             """
-            INSERT INTO cockpit_item_states (location_id, item_type, item_id, state, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(location_id, item_type, item_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at
+            INSERT INTO cockpit_item_states (location_id, item_type, item_id, state, completed_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(location_id, item_type, item_id) DO UPDATE SET state=excluded.state, completed_by=excluded.completed_by, updated_at=excluded.updated_at
             """,
-            (location_id, item_type, item_id, state, berlin_now().strftime("%d.%m.%Y %H:%M")),
+            (location_id, item_type, item_id, state, completed_by, berlin_now().strftime("%d.%m.%Y %H:%M")),
         )
     con.commit()
     con.close()
@@ -2406,6 +2436,7 @@ def admin_menu():
         <a class="button" href="/admin/orders">Bestellungen</a>
         <a class="button" href="/admin/time">Zeiterfassung</a>
         <a class="button" href="/admin/employees">Personen</a>
+        <a class="button" href="/admin/task-report">Aufgabenreport</a>
         <a class="button" href="/admin/categories">Kategorien</a>
         <a class="button" href="/admin/import">Import</a>
         <a class="button" href="/admin/settings">Einstellungen</a>
@@ -2685,6 +2716,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_admin_time(query=parse_qs(parsed.query))
         if path == "/admin/employees":
             return self.show_employees(query=parse_qs(parsed.query))
+        if path == "/admin/task-report":
+            return self.show_task_report(query=parse_qs(parsed.query))
         if path == "/admin/time/export":
             return self.serve_time_export(query=parse_qs(parsed.query))
         if path == "/admin/categories":
@@ -2814,24 +2847,38 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/login")
         query = query or {}
         msg = (query.get("msg", [""])[0] or "").strip()
+        open_location = (query.get("open_location", [""])[0] or "").strip()
         try:
             week_offset = int((query.get("week", ["0"])[0] or "0").strip())
         except ValueError:
             week_offset = 0
         states = get_cockpit_states(buyer_key)
-        tasks = [task for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])) if task.get("active")]
+        state_details = get_cockpit_state_details(buyer_key)
+        employee_names = get_time_employee_names(True)
+        employee_options = "".join(f'<option value="{esc(name)}">{esc(name)}</option>' for name in employee_names)
+        tasks = []
+        for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
+            if not task.get("active"):
+                continue
+            info = state_details.get(("task", task["id"]), {})
+            if info.get("state") == "done" and not cockpit_state_is_from_today(info):
+                continue
+            tasks.append(task)
         cockpit_orders = [] if (is_production_location(location) or is_schwarzenbek_location(location)) else [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
         task_cards = []
         for task in tasks:
-            done = states.get(("task", task["id"])) == "done"
+            info = state_details.get(("task", task["id"]), {})
+            done = info.get("state") == "done"
+            completed_by = info.get("completed_by", "")
             image = f'<img class="cockpit-thumb" src="/uploads/{esc(task["image_filename"])}" alt="">' if task.get("image_filename") else ""
             task_cards.append(
                 f"""
-                <form method="post" action="/cockpit/task" class="cockpit-item {'is-done' if done else ''}">
+                <form method="post" action="/cockpit/task" class="cockpit-item cockpit-task-form {'is-done' if done else ''}">
                     <input type="hidden" name="task_id" value="{esc(task['id'])}">
                     <input type="hidden" name="state" value="{'open' if done else 'done'}">
+                    <input type="hidden" name="completed_by" value="">
                     <button type="submit" class="cockpit-check" aria-label="Aufgabe abhaken">{'✓' if done else ''}</button>
-                    <div>{image}<strong>{esc(task['title'])}</strong>{'<span>erledigt</span>' if done else '<span>offen</span>'}</div>
+                    <div>{image}<strong>{esc(task['title'])}</strong>{f'<span>erledigt von {esc(completed_by)}</span>' if done and completed_by else ('<span>erledigt</span>' if done else '<span>offen</span>')}</div>
                 </form>
                 """
             )
@@ -2848,7 +2895,8 @@ class App(BaseHTTPRequestHandler):
                 if job.get("active") and job["section"] in ["eisvitrinen", "eistorten"] and job["due_date"] == today_iso
             ]
             for job in sorted(today_jobs, key=lambda item: (item["section"], item["title"].lower())):
-                done = production_states.get(("production_job", job["id"])) == "done"
+                job_state = production_states.get(("production_job", job["id"]), "open")
+                done = job_state == "done"
                 image = f'<img class="cockpit-thumb" src="/uploads/{esc(job["image_filename"])}" alt="">' if job.get("image_filename") else ""
                 order_cards.append(
                     f"""
@@ -2861,7 +2909,7 @@ class App(BaseHTTPRequestHandler):
                             <strong>{esc(PRODUCTION_SECTIONS.get(job['section'], job['section']))}: {esc(job.get('customer_name') or job['title'])}</strong>
                             {f'<p>{esc(job.get("order_text", ""))}</p>' if job.get("order_text") else ''}
                             {f'<p>{esc(job["note"])}</p>' if job.get("note") else ''}
-                            <span class="cockpit-state">{'erledigt' if done else 'heute'}</span>
+                            <span class="cockpit-state">{'fertiggestellt' if done else ('angefangen' if job_state == 'started' else 'heute')}</span>
                         </div>
                     </form>
                     """
@@ -2932,21 +2980,34 @@ class App(BaseHTTPRequestHandler):
                 jobs_by_section.setdefault(job["section"], []).append(job)
 
             def production_job_card(job):
-                done = states.get(("production_job", job["id"])) == "done"
+                job_info = state_details.get(("production_job", job["id"]), {})
+                job_state = job_info.get("state", "open")
+                done = job_state == "done"
+                started_by = job_info.get("completed_by", "")
                 image = f'<img class="cockpit-thumb" src="/uploads/{esc(job["image_filename"])}" alt="">' if job.get("image_filename") else ""
                 return f"""
-                <form method="post" action="/cockpit/production-job" class="production-job {'is-done' if done else ''}">
-                    <input type="hidden" name="job_id" value="{esc(job['id'])}">
-                    <input type="hidden" name="state" value="{'open' if done else 'done'}">
-                    <button type="submit" class="cockpit-check" aria-label="Auftrag abhaken">{'✓' if done else ''}</button>
+                <article class="production-job {'is-done' if done else ('is-started' if job_state == 'started' else '')}">
                     <div>
                         {image}
                         <strong>{esc(job.get('customer_name') or job['title'])}</strong>
                         {f'<p>{esc(job.get("order_text", ""))}</p>' if job.get("order_text") else ''}
                         {f'<p>{esc(job["note"])}</p>' if job.get("note") else ''}
-                        <span>{'erledigt' if done else esc(format_iso_date(job['due_date']))}</span>
+                        <span>{'fertiggestellt' if done else (f'angefangen von {esc(started_by)}' if job_state == 'started' and started_by else esc(format_iso_date(job['due_date'])))}</span>
                     </div>
-                </form>
+                    <div class="production-job-actions">
+                        <form method="post" action="/cockpit/production-job" class="production-start-form">
+                            <input type="hidden" name="job_id" value="{esc(job['id'])}">
+                            <input type="hidden" name="state" value="started">
+                            <input type="hidden" name="completed_by" value="">
+                            <button class="button production-start-button" type="submit">Angefangen</button>
+                        </form>
+                        <form method="post" action="/cockpit/production-job">
+                            <input type="hidden" name="job_id" value="{esc(job['id'])}">
+                            <input type="hidden" name="state" value="done">
+                            <button class="primary production-done-button" type="submit">Fertiggestellt</button>
+                        </form>
+                    </div>
+                </article>
                 """
 
             def production_week(section_key):
@@ -2970,20 +3031,20 @@ class App(BaseHTTPRequestHandler):
                 <div class="section-head">
                     <div><h2>Produktion</h2><p class="muted">Woche vom {week_start.strftime('%d.%m.%Y')} bis {week_end.strftime('%d.%m.%Y')}</p></div>
                     <div class="table-actions">
-                        <a class="button" href="/cockpit?week={week_offset - 1}">Vorwoche</a>
+                        <a class="button week-arrow" href="/cockpit?week={week_offset - 1}" aria-label="Vorwoche">‹</a>
                         <a class="button" href="/cockpit">Aktuelle Woche</a>
-                        <a class="button" href="/cockpit?week={week_offset + 1}">Folgewoche</a>
+                        <a class="button week-arrow" href="/cockpit?week={week_offset + 1}" aria-label="Folgewoche">›</a>
                     </div>
                 </div>
-                <details class="category-panel production-panel" open>
+                <details class="category-panel production-panel">
                     <summary>Backen <span>Wochenansicht</span></summary>
                     <div class="production-week">{production_week('backen')}</div>
                 </details>
-                <details class="category-panel production-panel" open>
+                <details class="category-panel production-panel">
                     <summary>Eisvitrinen <span>Wochenansicht</span></summary>
                     <div class="production-week">{production_week('eisvitrinen')}</div>
                 </details>
-                <details class="category-panel production-panel" open>
+                <details class="category-panel production-panel">
                     <summary>Eistorten <span>Wochenansicht</span></summary>
                     <div class="production-week">{production_week('eistorten')}</div>
                 </details>
@@ -2991,6 +3052,26 @@ class App(BaseHTTPRequestHandler):
             """
         body = f"""
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        <div class="task-complete-modal" id="taskCompleteModal" hidden>
+            <div class="task-complete-card">
+                <h2>Wer hat die Aufgabe erledigt?</h2>
+                <label>Personal<select id="taskCompletePerson" size="6">{employee_options}</select></label>
+                <div class="table-actions">
+                    <button class="button" type="button" id="taskCompleteCancel">Abbrechen</button>
+                    <button class="primary" type="button" id="taskCompleteConfirm">Speichern</button>
+                </div>
+            </div>
+        </div>
+        <div class="task-complete-modal" id="productionStartModal" hidden>
+            <div class="task-complete-card">
+                <h2>Wer beginnt den Auftrag?</h2>
+                <label>Name<input id="productionStartPerson" placeholder="Name eingeben"></label>
+                <div class="table-actions">
+                    <button class="button" type="button" id="productionStartCancel">Abbrechen</button>
+                    <button class="primary" type="button" id="productionStartConfirm">Speichern</button>
+                </div>
+            </div>
+        </div>
         <section class="box cockpit-hero">
             <div>
                 <h2>Cockpit {esc(location['name'])}</h2>
@@ -3325,6 +3406,69 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Personen", body, admin=True, buyer_key=self.current_buyer_key()))
 
+    def show_task_report(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        month = (query.get("month", [current_month()])[0] or current_month()).strip()
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = current_month()
+        con = db()
+        rows = con.execute(
+            """
+            SELECT location_id, item_id, completed_by, updated_at
+            FROM cockpit_item_states
+            WHERE item_type='task'
+              AND state='done'
+              AND completed_by IS NOT NULL
+              AND TRIM(completed_by) != ''
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        con.close()
+        task_lookup = {}
+        for location in get_locations():
+            for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
+                task_lookup[(location["id"], task["id"])] = {"location": location["name"], "title": task["title"]}
+        report_rows = []
+        counts = {}
+        for row in rows:
+            try:
+                done_at = datetime.strptime(row["updated_at"], "%d.%m.%Y %H:%M")
+            except ValueError:
+                continue
+            if done_at.strftime("%Y-%m") != month:
+                continue
+            person = row["completed_by"] or "Unbekannt"
+            info = task_lookup.get((row["location_id"], row["item_id"]), {"location": row["location_id"], "title": "Aufgabe"})
+            counts[person] = counts.get(person, 0) + 1
+            report_rows.append(
+                f"<tr><td>{esc(done_at.strftime('%d.%m.%Y %H:%M'))}</td><td>{esc(person)}</td><td>{esc(info['location'])}</td><td>{esc(info['title'])}</td></tr>"
+            )
+        summary_rows = "".join(
+            f"<tr><td>{esc(person)}</td><td>{count}</td></tr>"
+            for person, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+        )
+        body = f"""
+        {admin_menu()}
+        <section class="box">
+            <div class="section-head"><div><h2>Aufgabenreport</h2><p class="muted">Monatsübersicht, wer welche Tagesaufgaben erledigt hat.</p></div></div>
+            <form method="get" action="/admin/task-report" class="filters compact-form">
+                <label>Monat<input type="month" name="month" value="{esc(month)}"></label>
+                <button class="primary" type="submit">Anzeigen</button>
+            </form>
+        </section>
+        <section class="box">
+            <h2>Summe je Person</h2>
+            <div class="table-wrap"><table><tr><th>Person</th><th>Erledigte Aufgaben</th></tr>{summary_rows if summary_rows else '<tr><td colspan="2">Keine erledigten Aufgaben in diesem Monat.</td></tr>'}</table></div>
+        </section>
+        <section class="box">
+            <h2>Einzelne Aufgaben</h2>
+            <div class="table-wrap"><table><tr><th>Datum</th><th>Person</th><th>Standort</th><th>Aufgabe</th></tr>{''.join(report_rows) if report_rows else '<tr><td colspan="4">Keine Einträge vorhanden.</td></tr>'}</table></div>
+        </section>
+        """
+        self.send_html(page("Aufgabenreport", body, admin=True, buyer_key=self.current_buyer_key()))
+
     def show_buyer_login(self, error=""):
         options = "".join(f'<option value="{esc(location["id"])}">{esc(location["name"])} · {esc(role_label(location.get("role")))}</option>' for location in get_locations())
         body = f"""
@@ -3428,7 +3572,7 @@ class App(BaseHTTPRequestHandler):
         category_panels = []
         all_cards = "".join(product_card(p) for p in products)
         if products:
-            category_panels.append(f"<details class='category-panel' open><summary>Alle Produkte <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
+            category_panels.append(f"<details class='category-panel'><summary>Alle Produkte <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
             for category in categories:
                 category_products = [p for p in products if product_has_category(p, category)]
                 if category_products:
@@ -3557,7 +3701,7 @@ class App(BaseHTTPRequestHandler):
             return f"<div class='table-wrap'><table>{product_table_header}{product_rows}</table></div>"
         admin_category_panels = []
         if rows:
-            admin_category_panels.append(f"<details class='category-panel admin-product-panel' open><summary>Alle Produkte <span>{len(rows)}</span></summary>{product_table(rows)}</details>")
+            admin_category_panels.append(f"<details class='category-panel admin-product-panel'><summary>Alle Produkte <span>{len(rows)}</span></summary>{product_table(rows)}</details>")
             for category in sorted(rows_by_category.keys(), key=lambda item: item.lower()):
                 category_rows = rows_by_category[category]
                 admin_category_panels.append(f"<details class='category-panel admin-product-panel'><summary>{esc(category)} <span>{len(category_rows)}</span></summary>{product_table(category_rows)}</details>")
@@ -3769,7 +3913,6 @@ class App(BaseHTTPRequestHandler):
                 day_orders = sorted(day_groups[day_key], key=order_created_sort_key, reverse=True)
                 aggregated = {}
                 order_rows = []
-                individual_item_rows = []
                 note_rows = []
                 hidden_inputs = []
                 for order in day_orders:
@@ -3792,39 +3935,6 @@ class App(BaseHTTPRequestHandler):
                     if order["note"]:
                         note_rows.append(f"<li><strong>{esc(order['order_number'])}:</strong> {esc(order['note'])}</li>")
                     for item in get_order_items(order["id"]):
-                        item_completed = bool(item["completed_at"])
-                        item_status = f"Erledigt am {esc(item['completed_at'])}" if item_completed else "Offen"
-                        item_status_class = "item-status done" if item_completed else "item-status open"
-                        item_complete_form = f"""
-                        <form method="post" action="/admin/order-items/status">
-                            <input type="hidden" name="item_{item['id']}" value="1">
-                            <input type="hidden" name="completed" value="{0 if item_completed else 1}">
-                            <input type="hidden" name="return_order" value="{order['id']}">
-                            <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
-                            <button type="submit" class="{'button' if item_completed else 'primary'}">{'Wieder öffnen' if item_completed else 'Position erledigt'}</button>
-                        </form>
-                        """
-                        item_delete_form = f"""
-                        <form method="post" action="/admin/order-items/delete" data-confirm="Diese Position wirklich aus der Bestellung löschen?">
-                            <input type="hidden" name="item_{item['id']}" value="1">
-                            <input type="hidden" name="return_order" value="{order['id']}">
-                            <input type="hidden" name="return_location" value="{esc(order['location'] or 'Ohne Standort')}">
-                            <button type="submit" class="danger">Position löschen</button>
-                        </form>
-                        """
-                        individual_item_rows.append(
-                            f"""
-                            <tr class="{'order-item-completed' if item_completed else ''}">
-                                <td>{esc(order['order_number'])}</td>
-                                <td>{esc(item['product_name'])}</td>
-                                <td>{esc(item['category'])}</td>
-                                <td>{esc(item['package_size'])}</td>
-                                <td>{esc(item['quantity'])}</td>
-                                <td><span class="{item_status_class}">{item_status}</span></td>
-                                <td><div class="table-actions item-actions">{item_complete_form}{item_delete_form}</div></td>
-                            </tr>
-                            """
-                        )
                         key = (
                             item["product_id"] or "",
                             item["product_name"] or "",
@@ -3892,7 +4002,7 @@ class App(BaseHTTPRequestHandler):
                                 </form>
                             </div>
                         </div>
-                        <details class="category-panel order-day-panel" open>
+                        <details class="category-panel order-day-panel">
                             <summary>Zusammengefasste Produkte <span>{position_count}</span></summary>
                             <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Menge</th><th>Status</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
                         </details>
@@ -3900,17 +4010,13 @@ class App(BaseHTTPRequestHandler):
                             <summary>Einzelbestellungen <span>{len(day_orders)}</span></summary>
                             <div class="table-wrap"><table><tr><th>Bestellnummer</th><th>Zeitpunkt</th><th>Von</th><th>Status</th><th>Dateien</th></tr>{''.join(order_rows)}</table></div>
                         </details>
-                        <details class="category-panel order-day-panel">
-                            <summary>Einzelpositionen bearbeiten <span>{len(individual_item_rows)}</span></summary>
-                            <div class="table-wrap"><table><tr><th>Bestellung</th><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Menge</th><th>Status</th><th>Position</th></tr>{''.join(individual_item_rows) if individual_item_rows else '<tr><td colspan="7">Keine Positionen gespeichert.</td></tr>'}</table></div>
-                        </details>
                         {f'<div class="order-note-list"><strong>Bemerkungen:</strong><ul>{"".join(note_rows)}</ul></div>' if note_rows else ''}
                     </article>
                     """
                 )
             location_panels.append(
                 f"""
-                <details class="category-panel order-location-panel" {"open" if location_name == open_location else ""}>
+                <details class="category-panel order-location-panel">
                     <summary>{esc(location_name)} <span>{len(day_groups)} Tag(e), {len(location_orders)} Bestellung(en)</span></summary>
                     <div class="order-location-content">{''.join(cards)}</div>
                 </details>
@@ -4114,7 +4220,7 @@ class App(BaseHTTPRequestHandler):
                         <input type="hidden" name="{prefix}_task_image_current_{row_index}" value="{esc(image_filename)}">
                         <label>Aufgabe<input name="{prefix}_task_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kühlschrank prüfen"></label>
                         <label>Bild<input type="file" name="{prefix}_task_image_{row_index}" accept="image/*">{image_preview}</label>
-                        <label class="check"><input type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <label class="check"><input id="{prefix}_task_active_{row_index}" type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
                         <label class="check"><input type="checkbox" name="{prefix}_task_template_{row_index}" value="1" {"checked" if item.get('template') else ""}> Als Muster speichern</label>
                         <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
                         <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
@@ -4128,14 +4234,33 @@ class App(BaseHTTPRequestHandler):
                     <input type="hidden" name="{prefix}_task_image_current___INDEX__" value="">
                     <label>Aufgabe<input name="{prefix}_task_title___INDEX__" placeholder="z. B. Kühlschrank prüfen"></label>
                     <label>Bild<input type="file" name="{prefix}_task_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
-                    <label class="check"><input type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <label class="check"><input id="{prefix}_task_active___INDEX__" type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
                     <label class="check"><input type="checkbox" name="{prefix}_task_template___INDEX__" value="1"> Als Muster speichern</label>
                     <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
                     <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
                 </div>
             </template>
             """
-            return "".join(rows_html), len(row_items), template
+            template_cards = []
+            for row_index, item in enumerate(row_items):
+                if not item.get("template"):
+                    continue
+                template_cards.append(
+                    f"""
+                    <div class="task-template-card">
+                        <strong>{esc(item.get('title', ''))}</strong>
+                        <button class="button activate-template-task" type="button" data-target="{prefix}_task_active_{row_index}">Im Cockpit anzeigen</button>
+                    </div>
+                    """
+                )
+            template_collection = f"""
+            <div class="task-template-box">
+                <h3>Musteraufgaben</h3>
+                <p class="muted">Gespeicherte Muster kannst du hier schnell aktivieren.</p>
+                <div class="task-template-list">{''.join(template_cards) if template_cards else '<p class="muted">Noch keine Musteraufgaben gespeichert.</p>'}</div>
+            </div>
+            """
+            return "".join(rows_html), len(row_items), template, template_collection
         def cockpit_order_rows(prefix, orders):
             row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True, "image_filename": ""}]
             rows_html = []
@@ -4239,7 +4364,7 @@ class App(BaseHTTPRequestHandler):
                 min_stock_product_options(""),
             )
             cockpit_prefix = f"location_cockpit_{index}"
-            cockpit_task_html, cockpit_task_count, cockpit_task_template = cockpit_task_rows(cockpit_prefix, location.get("cockpit_tasks", []))
+            cockpit_task_html, cockpit_task_count, cockpit_task_template, cockpit_task_templates = cockpit_task_rows(cockpit_prefix, location.get("cockpit_tasks", []))
             cockpit_order_html, cockpit_order_count, cockpit_order_template = cockpit_order_rows(cockpit_prefix, location.get("cockpit_orders", []))
             production_job_html, production_job_count, production_job_template = production_job_rows(cockpit_prefix, location.get("production_jobs", []))
             cockpit_order_section = "" if is_schwarzenbek_location(location) else f"""
@@ -4254,7 +4379,7 @@ class App(BaseHTTPRequestHandler):
             """
             rows.append(
                 f"""
-                <details class="category-panel location-panel">
+                <details id="location-{esc(location['id'])}" class="category-panel location-panel" data-location-id="{esc(location['id'])}">
                     <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
                     <div class="location-row">
                         <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
@@ -4264,7 +4389,7 @@ class App(BaseHTTPRequestHandler):
                         <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                         <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
                         <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
-                        <label class="check remove-check"><input type="checkbox" name="location_remove_{index}" value="1"> Standort entfernen</label>
+                        <label class="check remove-check danger-check"><input type="checkbox" name="location_remove_{index}" value="1"> Diesen Standort löschen</label>
                         <fieldset class="visibility-box location-category-visibility">
                             <legend>Produktkategorien für diesen Standort</legend>
                             <div class="visibility-grid">{''.join(location_category_checks)}</div>
@@ -4290,6 +4415,7 @@ class App(BaseHTTPRequestHandler):
                                 <div id="{cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_task_template" data-count-id="{cockpit_prefix}_task_count">{cockpit_task_html}</div>
                                 {cockpit_task_template}
                                 <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
+                                {cockpit_task_templates}
                             </details>
                             {cockpit_order_section}
                             <details class="category-panel cockpit-admin-panel">
@@ -4312,7 +4438,7 @@ class App(BaseHTTPRequestHandler):
             min_stock_product_options(""),
         )
         new_cockpit_prefix = "new_location_cockpit"
-        new_cockpit_task_html, new_cockpit_task_count, new_cockpit_task_template = cockpit_task_rows(new_cockpit_prefix, [])
+        new_cockpit_task_html, new_cockpit_task_count, new_cockpit_task_template, new_cockpit_task_templates = cockpit_task_rows(new_cockpit_prefix, [])
         new_cockpit_order_html, new_cockpit_order_count, new_cockpit_order_template = cockpit_order_rows(new_cockpit_prefix, [])
         new_production_job_html, new_production_job_count, new_production_job_template = production_job_rows(new_cockpit_prefix, [])
         body = f"""
@@ -4322,6 +4448,7 @@ class App(BaseHTTPRequestHandler):
             <h2>Standorte bearbeiten</h2>
             <form method="post" action="/admin/locations" enctype="multipart/form-data">
                 <input type="hidden" name="location_count" value="{len(locations)}">
+                <input type="hidden" id="locationsOpenLocation" name="open_location" value="{esc(open_location)}">
                 <div class="location-list">{''.join(rows) if rows else '<p>Noch keine Standorte.</p>'}</div>
                 <details class="category-panel location-panel new-location-panel">
                     <summary>Neuen Standort anlegen <span>+</span></summary>
@@ -4356,6 +4483,7 @@ class App(BaseHTTPRequestHandler):
                                 <div id="{new_cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_task_template" data-count-id="{new_cockpit_prefix}_task_count">{new_cockpit_task_html}</div>
                                 {new_cockpit_task_template}
                                 <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
+                                {new_cockpit_task_templates}
                             </details>
                             <details class="category-panel cockpit-admin-panel">
                                 <summary>Bestellungen <span>{new_cockpit_order_count}</span></summary>
@@ -4417,7 +4545,7 @@ class App(BaseHTTPRequestHandler):
                 for product in category_products
             )
             product_panels.append(
-                f"<details class='category-panel admin-product-panel' open><summary>{esc(category)} <span>{len(category_products)}</span></summary><div class='visibility-grid product-visibility-grid'>{product_checks}</div></details>"
+                f"<details class='category-panel admin-product-panel'><summary>{esc(category)} <span>{len(category_products)}</span></summary><div class='visibility-grid product-visibility-grid'>{product_checks}</div></details>"
             )
         body = f"""
         {admin_menu()}
@@ -4525,6 +4653,7 @@ class App(BaseHTTPRequestHandler):
 
     def handle_buyer_login(self):
         form = self.read_form()
+        requested_open_location = self.form_value(form, "open_location").strip()
         buyer_key = self.form_value(form, "buyer_key").strip()
         pin = self.form_value(form, "pin").strip()
         location = find_location(buyer_key)
@@ -4548,10 +4677,13 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         task_id = self.form_value(form, "task_id").strip()
         state = self.form_value(form, "state", "open").strip()
+        completed_by = self.form_value(form, "completed_by").strip()
         valid_ids = {task["id"] for task in normalize_cockpit_tasks((location or {}).get("cockpit_tasks", []))}
         if task_id not in valid_ids:
             return self.redirect("/cockpit?msg=" + quote_plus("Aufgabe wurde nicht gefunden."))
-        set_cockpit_state(buyer_key, "task", task_id, state)
+        if state == "done" and completed_by not in get_time_employee_names(True):
+            return self.redirect("/cockpit?msg=" + quote_plus("Bitte auswählen, wer die Aufgabe erledigt hat."))
+        set_cockpit_state(buyer_key, "task", task_id, state, completed_by if state == "done" else "")
         return self.redirect("/cockpit")
 
     def handle_cockpit_order_state(self):
@@ -4578,11 +4710,17 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         job_id = self.form_value(form, "job_id").strip()
         state = self.form_value(form, "state", "open").strip()
+        completed_by = self.form_value(form, "completed_by").strip()
         owner_location = location if is_production_location(location) else find_production_job_owner(job_id)
         valid_ids = {item["id"] for item in normalize_production_jobs((owner_location or {}).get("production_jobs", []))}
         if not owner_location or job_id not in valid_ids:
             return self.redirect("/cockpit?msg=" + quote_plus("Produktionsauftrag wurde nicht gefunden."))
-        set_cockpit_state(owner_location["id"], "production_job", job_id, state)
+        if state == "started" and not completed_by:
+            return self.redirect("/cockpit?msg=" + quote_plus("Bitte eintragen, wer den Auftrag angefangen hat."))
+        if state == "done" and not completed_by:
+            previous = get_cockpit_state_details(owner_location["id"]).get(("production_job", job_id), {})
+            completed_by = previous.get("completed_by", "")
+        set_cockpit_state(owner_location["id"], "production_job", job_id, state, completed_by)
         return self.redirect("/cockpit")
 
     def handle_api_production_job(self):
@@ -4851,8 +4989,8 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
         orders = get_orders_by_ids(order_ids)
-        if len(orders) < 2:
-            return self.redirect("/admin/orders?error=" + quote_plus("Bitte mindestens zwei Bestellungen für eine Gesamtbestellung auswählen."))
+        if len(orders) < 1:
+            return self.redirect("/admin/orders?error=" + quote_plus("Bitte mindestens eine Bestellung auswählen."))
         try:
             pdf_filename = create_combined_order_pdf(orders)
             with open(os.path.join(ORDER_DIR, pdf_filename), "rb") as f:
@@ -5246,12 +5384,18 @@ class App(BaseHTTPRequestHandler):
         new_location_id = normalized_locations[-1]["id"] if new_name and normalized_locations else ""
         save_locations(normalized_locations)
         valid_location_ids = {location["id"] for location in normalized_locations}
+        if requested_open_location not in valid_location_ids:
+            requested_open_location = new_location_id if new_location_id else ""
         for location_id, selected_categories in existing_category_updates.items():
             if location_id in valid_location_ids:
                 apply_category_visibility_for_location(location_id, selected_categories)
         if new_location_id:
             apply_category_visibility_for_location(new_location_id, new_location_categories)
-        self.redirect("/admin/locations?msg=" + quote_plus("Standorte gespeichert."))
+        target = "/admin/locations?msg=" + quote_plus("Standorte gespeichert.")
+        if requested_open_location:
+            target += "&open_location=" + quote_plus(requested_open_location)
+            target += "#location-" + quote_plus(requested_open_location)
+        self.redirect(target)
 
     def handle_visibility(self):
         if not self.is_admin():

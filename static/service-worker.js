@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v38-production-weekly-cockpit';
+const CACHE_NAME = 'opa-peters-bestellung-v40-task-progress-order-cleanup';
 const STATIC_ASSETS = [
   '/',
   '/login',

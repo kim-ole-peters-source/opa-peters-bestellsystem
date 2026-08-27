@@ -977,6 +977,25 @@ tr:hover td { background: var(--primary-soft); }
 .cockpit-admin-row label { margin: 0; }
 .cockpit-row-remove { white-space: nowrap; }
 .cockpit-row-save { white-space: nowrap; }
+.task-template-box {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px dashed #b7c5df;
+  border-radius: var(--radius-md);
+  background: #f8fafc;
+}
+.task-template-box h3 { margin: 0 0 4px; font-size: 16px; }
+.task-template-list { display: grid; gap: 8px; margin-top: 10px; }
+.task-template-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
 .cockpit-image-preview {
   display: inline-flex;
   align-items: center;
@@ -1083,11 +1102,47 @@ tr:hover td { background: var(--primary-soft); }
 .cockpit-order p { margin: 4px 0 0; color: var(--muted); }
 .cockpit-order-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 .cockpit-order-actions form { margin: 0; }
-.cockpit-order-actions button { width: 100%; min-height: 42px; padding: 8px 10px; font-size: 12.5px; }
+.cockpit-order-actions button {
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 10px;
+  font-size: 12.5px;
+  white-space: normal;
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+.task-complete-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, .42);
+}
+.task-complete-modal[hidden] { display: none; }
+.task-complete-card {
+  width: min(420px, 100%);
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+.task-complete-card h2 { margin-top: 0; }
+.task-complete-card select { min-height: 170px; }
+.task-complete-card input { width: 100%; }
+.week-arrow {
+  width: 46px;
+  min-width: 46px;
+  padding: 0;
+  font-size: 28px;
+  line-height: 1;
+}
 .production-cockpit { margin-top: 16px; }
 .production-panel { margin-top: 12px; background: #fff; }
 .production-week {
@@ -1130,6 +1185,10 @@ tr:hover td { background: var(--primary-soft); }
   background: var(--green-bg);
   border-color: #9ad6b5;
 }
+.production-job.is-started {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
 .production-job p { margin: 4px 0 0; color: var(--muted); }
 .production-job span {
   display: inline-flex;
@@ -1141,6 +1200,26 @@ tr:hover td { background: var(--primary-soft); }
   color: var(--primary);
   font-size: 12px;
   font-weight: 800;
+}
+.production-job-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.production-job-actions form { margin: 0; }
+.production-job-actions button {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px;
+  font-size: 12px;
+  white-space: normal;
+}
+.production-start-button,
+.production-done-button {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
 }
 
 /* ---------- 10. Statusmeldungen ---------- */

@@ -1019,4 +1019,99 @@
     if (row && row.parentNode) row.parentNode.removeChild(row);
   });
 
+  var locationsOpenLocation = document.getElementById('locationsOpenLocation');
+  if (locationsOpenLocation) {
+    document.addEventListener('click', function (event) {
+      var submitter = event.target.closest ? event.target.closest('button[type="submit"], input[type="submit"]') : null;
+      if (!submitter) return;
+      var panel = submitter.closest ? submitter.closest('.location-panel[data-location-id]') : null;
+      if (panel) locationsOpenLocation.value = panel.getAttribute('data-location-id') || '';
+    });
+    var locationsForm = locationsOpenLocation.closest('form');
+    if (locationsForm) {
+      locationsForm.addEventListener('submit', function (event) {
+        var checkedRemove = locationsForm.querySelector('input[name^="location_remove_"]:checked');
+        if (checkedRemove && !window.confirm('Markierte Standorte wirklich löschen?')) {
+          event.preventDefault();
+        }
+      });
+    }
+  }
+  document.addEventListener('click', function (event) {
+    var button = event.target.closest ? event.target.closest('.activate-template-task') : null;
+    if (!button) return;
+    var targetId = button.getAttribute('data-target') || '';
+    var checkbox = targetId ? document.getElementById(targetId) : null;
+    if (checkbox) {
+      checkbox.checked = true;
+      checkbox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+
+  var taskModal = document.getElementById('taskCompleteModal');
+  var taskPersonSelect = document.getElementById('taskCompletePerson');
+  var taskConfirm = document.getElementById('taskCompleteConfirm');
+  var taskCancel = document.getElementById('taskCompleteCancel');
+  var pendingTaskForm = null;
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!form || !form.classList || !form.classList.contains('cockpit-task-form')) return;
+    var stateInput = form.querySelector('input[name="state"]');
+    if (!stateInput || stateInput.value !== 'done') return;
+    if (!taskModal || !taskPersonSelect || !taskConfirm) return;
+    event.preventDefault();
+    pendingTaskForm = form;
+    if (taskPersonSelect.options.length) taskPersonSelect.selectedIndex = 0;
+    taskModal.hidden = false;
+    taskPersonSelect.focus();
+  });
+  if (taskConfirm) {
+    taskConfirm.addEventListener('click', function () {
+      if (!pendingTaskForm || !taskPersonSelect || !taskPersonSelect.value) return;
+      var input = pendingTaskForm.querySelector('input[name="completed_by"]');
+      if (input) input.value = taskPersonSelect.value;
+      taskModal.hidden = true;
+      pendingTaskForm.submit();
+      pendingTaskForm = null;
+    });
+  }
+  if (taskCancel) {
+    taskCancel.addEventListener('click', function () {
+      taskModal.hidden = true;
+      pendingTaskForm = null;
+    });
+  }
+
+  var productionStartModal = document.getElementById('productionStartModal');
+  var productionStartPerson = document.getElementById('productionStartPerson');
+  var productionStartConfirm = document.getElementById('productionStartConfirm');
+  var productionStartCancel = document.getElementById('productionStartCancel');
+  var pendingProductionStartForm = null;
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!form || !form.classList || !form.classList.contains('production-start-form')) return;
+    if (!productionStartModal || !productionStartPerson || !productionStartConfirm) return;
+    event.preventDefault();
+    pendingProductionStartForm = form;
+    productionStartPerson.value = '';
+    productionStartModal.hidden = false;
+    productionStartPerson.focus();
+  });
+  if (productionStartConfirm) {
+    productionStartConfirm.addEventListener('click', function () {
+      if (!pendingProductionStartForm || !productionStartPerson || !productionStartPerson.value.trim()) return;
+      var input = pendingProductionStartForm.querySelector('input[name="completed_by"]');
+      if (input) input.value = productionStartPerson.value.trim();
+      productionStartModal.hidden = true;
+      pendingProductionStartForm.submit();
+      pendingProductionStartForm = null;
+    });
+  }
+  if (productionStartCancel) {
+    productionStartCancel.addEventListener('click', function () {
+      productionStartModal.hidden = true;
+      pendingProductionStartForm = null;
+    });
+  }
+
 })();
