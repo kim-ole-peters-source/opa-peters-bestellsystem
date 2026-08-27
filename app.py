@@ -4128,6 +4128,9 @@ class App(BaseHTTPRequestHandler):
         msg = (query.get("msg", [""])[0] or "").strip()
         error = (query.get("error", [""])[0] or "").strip()
         settings = load_settings()
+        push_configured = push_is_configured()
+        push_count = push_subscription_count(enabled_only=True)
+        push_status = "eingerichtet" if push_configured else "nicht eingerichtet"
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
@@ -4170,6 +4173,7 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/login")
         query = query or {}
         msg = (query.get("msg", [""])[0] or "").strip()
+        open_location = (query.get("open_location", [""])[0] or "").strip()
         locations = get_locations()
         time_limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options())
         categories = get_category_names(True)
