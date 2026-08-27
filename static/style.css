@@ -973,7 +973,7 @@ tr:hover td { background: var(--primary-soft); }
   background: #fff;
 }
 .cockpit-admin-order-row { grid-template-columns: minmax(200px, 1fr) minmax(220px, 1.1fr) minmax(180px, .9fr) auto auto auto; }
-.cockpit-admin-production-row { grid-template-columns: minmax(130px, .7fr) minmax(200px, 1.1fr) minmax(145px, .7fr) minmax(200px, 1fr) minmax(180px, .9fr) auto auto auto; }
+.cockpit-admin-production-row { grid-template-columns: repeat(3, minmax(180px, 1fr)); }
 .cockpit-admin-row label { margin: 0; }
 .cockpit-row-remove { white-space: nowrap; }
 .cockpit-row-save { white-space: nowrap; }
