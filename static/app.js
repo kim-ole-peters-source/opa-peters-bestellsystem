@@ -1024,6 +1024,12 @@
     document.addEventListener('click', function (event) {
       var submitter = event.target.closest ? event.target.closest('button[type="submit"], input[type="submit"]') : null;
       if (!submitter) return;
+      if (submitter.classList && submitter.classList.contains('location-delete-button')) {
+        if (!window.confirm('Diesen Standort wirklich löschen?')) {
+          event.preventDefault();
+          return;
+        }
+      }
       var panel = submitter.closest ? submitter.closest('.location-panel[data-location-id]') : null;
       if (panel) locationsOpenLocation.value = panel.getAttribute('data-location-id') || '';
     });

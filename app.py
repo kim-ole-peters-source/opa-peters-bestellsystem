@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-28-cockpit-content-admin"
+ASSET_VERSION = "2026-08-28-admin-blue-locations"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2432,18 +2432,18 @@ def page(title, body, admin=False, buyer_key=None):
 
 def admin_menu():
     links = """
-        <a class="button" href="/admin">Produkte</a>
-        <a class="button" href="/admin/orders">Bestellungen</a>
-        <a class="button" href="/admin/cockpit-content">Aufträge & Aufgaben</a>
-        <a class="button" href="/admin/time">Zeiterfassung</a>
-        <a class="button" href="/admin/employees">Personen</a>
-        <a class="button" href="/admin/task-report">Aufgabenreport</a>
-        <a class="button" href="/admin/categories">Kategorien</a>
-        <a class="button" href="/admin/import">Import</a>
-        <a class="button" href="/admin/settings">Einstellungen</a>
-        <a class="button" href="/admin/locations">Standorte</a>
-        <a class="button" href="/admin/visibility">Sichtbarkeit</a>
-        <a class="button logout-button" href="/admin/logout">Admin Logout</a>
+        <a class="button" href="/admin"><span class="nav-icon" aria-hidden="true">P</span><span>Produkte</span></a>
+        <a class="button" href="/admin/orders"><span class="nav-icon" aria-hidden="true">B</span><span>Bestellungen</span></a>
+        <a class="button" href="/admin/cockpit-content"><span class="nav-icon" aria-hidden="true">A</span><span>Aufträge & Aufgaben</span></a>
+        <a class="button" href="/admin/time"><span class="nav-icon" aria-hidden="true">Z</span><span>Zeiterfassung</span></a>
+        <a class="button" href="/admin/employees"><span class="nav-icon" aria-hidden="true">M</span><span>Personen</span></a>
+        <a class="button" href="/admin/task-report"><span class="nav-icon" aria-hidden="true">R</span><span>Aufgabenreport</span></a>
+        <a class="button" href="/admin/categories"><span class="nav-icon" aria-hidden="true">K</span><span>Kategorien</span></a>
+        <a class="button" href="/admin/import"><span class="nav-icon" aria-hidden="true">I</span><span>Import</span></a>
+        <a class="button" href="/admin/settings"><span class="nav-icon" aria-hidden="true">E</span><span>Einstellungen</span></a>
+        <a class="button" href="/admin/locations"><span class="nav-icon" aria-hidden="true">S</span><span>Standorte</span></a>
+        <a class="button" href="/admin/visibility"><span class="nav-icon" aria-hidden="true">V</span><span>Sichtbarkeit</span></a>
+        <a class="button logout-button" href="/admin/logout"><span class="nav-icon" aria-hidden="true">X</span><span>Admin Logout</span></a>
     """
     return """
     <details class="admin-mobile-menu">
@@ -4302,7 +4302,7 @@ class App(BaseHTTPRequestHandler):
             task_html, task_count, task_template, task_templates = task_rows(prefix, location.get("cockpit_tasks", []))
             order_html, order_count, order_template = order_rows(prefix, location.get("cockpit_orders", []))
             production_html, production_count, production_template = production_rows(prefix, location.get("production_jobs", []))
-            order_section = "" if is_schwarzenbek_location(location) else f"""
+            order_section = f"""
                     <details class="category-panel cockpit-admin-panel">
                         <summary>Bestellungen <span>{order_count}</span></summary>
                         <input type="hidden" id="{prefix}_order_count" name="{prefix}_order_count" value="{order_count}">
@@ -4311,6 +4311,17 @@ class App(BaseHTTPRequestHandler):
                         <button class="button add-cockpit-row" type="button" data-target="{prefix}_order_rows">Bestellung hinzufügen</button>
                     </details>
             """
+            production_section = ""
+            if is_production_location(location):
+                production_section = f"""
+                    <details class="category-panel cockpit-admin-panel">
+                        <summary>Produktionsaufgaben <span>{production_count}</span></summary>
+                        <input type="hidden" id="{prefix}_production_count" name="{prefix}_production_count" value="{production_count}">
+                        <div id="{prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{prefix}_production_template" data-count-id="{prefix}_production_count">{production_html}</div>
+                        {production_template}
+                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_production_rows">Produktionsaufgabe hinzufügen</button>
+                    </details>
+                """
             location_panels.append(
                 f"""
                 <details class="category-panel cockpit-content-location" {"open" if selected_location == location["id"] else ""}>
@@ -4325,13 +4336,7 @@ class App(BaseHTTPRequestHandler):
                         {task_templates}
                     </details>
                     {order_section}
-                    <details class="category-panel cockpit-admin-panel">
-                        <summary>Produktionsaufgaben <span>{production_count}</span></summary>
-                        <input type="hidden" id="{prefix}_production_count" name="{prefix}_production_count" value="{production_count}">
-                        <div id="{prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{prefix}_production_template" data-count-id="{prefix}_production_count">{production_html}</div>
-                        {production_template}
-                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_production_rows">Produktionsaufgabe hinzufügen</button>
-                    </details>
+                    {production_section}
                 </details>
                 """
             )
@@ -4583,7 +4588,7 @@ class App(BaseHTTPRequestHandler):
                         <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                         <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
                         <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
-                        <label class="check remove-check danger-check"><input type="checkbox" name="location_remove_{index}" value="1"> Diesen Standort löschen</label>
+                        <button class="danger location-delete-button" type="submit" name="location_remove_{index}" value="1">Diesen Standort löschen</button>
                         <fieldset class="visibility-box location-category-visibility">
                             <legend>Produktkategorien für diesen Standort</legend>
                             <div class="visibility-grid">{''.join(location_category_checks)}</div>
