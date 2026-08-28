@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-27-task-progress-order-cleanup"
+ASSET_VERSION = "2026-08-28-cockpit-content-admin"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2434,6 +2434,7 @@ def admin_menu():
     links = """
         <a class="button" href="/admin">Produkte</a>
         <a class="button" href="/admin/orders">Bestellungen</a>
+        <a class="button" href="/admin/cockpit-content">Aufträge & Aufgaben</a>
         <a class="button" href="/admin/time">Zeiterfassung</a>
         <a class="button" href="/admin/employees">Personen</a>
         <a class="button" href="/admin/task-report">Aufgabenreport</a>
@@ -2710,6 +2711,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_edit_product(query=parse_qs(parsed.query))
         if path == "/admin/orders":
             return self.show_admin_orders(query=parse_qs(parsed.query))
+        if path == "/admin/cockpit-content":
+            return self.show_admin_cockpit_content(query=parse_qs(parsed.query))
         if path == "/pdf-viewer":
             return self.show_pdf_viewer(query=parse_qs(parsed.query))
         if path == "/admin/time":
@@ -2987,7 +2990,7 @@ class App(BaseHTTPRequestHandler):
                 image = f'<img class="cockpit-thumb" src="/uploads/{esc(job["image_filename"])}" alt="">' if job.get("image_filename") else ""
                 return f"""
                 <article class="production-job {'is-done' if done else ('is-started' if job_state == 'started' else '')}">
-                    <div>
+                    <div class="production-job-content">
                         {image}
                         <strong>{esc(job.get('customer_name') or job['title'])}</strong>
                         {f'<p>{esc(job.get("order_text", ""))}</p>' if job.get("order_text") else ''}
@@ -3015,13 +3018,16 @@ class App(BaseHTTPRequestHandler):
                 for day, label in zip(week_days, weekday_labels):
                     iso = day.strftime("%Y-%m-%d")
                     day_jobs = [job for job in jobs_by_section.get(section_key, []) if job["due_date"] == iso]
+                    day_count = len(day_jobs)
                     week_columns.append(
                         f"""
-                        <div class="production-day">
-                            <h4>{label}</h4>
-                            <span>{day.strftime('%d.%m.')}</span>
+                        <details class="production-day">
+                            <summary>
+                                <span><strong>{label}</strong><small>{day.strftime('%d.%m.')}</small></span>
+                                <b>{day_count}</b>
+                            </summary>
                             <div class="production-day-list">{''.join(production_job_card(job) for job in day_jobs) if day_jobs else '<p class="muted">Keine Aufträge</p>'}</div>
-                        </div>
+                        </details>
                         """
                     )
                 return ''.join(week_columns)
@@ -3643,7 +3649,6 @@ class App(BaseHTTPRequestHandler):
         all_products = get_products(False)
         products = filter_products_by_search(all_products, search_text, include_source=True)
         source_options = "".join(f'<option value="{esc(source)}"></option>' for source in get_source_names())
-        orders = get_orders()
         active_count = sum(1 for p in all_products if p["active"])
         inactive_count = len(all_products) - active_count
         rows = []
@@ -3665,22 +3670,6 @@ class App(BaseHTTPRequestHandler):
             rows.append(row_html)
             for category in product_categories(p):
                 rows_by_category.setdefault(category, []).append(row_html)
-        order_rows = []
-        for o in orders:
-            o_dict = dict(o)
-            o_dict["base_url"] = self.base_url()
-            wa_link = whatsapp_order_link(o_dict)
-            wa_cell = f"<a target='_blank' rel='noopener' href='{esc(wa_link)}'>WhatsApp</a>" if wa_link else "—"
-            image_cell = f"<a href='/order-images/{esc(o['order_image_filename'])}' target='_blank' rel='noopener'>Bild öffnen</a>" if o["order_image_filename"] else "—"
-            delete_cell = (
-                f"<form method='post' action='/admin/orders/delete' data-confirm='Diese Bestellung wirklich löschen?'>"
-                f"<input type='hidden' name='order_{o['id']}' value='1'>"
-                f"<input type='hidden' name='return_to' value='/admin'>"
-                f"<button class='danger' type='submit'>Löschen</button></form>"
-            )
-            order_rows.append(
-                f"<tr><td>{esc(o['created_at'])}</td><td>{esc(o['order_number'])}</td><td>{esc(o['buyer_group'] or '')}</td><td>{esc(o['location'])}</td><td>{esc(o['ordered_by'])}</td><td><a href='{esc(pdf_viewer_href(o['pdf_filename']))}'>PDF öffnen</a></td><td>{image_cell}</td><td>{wa_cell}</td><td>{delete_cell}</td></tr>"
-            )
         visibility_checks = "".join(
             f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" checked><span>{esc(location["name"])}</span></label>'
             for location in get_locations()
@@ -3712,7 +3701,6 @@ class App(BaseHTTPRequestHandler):
         <section class="stats">
             <div class="stat"><strong>{active_count}</strong><span>aktive Produkte</span></div>
             <div class="stat"><strong>{inactive_count}</strong><span>deaktiviert</span></div>
-            <div class="stat"><strong>{len(orders)}</strong><span>letzte Bestellungen</span></div>
         </section>
         <details class="category-panel admin-toggle-panel">
             <summary>Produkte anlegen <span>+</span></summary>
@@ -3839,7 +3827,6 @@ class App(BaseHTTPRequestHandler):
             <p class="muted">{len(products)} von {len(all_products)} Produkt(en) angezeigt.</p>
             <section class="category-sections">{''.join(admin_category_panels) if admin_category_panels else '<section class="box"><p>Keine passenden Produkte gefunden.</p></section>'}</section>
         </section>
-        <section class="box"><h2>Letzte Bestellungen</h2><div class="table-wrap"><table><tr><th>Datum</th><th>Nr.</th><th>Zugang</th><th>Standort</th><th>Besteller</th><th>PDF</th><th>Bild</th><th>WhatsApp</th><th></th></tr>{''.join(order_rows) if order_rows else '<tr><td colspan="9">Noch keine Bestellungen.</td></tr>'}</table></div></section>
         """
         self.send_html(page("Adminbereich", body, admin=True, buyer_key=self.current_buyer_key()))
 
@@ -4168,6 +4155,209 @@ class App(BaseHTTPRequestHandler):
         self.send_html(page("Admin Einstellungen", body, admin=True, buyer_key=self.current_buyer_key()))
 
 
+    def show_admin_cockpit_content(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        selected_location = (query.get("location", [""])[0] or "").strip()
+        locations = get_locations()
+
+        def image_preview(image_filename):
+            image_filename = str(image_filename or "").strip()
+            if not image_filename:
+                return '<span class="muted">Kein Bild hinterlegt.</span>'
+            return f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>'
+
+        def task_rows(prefix, tasks):
+            row_items = normalize_cockpit_tasks(tasks) or [{"id": "", "title": "", "template": False, "active": True, "image_filename": ""}]
+            rows_html = []
+            template_cards = []
+            for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row" data-cockpit-task-row>
+                        <input type="hidden" name="{prefix}_task_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_task_image_current_{row_index}" value="{esc(image_filename)}">
+                        <label>Aufgabe<input name="{prefix}_task_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kühlschrank prüfen"></label>
+                        <label>Bild<input type="file" name="{prefix}_task_image_{row_index}" accept="image/*">{image_preview(image_filename)}</label>
+                        <label class="check"><input id="{prefix}_task_active_{row_index}" type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <label class="check"><input type="checkbox" name="{prefix}_task_template_{row_index}" value="1" {"checked" if item.get('template') else ""}> Als Muster speichern</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+                if item.get("template"):
+                    template_cards.append(
+                        f"""
+                        <div class="task-template-card">
+                            <strong>{esc(item.get('title', ''))}</strong>
+                            <button class="button activate-template-task" type="button" data-target="{prefix}_task_active_{row_index}">Im Cockpit anzeigen</button>
+                        </div>
+                        """
+                    )
+            template = f"""
+            <template id="{prefix}_task_template">
+                <div class="cockpit-admin-row" data-cockpit-task-row>
+                    <input type="hidden" name="{prefix}_task_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_task_image_current___INDEX__" value="">
+                    <label>Aufgabe<input name="{prefix}_task_title___INDEX__" placeholder="z. B. Kühlschrank prüfen"></label>
+                    <label>Bild<input type="file" name="{prefix}_task_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
+                    <label class="check"><input id="{prefix}_task_active___INDEX__" type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <label class="check"><input type="checkbox" name="{prefix}_task_template___INDEX__" value="1"> Als Muster speichern</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            template_collection = f"""
+            <div class="task-template-box">
+                <h3>Musteraufgaben</h3>
+                <p class="muted">Gespeicherte Muster kannst du hier schnell aktivieren.</p>
+                <div class="task-template-list">{''.join(template_cards) if template_cards else '<p class="muted">Noch keine Musteraufgaben gespeichert.</p>'}</div>
+            </div>
+            """
+            return "".join(rows_html), len(row_items), template, template_collection
+
+        def order_rows(prefix, orders):
+            row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True, "image_filename": ""}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
+                        <input type="hidden" name="{prefix}_order_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_order_image_current_{row_index}" value="{esc(image_filename)}">
+                        <label>Bestellung<input name="{prefix}_order_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Tortenbestellung Müller"></label>
+                        <label>Hinweis<textarea name="{prefix}_order_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label>Bild<input type="file" name="{prefix}_order_image_{row_index}" accept="image/*">{image_preview(image_filename)}</label>
+                        <label class="check"><input type="checkbox" name="{prefix}_order_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_order_template">
+                <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
+                    <input type="hidden" name="{prefix}_order_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_order_image_current___INDEX__" value="">
+                    <label>Bestellung<input name="{prefix}_order_title___INDEX__" placeholder="z. B. Tortenbestellung Müller"></label>
+                    <label>Hinweis<textarea name="{prefix}_order_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label>Bild<input type="file" name="{prefix}_order_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_order_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
+
+        def production_rows(prefix, jobs):
+            section_options = lambda selected="": "".join(
+                f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
+                for key, label in PRODUCTION_SECTIONS.items()
+            )
+            row_items = normalize_production_jobs(jobs) or [{"id": "", "section": "backen", "customer_name": "", "order_text": "", "due_date": "", "note": "", "active": True, "image_filename": ""}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
+                        <input type="hidden" name="{prefix}_production_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_production_image_current_{row_index}" value="{esc(image_filename)}">
+                        <label>Bereich<select name="{prefix}_production_section_{row_index}">{section_options(item.get('section', 'backen'))}</select></label>
+                        <label>Name<input name="{prefix}_production_customer_name_{row_index}" value="{esc(item.get('customer_name') or item.get('title', ''))}" placeholder="z. B. Müller"></label>
+                        <label>Abholdatum<input type="date" name="{prefix}_production_due_date_{row_index}" value="{esc(item.get('due_date', ''))}"></label>
+                        <label>Was wurde bestellt<textarea name="{prefix}_production_order_text_{row_index}" rows="2" placeholder="z. B. Eistorte Erdbeere">{esc(item.get('order_text', ''))}</textarea></label>
+                        <label>Hinweis<textarea name="{prefix}_production_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
+                        <label>Bild<input type="file" name="{prefix}_production_image_{row_index}" accept="image/*">{image_preview(image_filename)}</label>
+                        <label class="check"><input type="checkbox" name="{prefix}_production_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_production_template">
+                <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
+                    <input type="hidden" name="{prefix}_production_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_production_image_current___INDEX__" value="">
+                    <label>Bereich<select name="{prefix}_production_section___INDEX__">{section_options('backen')}</select></label>
+                    <label>Name<input name="{prefix}_production_customer_name___INDEX__" placeholder="z. B. Müller"></label>
+                    <label>Abholdatum<input type="date" name="{prefix}_production_due_date___INDEX__"></label>
+                    <label>Was wurde bestellt<textarea name="{prefix}_production_order_text___INDEX__" rows="2" placeholder="z. B. Eistorte Erdbeere"></textarea></label>
+                    <label>Hinweis<textarea name="{prefix}_production_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
+                    <label>Bild<input type="file" name="{prefix}_production_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_production_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
+
+        location_panels = []
+        for index, location in enumerate(locations):
+            prefix = f"cockpit_content_{index}"
+            task_html, task_count, task_template, task_templates = task_rows(prefix, location.get("cockpit_tasks", []))
+            order_html, order_count, order_template = order_rows(prefix, location.get("cockpit_orders", []))
+            production_html, production_count, production_template = production_rows(prefix, location.get("production_jobs", []))
+            order_section = "" if is_schwarzenbek_location(location) else f"""
+                    <details class="category-panel cockpit-admin-panel">
+                        <summary>Bestellungen <span>{order_count}</span></summary>
+                        <input type="hidden" id="{prefix}_order_count" name="{prefix}_order_count" value="{order_count}">
+                        <div id="{prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{prefix}_order_template" data-count-id="{prefix}_order_count">{order_html}</div>
+                        {order_template}
+                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_order_rows">Bestellung hinzufügen</button>
+                    </details>
+            """
+            location_panels.append(
+                f"""
+                <details class="category-panel cockpit-content-location" {"open" if selected_location == location["id"] else ""}>
+                    <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
+                    <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
+                    <details class="category-panel cockpit-admin-panel">
+                        <summary>Tagesaufgaben <span>{task_count}</span></summary>
+                        <input type="hidden" id="{prefix}_task_count" name="{prefix}_task_count" value="{task_count}">
+                        <div id="{prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{prefix}_task_template" data-count-id="{prefix}_task_count">{task_html}</div>
+                        {task_template}
+                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_task_rows">Tagesaufgabe hinzufügen</button>
+                        {task_templates}
+                    </details>
+                    {order_section}
+                    <details class="category-panel cockpit-admin-panel">
+                        <summary>Produktionsaufgaben <span>{production_count}</span></summary>
+                        <input type="hidden" id="{prefix}_production_count" name="{prefix}_production_count" value="{production_count}">
+                        <div id="{prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{prefix}_production_template" data-count-id="{prefix}_production_count">{production_html}</div>
+                        {production_template}
+                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_production_rows">Produktionsaufgabe hinzufügen</button>
+                    </details>
+                </details>
+                """
+            )
+
+        body = f"""
+        {admin_menu()}
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        <section class="box">
+            <div class="section-head">
+                <div>
+                    <h2>Aufträge & Aufgaben</h2>
+                    <p class="muted">Lege Tagesaufgaben, Bestellhinweise oder Produktionsaufgaben an und ordne sie dem passenden Standort zu.</p>
+                </div>
+                <a class="button" href="/admin/locations">Standorte verwalten</a>
+            </div>
+            <form method="post" action="/admin/cockpit-content" enctype="multipart/form-data">
+                <input type="hidden" name="location_count" value="{len(locations)}">
+                <div class="location-list">{''.join(location_panels) if location_panels else '<p>Noch keine Standorte angelegt.</p>'}</div>
+                <button class="primary" type="submit">Aufträge & Aufgaben speichern</button>
+            </form>
+        </section>
+        """
+        self.send_html(page("Aufträge & Aufgaben", body, admin=True, buyer_key=self.current_buyer_key()))
+
+
     def show_locations(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -4410,27 +4600,11 @@ class App(BaseHTTPRequestHandler):
                                 <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
                             </div>
                         </fieldset>
-                        <fieldset class="visibility-box cockpit-admin full">
-                            <legend>Cockpit</legend>
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Tagesaufgaben <span>{cockpit_task_count}</span></summary>
-                                <p class="muted">Aufgaben werden im Standort-Cockpit angezeigt und können dort abgehakt werden.</p>
-                                <input type="hidden" id="{cockpit_prefix}_task_count" name="{cockpit_prefix}_task_count" value="{cockpit_task_count}">
-                                <div id="{cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_task_template" data-count-id="{cockpit_prefix}_task_count">{cockpit_task_html}</div>
-                                {cockpit_task_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
-                                {cockpit_task_templates}
-                            </details>
-                            {cockpit_order_section}
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Produktion <span>{production_job_count}</span></summary>
-                                <p class="muted">Diese Aufträge erscheinen in der Produktions-Wochenansicht und Eisvitrinen/Eistorten tagesaktuell im Cockpit Schwarzenbek.</p>
-                                <input type="hidden" id="{cockpit_prefix}_production_count" name="{cockpit_prefix}_production_count" value="{production_job_count}">
-                                <div id="{cockpit_prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_production_template" data-count-id="{cockpit_prefix}_production_count">{production_job_html}</div>
-                                {production_job_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_production_rows">Produktionsauftrag hinzufügen</button>
-                            </details>
-                        </fieldset>
+                        <div class="visibility-box cockpit-admin-link full">
+                            <strong>Aufträge & Tagesaufgaben</strong>
+                            <p class="muted">Tagesaufgaben, Bestellhinweise und Produktionsaufgaben werden jetzt auf einer eigenen Admin-Seite gepflegt.</p>
+                            <a class="button primary" href="/admin/cockpit-content?location={esc(location['id'])}">Aufträge & Aufgaben bearbeiten</a>
+                        </div>
                     </div>
                 </details>
                 """
@@ -4479,32 +4653,11 @@ class App(BaseHTTPRequestHandler):
                                 <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
                             </div>
                         </fieldset>
-                        <fieldset class="visibility-box cockpit-admin full">
-                            <legend>Cockpit</legend>
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Tagesaufgaben <span>{new_cockpit_task_count}</span></summary>
-                                <input type="hidden" id="{new_cockpit_prefix}_task_count" name="{new_cockpit_prefix}_task_count" value="{new_cockpit_task_count}">
-                                <div id="{new_cockpit_prefix}_task_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_task_template" data-count-id="{new_cockpit_prefix}_task_count">{new_cockpit_task_html}</div>
-                                {new_cockpit_task_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_task_rows">Aufgabe hinzufügen</button>
-                                {new_cockpit_task_templates}
-                            </details>
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Bestellungen <span>{new_cockpit_order_count}</span></summary>
-                                <input type="hidden" id="{new_cockpit_prefix}_order_count" name="{new_cockpit_prefix}_order_count" value="{new_cockpit_order_count}">
-                                <div id="{new_cockpit_prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_order_template" data-count-id="{new_cockpit_prefix}_order_count">{new_cockpit_order_html}</div>
-                                {new_cockpit_order_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
-                            </details>
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Produktion <span>{new_production_job_count}</span></summary>
-                                <p class="muted">Diese Aufträge erscheinen in der Produktions-Wochenansicht und Eisvitrinen/Eistorten tagesaktuell im Cockpit Schwarzenbek.</p>
-                                <input type="hidden" id="{new_cockpit_prefix}_production_count" name="{new_cockpit_prefix}_production_count" value="{new_production_job_count}">
-                                <div id="{new_cockpit_prefix}_production_rows" class="cockpit-admin-rows" data-template-id="{new_cockpit_prefix}_production_template" data-count-id="{new_cockpit_prefix}_production_count">{new_production_job_html}</div>
-                                {new_production_job_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{new_cockpit_prefix}_production_rows">Produktionsauftrag hinzufügen</button>
-                            </details>
-                        </fieldset>
+                        <div class="visibility-box cockpit-admin-link full">
+                            <strong>Aufträge & Tagesaufgaben</strong>
+                            <p class="muted">Nach dem Anlegen des Standortes kannst du die Cockpit-Inhalte auf der eigenen Admin-Seite zuordnen.</p>
+                            <a class="button" href="/admin/cockpit-content">Zur Aufgaben-Seite</a>
+                        </div>
                     </div>
                 </details>
                 <button class="primary" type="submit">Standorte speichern</button>
@@ -4639,6 +4792,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_import_products()
             if path == "/admin/settings":
                 return self.handle_settings()
+            if path == "/admin/cockpit-content":
+                return self.handle_admin_cockpit_content()
             if path == "/admin/employees":
                 return self.handle_employees()
             if path == "/admin/locations":
@@ -5322,6 +5477,34 @@ class App(BaseHTTPRequestHandler):
         return normalize_production_jobs(items)
 
 
+    def handle_admin_cockpit_content(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        try:
+            location_count = int(self.form_value(form, "location_count", "0") or "0")
+        except ValueError:
+            location_count = 0
+        existing_locations = get_locations()
+        locations_by_id = {location["id"]: location for location in existing_locations}
+        updated_locations = []
+        for index in range(location_count):
+            location_id = self.form_value(form, f"location_id_{index}").strip()
+            location = locations_by_id.get(location_id)
+            if not location:
+                continue
+            prefix = f"cockpit_content_{index}"
+            updated = dict(location)
+            updated["cockpit_tasks"] = self.collect_cockpit_tasks(form, prefix)
+            updated["cockpit_orders"] = self.collect_cockpit_orders(form, prefix)
+            updated["production_jobs"] = self.collect_production_jobs(form, prefix)
+            updated_locations.append(updated)
+        updated_by_id = {location["id"]: location for location in updated_locations}
+        final_locations = [updated_by_id.get(location["id"], location) for location in existing_locations]
+        save_locations(normalize_locations(final_locations))
+        self.redirect("/admin/cockpit-content?msg=" + quote_plus("Aufträge und Aufgaben gespeichert."))
+
+
     def handle_locations(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -5332,6 +5515,7 @@ class App(BaseHTTPRequestHandler):
         except ValueError:
             location_count = 0
         locations = []
+        existing_locations_by_id = {location["id"]: location for location in get_locations()}
         existing_category_updates = {}
         categories = get_category_names(True)
         for index in range(location_count):
@@ -5341,6 +5525,7 @@ class App(BaseHTTPRequestHandler):
             if not name:
                 continue
             location_id = self.form_value(form, f"location_id_{index}").strip() or make_location_id(name)
+            existing_location = existing_locations_by_id.get(location_id, {})
             locations.append(
                 {
                     "id": location_id,
@@ -5352,9 +5537,9 @@ class App(BaseHTTPRequestHandler):
                     "time_tracking_max_end": self.form_value(form, f"location_time_tracking_max_end_{index}").strip(),
                     "min_stock_enabled": bool(self.form_value(form, f"location_min_stock_enabled_{index}")),
                     "min_stock_items": self.collect_min_stock_items(form, f"location_min_stock_{index}"),
-                    "cockpit_tasks": self.collect_cockpit_tasks(form, f"location_cockpit_{index}"),
-                    "cockpit_orders": self.collect_cockpit_orders(form, f"location_cockpit_{index}"),
-                    "production_jobs": self.collect_production_jobs(form, f"location_cockpit_{index}"),
+                    "cockpit_tasks": existing_location.get("cockpit_tasks", []),
+                    "cockpit_orders": existing_location.get("cockpit_orders", []),
+                    "production_jobs": existing_location.get("production_jobs", []),
                 }
             )
             existing_category_updates[location_id] = [
@@ -5378,9 +5563,9 @@ class App(BaseHTTPRequestHandler):
                     "time_tracking_max_end": self.form_value(form, "new_location_time_tracking_max_end").strip(),
                     "min_stock_enabled": bool(self.form_value(form, "new_location_min_stock_enabled")),
                     "min_stock_items": self.collect_min_stock_items(form, "new_location_min_stock"),
-                    "cockpit_tasks": self.collect_cockpit_tasks(form, "new_location_cockpit"),
-                    "cockpit_orders": self.collect_cockpit_orders(form, "new_location_cockpit"),
-                    "production_jobs": self.collect_production_jobs(form, "new_location_cockpit"),
+                    "cockpit_tasks": [],
+                    "cockpit_orders": [],
+                    "production_jobs": [],
                 }
             )
         if not locations:

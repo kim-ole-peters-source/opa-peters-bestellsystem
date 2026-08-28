@@ -996,6 +996,20 @@ tr:hover td { background: var(--primary-soft); }
   border-radius: var(--radius-md);
   background: #fff;
 }
+.cockpit-admin-link {
+  display: grid;
+  gap: 8px;
+}
+.cockpit-content-location {
+  margin-bottom: 12px;
+  background: #fff;
+}
+.cockpit-content-location > summary {
+  min-height: 54px;
+}
+.cockpit-content-location > .cockpit-admin-panel {
+  margin: 10px 0;
+}
 .cockpit-image-preview {
   display: inline-flex;
   align-items: center;
@@ -1152,17 +1166,41 @@ tr:hover td { background: var(--primary-soft); }
   margin-top: 12px;
 }
 .production-day {
-  display: grid;
-  align-content: start;
-  gap: 8px;
   min-height: 170px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: #f8fafc;
 }
-.production-day h4 { margin: 0; font-size: 15px; }
-.production-day > span { color: var(--muted); font-size: 12px; font-weight: 800; }
+.production-day summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+}
+.production-day summary::-webkit-details-marker { display: none; }
+.production-day summary span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.production-day summary strong { font-size: 15px; }
+.production-day summary small { color: var(--muted); font-size: 12px; font-weight: 800; }
+.production-day summary b {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 13px;
+}
+.production-day[open] summary { margin-bottom: 8px; }
 .production-day-list { display: grid; gap: 8px; }
 .production-subgrid {
   display: grid;
@@ -1172,14 +1210,19 @@ tr:hover td { background: var(--primary-soft); }
 }
 .production-job {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-  align-items: center;
+  align-items: start;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: #fff;
   box-shadow: var(--shadow-tiny);
+}
+.production-job-content {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 .production-job.is-done {
   background: var(--green-bg);
@@ -1205,7 +1248,7 @@ tr:hover td { background: var(--primary-soft); }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 4px;
 }
 .production-job-actions form { margin: 0; }
 .production-job-actions button {
@@ -1292,6 +1335,7 @@ tr:hover td { background: var(--primary-soft); }
   .production-week { grid-template-columns: 1fr; }
   .production-day { min-height: auto; }
   .production-job { padding: 9px; }
+  .production-job-actions { grid-template-columns: 1fr; }
   .order-day-card .table-actions { width: 100%; }
   .order-day-card .table-actions form,
   .order-day-card .table-actions button { width: 100%; }
