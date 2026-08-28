@@ -2413,7 +2413,7 @@ def page(title, body, admin=False, buyer_key=None):
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css?v={ASSET_VERSION}">
 </head>
-<body>
+<body data-page="{esc(title)}">
 <header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/brand-logo.png" alt="Opa Peters Logo"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
 <main>{push_control}{body}</main>
 <button id="installApp" class="install-app" hidden>App installieren</button>
