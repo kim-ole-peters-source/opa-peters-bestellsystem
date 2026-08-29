@@ -18,7 +18,7 @@ import calendar
 from datetime import datetime, date, timedelta
 from email.message import EmailMessage
 from http import cookies
-from urllib.parse import parse_qs, urlparse, quote_plus
+from urllib.parse import parse_qs, urlparse, quote_plus, urlencode
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-28-admin-blue-locations"
+ASSET_VERSION = "2026-08-29-keep-admin-panels-open"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -950,6 +950,26 @@ def normalize_text_key(text):
     for old, new in replacements.items():
         text = text.replace(old, new)
     return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def admin_orders_return_url(message="", error="", pdf="", open_location="", open_day=""):
+    params = []
+    if message:
+        params.append(("msg", message))
+    if error:
+        params.append(("error", error))
+    if pdf:
+        params.append(("pdf", pdf))
+    if open_location:
+        params.append(("open_location", open_location))
+    if open_day:
+        params.append(("open_day", open_day))
+    url = "/admin/orders"
+    if params:
+        url += "?" + urlencode(params)
+    if open_location and open_day:
+        url += "#orders-" + normalize_text_key(open_location) + "-" + normalize_text_key(open_day)
+    return url
 
 
 def parse_visible_to(value):
@@ -2106,6 +2126,28 @@ def send_time_entry_push(employee_name, work_location, work_date, start_time, en
     return send_push_notification(payload)
 
 
+def send_order_push(order_number, location, ordered_by, items, note=""):
+    item_count = len(items or [])
+    total_quantity = sum(int(item.get("quantity") or 0) for item in (items or []))
+    payload = {
+        "title": "Neue Bestellung",
+        "body": f"{location} · {ordered_by} · {item_count} Position(en), {total_quantity} Stück",
+        "url": "/admin/orders",
+        "tag": f"order-{order_number}",
+        "icon": "/static/icons/icon-192.png",
+        "badge": "/static/icons/icon-192.png",
+        "details": {
+            "order_number": order_number,
+            "location": location,
+            "ordered_by": ordered_by,
+            "items": item_count,
+            "quantity": total_quantity,
+            "note": note or "",
+        },
+    }
+    return send_push_notification(payload)
+
+
 def send_push_test_notification():
     return send_push_notification({
         "title": "Push-Test",
@@ -2431,20 +2473,36 @@ def page(title, body, admin=False, buyer_key=None):
 
 
 def admin_menu():
-    links = """
-        <a class="button" href="/admin"><span class="nav-icon" aria-hidden="true">P</span><span>Produkte</span></a>
-        <a class="button" href="/admin/orders"><span class="nav-icon" aria-hidden="true">B</span><span>Bestellungen</span></a>
-        <a class="button" href="/admin/cockpit-content"><span class="nav-icon" aria-hidden="true">A</span><span>Aufträge & Aufgaben</span></a>
-        <a class="button" href="/admin/time"><span class="nav-icon" aria-hidden="true">Z</span><span>Zeiterfassung</span></a>
-        <a class="button" href="/admin/employees"><span class="nav-icon" aria-hidden="true">M</span><span>Personen</span></a>
-        <a class="button" href="/admin/task-report"><span class="nav-icon" aria-hidden="true">R</span><span>Aufgabenreport</span></a>
-        <a class="button" href="/admin/categories"><span class="nav-icon" aria-hidden="true">K</span><span>Kategorien</span></a>
-        <a class="button" href="/admin/import"><span class="nav-icon" aria-hidden="true">I</span><span>Import</span></a>
-        <a class="button" href="/admin/settings"><span class="nav-icon" aria-hidden="true">E</span><span>Einstellungen</span></a>
-        <a class="button" href="/admin/locations"><span class="nav-icon" aria-hidden="true">S</span><span>Standorte</span></a>
-        <a class="button" href="/admin/visibility"><span class="nav-icon" aria-hidden="true">V</span><span>Sichtbarkeit</span></a>
-        <a class="button logout-button" href="/admin/logout"><span class="nav-icon" aria-hidden="true">X</span><span>Admin Logout</span></a>
-    """
+    groups = [
+        ("Sortiment", "shop", [
+            ("/admin", "Produkte", "P"),
+            ("/admin/categories", "Kategorien", "K"),
+            ("/admin/import", "Import", "I"),
+            ("/admin/visibility", "Sichtbarkeit", "V"),
+        ]),
+        ("Bestellung & Cockpit", "orders", [
+            ("/admin/orders", "Bestellungen", "B"),
+            ("/admin/cockpit-content", "Aufträge & Aufgaben", "A"),
+        ]),
+        ("Personal", "people", [
+            ("/admin/time", "Zeiterfassung", "Z"),
+            ("/admin/employees", "Personen", "M"),
+            ("/admin/task-report", "Aufgabenreport", "R"),
+        ]),
+        ("System", "system", [
+            ("/admin/locations", "Standorte", "S"),
+            ("/admin/settings", "Einstellungen", "E"),
+            ("/admin/logout", "Admin Logout", "X"),
+        ]),
+    ]
+    links = []
+    for title, group_class, items in groups:
+        group_links = "".join(
+            f'<a class="button admin-nav-{group_class} {"logout-button" if href.endswith("/logout") else ""}" href="{href}"><span class="nav-icon" aria-hidden="true">{icon}</span><span>{label}</span></a>'
+            for href, label, icon in items
+        )
+        links.append(f'<div class="admin-menu-group admin-menu-{group_class}"><strong>{title}</strong><div>{group_links}</div></div>')
+    links = "".join(links)
     return """
     <details class="admin-mobile-menu">
         <summary>Admin-Menü</summary>
@@ -3885,23 +3943,31 @@ class App(BaseHTTPRequestHandler):
         error = (query.get("error", [""])[0] or "").strip()
         combined_pdf = (query.get("pdf", [""])[0] or "").strip()
         open_location = (query.get("open_location", [""])[0] or "").strip()
+        open_day = (query.get("open_day", [""])[0] or "").strip()
         orders = get_orders()
         grouped_orders = {}
         for order in orders:
             grouped_orders.setdefault(order["location"] or "Ohne Standort", []).append(order)
         location_panels = []
         for location_name in sorted(grouped_orders.keys(), key=lambda value: value.lower()):
+            location_key = normalize_text_key(location_name) or "standort"
+            location_is_open = open_location in {location_key, location_name}
             location_orders = sorted(grouped_orders[location_name], key=order_created_sort_key, reverse=True)
             day_groups = {}
             for order in location_orders:
                 day_groups.setdefault(order_day_key(order), []).append(order)
             cards = []
             for day_key in sorted(day_groups.keys(), key=order_day_sort_key, reverse=True):
+                day_panel_id = f"orders-{location_key}-{normalize_text_key(day_key)}"
+                day_is_open = location_is_open and open_day in {day_key, normalize_text_key(day_key)}
                 day_orders = sorted(day_groups[day_key], key=order_created_sort_key, reverse=True)
                 aggregated = {}
                 order_rows = []
                 note_rows = []
-                hidden_inputs = []
+                hidden_inputs = [
+                    f'<input type="hidden" name="return_location" value="{esc(location_key)}">',
+                    f'<input type="hidden" name="return_day" value="{esc(day_key)}">',
+                ]
                 for order in day_orders:
                     hidden_inputs.append(f'<input type="hidden" name="order_{order["id"]}" value="1">')
                     is_completed = bool(order["completed_at"])
@@ -3965,9 +4031,10 @@ class App(BaseHTTPRequestHandler):
                 day_label = order_day_label(day_key)
                 day_completed = all(bool(order["completed_at"]) for order in day_orders)
                 card_class = "box order-card order-day-card order-completed" if day_completed else "box order-card order-day-card"
+                day_details_open = "open" if day_is_open else ""
                 cards.append(
                     f"""
-                    <article class="{card_class}">
+                    <article id="{esc(day_panel_id)}" class="{card_class}">
                         <div class="section-head">
                             <div>
                                 <h3>{esc(day_label)}</h3>
@@ -3989,11 +4056,11 @@ class App(BaseHTTPRequestHandler):
                                 </form>
                             </div>
                         </div>
-                        <details class="category-panel order-day-panel">
+                        <details class="category-panel order-day-panel" {day_details_open}>
                             <summary>Zusammengefasste Produkte <span>{position_count}</span></summary>
                             <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Menge</th><th>Status</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
                         </details>
-                        <details class="category-panel order-day-panel">
+                        <details class="category-panel order-day-panel" {day_details_open}>
                             <summary>Einzelbestellungen <span>{len(day_orders)}</span></summary>
                             <div class="table-wrap"><table><tr><th>Bestellnummer</th><th>Zeitpunkt</th><th>Von</th><th>Status</th><th>Dateien</th></tr>{''.join(order_rows)}</table></div>
                         </details>
@@ -4003,7 +4070,7 @@ class App(BaseHTTPRequestHandler):
                 )
             location_panels.append(
                 f"""
-                <details class="category-panel order-location-panel">
+                <details id="orders-location-{esc(location_key)}" class="category-panel order-location-panel" {"open" if location_is_open else ""}>
                     <summary>{esc(location_name)} <span>{len(day_groups)} Tag(e), {len(location_orders)} Bestellung(en)</span></summary>
                     <div class="order-location-content">{''.join(cards)}</div>
                 </details>
@@ -4322,9 +4389,10 @@ class App(BaseHTTPRequestHandler):
                         <button class="button add-cockpit-row" type="button" data-target="{prefix}_production_rows">Produktionsaufgabe hinzufügen</button>
                     </details>
                 """
+            location_is_open = selected_location == location["id"]
             location_panels.append(
                 f"""
-                <details class="category-panel cockpit-content-location" {"open" if selected_location == location["id"] else ""}>
+                <details id="cockpit-content-{esc(location['id'])}" class="category-panel cockpit-content-location" data-location-id="{esc(location['id'])}" {"open" if location_is_open else ""}>
                     <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
                     <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
                     <details class="category-panel cockpit-admin-panel">
@@ -4355,6 +4423,7 @@ class App(BaseHTTPRequestHandler):
             </div>
             <form method="post" action="/admin/cockpit-content" enctype="multipart/form-data">
                 <input type="hidden" name="location_count" value="{len(locations)}">
+                <input type="hidden" id="cockpitContentOpenLocation" name="open_location" value="{esc(selected_location)}">
                 <div class="location-list">{''.join(location_panels) if location_panels else '<p>Noch keine Standorte angelegt.</p>'}</div>
                 <button class="primary" type="submit">Aufträge & Aufgaben speichern</button>
             </form>
@@ -4578,7 +4647,7 @@ class App(BaseHTTPRequestHandler):
             """
             rows.append(
                 f"""
-                <details id="location-{esc(location['id'])}" class="category-panel location-panel" data-location-id="{esc(location['id'])}">
+                <details id="location-{esc(location['id'])}" class="category-panel location-panel" data-location-id="{esc(location['id'])}" {"open" if open_location == location["id"] else ""}>
                     <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
                     <div class="location-row">
                         <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
@@ -5151,47 +5220,59 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        return_location = self.form_value(form, "return_location").strip()
+        return_day = self.form_value(form, "return_day").strip()
         order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
         orders = get_orders_by_ids(order_ids)
         if len(orders) < 1:
-            return self.redirect("/admin/orders?error=" + quote_plus("Bitte mindestens eine Bestellung auswählen."))
+            return self.redirect(admin_orders_return_url(error="Bitte mindestens eine Bestellung auswählen.", open_location=return_location, open_day=return_day))
         try:
             pdf_filename = create_combined_order_pdf(orders)
             with open(os.path.join(ORDER_DIR, pdf_filename), "rb") as f:
                 store_pdf_file(pdf_filename, f.read())
         except Exception as exc:
             print(f"Gesamtbestellung-PDF fehlgeschlagen: {exc}")
-            return self.redirect("/admin/orders?error=" + quote_plus("Die Gesamtbestellung konnte nicht als PDF erstellt werden."))
-        return self.redirect("/admin/orders?msg=" + quote_plus(f"Gesamtbestellung aus {len(orders)} Bestellung(en) wurde erstellt.") + "&pdf=" + quote_plus(pdf_filename))
+            return self.redirect(admin_orders_return_url(error="Die Gesamtbestellung konnte nicht als PDF erstellt werden.", open_location=return_location, open_day=return_day))
+        return self.redirect(admin_orders_return_url(message=f"Gesamtbestellung aus {len(orders)} Bestellung(en) wurde erstellt.", pdf=pdf_filename, open_location=return_location, open_day=return_day))
 
     def handle_delete_orders(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
         return_to = self.form_value(form, "return_to", "/admin/orders").strip()
+        return_location = self.form_value(form, "return_location").strip()
+        return_day = self.form_value(form, "return_day").strip()
         if return_to not in ["/admin", "/admin/orders"]:
             return_to = "/admin/orders"
         order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
         if not order_ids:
+            if return_to == "/admin/orders":
+                return self.redirect(admin_orders_return_url(error="Bitte zuerst mindestens eine Bestellung auswählen.", open_location=return_location, open_day=return_day))
             return self.redirect(return_to + "?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
         deleted_count = delete_orders_by_ids(order_ids)
         if not deleted_count:
+            if return_to == "/admin/orders":
+                return self.redirect(admin_orders_return_url(error="Die ausgewählte Bestellung wurde nicht gefunden.", open_location=return_location, open_day=return_day))
             return self.redirect(return_to + "?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
+        if return_to == "/admin/orders":
+            return self.redirect(admin_orders_return_url(message=f"{deleted_count} Bestellung(en) gelöscht.", open_location=return_location))
         return self.redirect(return_to + "?msg=" + quote_plus(f"{deleted_count} Bestellung(en) gelöscht."))
 
     def handle_order_status(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        return_location = self.form_value(form, "return_location").strip()
+        return_day = self.form_value(form, "return_day").strip()
         order_ids = [key.replace("order_", "", 1) for key, value in form.items() if key.startswith("order_") and value]
         if not order_ids:
-            return self.redirect("/admin/orders?error=" + quote_plus("Bitte zuerst mindestens eine Bestellung auswählen."))
+            return self.redirect(admin_orders_return_url(error="Bitte zuerst mindestens eine Bestellung auswählen.", open_location=return_location, open_day=return_day))
         completed = self.form_value(form, "completed", "1") == "1"
         changed = set_orders_completed(order_ids, completed=completed)
         if not changed:
-            return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Bestellung wurde nicht gefunden."))
+            return self.redirect(admin_orders_return_url(error="Die ausgewählte Bestellung wurde nicht gefunden.", open_location=return_location, open_day=return_day))
         message = "Bestellung als erledigt markiert." if completed else "Bestellung wieder geöffnet."
-        return self.redirect("/admin/orders?msg=" + quote_plus(message))
+        return self.redirect(admin_orders_return_url(message=message, open_location=return_location, open_day=return_day))
 
     def handle_order_item_status(self):
         if not self.is_admin():
@@ -5486,6 +5567,7 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
+        requested_open_location = self.form_value(form, "open_location").strip()
         try:
             location_count = int(self.form_value(form, "location_count", "0") or "0")
         except ValueError:
@@ -5507,7 +5589,12 @@ class App(BaseHTTPRequestHandler):
         updated_by_id = {location["id"]: location for location in updated_locations}
         final_locations = [updated_by_id.get(location["id"], location) for location in existing_locations]
         save_locations(normalize_locations(final_locations))
-        self.redirect("/admin/cockpit-content?msg=" + quote_plus("Aufträge und Aufgaben gespeichert."))
+        valid_location_ids = {location["id"] for location in final_locations}
+        target = "/admin/cockpit-content?msg=" + quote_plus("Aufträge und Aufgaben gespeichert.")
+        if requested_open_location in valid_location_ids:
+            target += "&location=" + quote_plus(requested_open_location)
+            target += "#cockpit-content-" + quote_plus(requested_open_location)
+        self.redirect(target)
 
 
     def handle_locations(self):
@@ -5889,6 +5976,10 @@ class App(BaseHTTPRequestHandler):
             )
         con.commit()
         con.close()
+        try:
+            send_order_push(order_number, location, ordered_by, items, note)
+        except Exception as exc:
+            print(f"Push-Benachrichtigung für Bestellung fehlgeschlagen: {exc}")
         delete_cart_draft(location_id)
         order_for_links = dict(order)
         order_for_links["pdf_filename"] = pdf_filename

@@ -197,14 +197,33 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
 
 .admin-menu {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
   margin-bottom: 20px;
-  padding: 8px;
+  padding: 10px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-tiny);
+}
+.admin-menu-group {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  background: #f8fafc;
+  border: 1px solid var(--line);
+}
+.admin-menu-group > strong {
+  color: var(--primary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.admin-menu-group > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
 }
 .admin-menu .button {
   display: inline-flex;
@@ -226,6 +245,14 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
 }
 .admin-menu .button:hover { background: var(--primary-2); color: #fff; transform: none; }
 .admin-menu .button.logout-button { margin-left: 0; }
+.admin-menu .admin-nav-shop { background: #1e3a8a; }
+.admin-menu .admin-nav-orders { background: #075985; }
+.admin-menu .admin-nav-people { background: #166534; }
+.admin-menu .admin-nav-system { background: #334155; }
+.admin-menu .admin-nav-shop:hover { background: #1d4ed8; }
+.admin-menu .admin-nav-orders:hover { background: #0369a1; }
+.admin-menu .admin-nav-people:hover { background: #15803d; }
+.admin-menu .admin-nav-system:hover { background: #475569; }
 .nav-icon {
   display: inline-grid;
   place-items: center;
@@ -240,6 +267,12 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
 }
 .admin-mobile-menu { display: none; }
 .admin-mobile-links { display: grid; gap: 8px; padding-top: 12px; }
+.admin-mobile-links .admin-menu-group {
+  padding: 8px;
+}
+.admin-mobile-links .admin-menu-group > div {
+  grid-template-columns: 1fr;
+}
 .admin-mobile-links .button {
   display: inline-flex;
   align-items: center;
@@ -254,6 +287,10 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
   text-align: left;
 }
 .admin-mobile-links .button:hover { background: var(--primary-2); color: #fff; }
+.admin-mobile-links .admin-nav-shop { background: #1e3a8a; }
+.admin-mobile-links .admin-nav-orders { background: #075985; }
+.admin-mobile-links .admin-nav-people { background: #166534; }
+.admin-mobile-links .admin-nav-system { background: #334155; }
 
 .stats {
   display: grid;
@@ -351,6 +388,25 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
   border: 1px solid rgba(255, 255, 255, .24);
   font-size: 12.5px;
   font-weight: 800;
+}
+.category-panel .category-panel > summary,
+.cockpit-admin-panel > summary,
+.bulk-add-panel > summary,
+.time-person-panel > summary {
+  background: #dbeafe;
+  color: var(--primary);
+}
+.category-panel .category-panel > summary::before,
+.cockpit-admin-panel > summary::before,
+.bulk-add-panel > summary::before {
+  color: var(--primary);
+}
+.category-panel .category-panel > summary span,
+.cockpit-admin-panel > summary span,
+.bulk-add-panel > summary span {
+  background: #eff6ff;
+  color: var(--primary);
+  border-color: #bfdbfe;
 }
 .category-panel .grid { margin-top: 10px; }
 .admin-toggle-panel, .admin-product-panel { margin-bottom: 14px; }

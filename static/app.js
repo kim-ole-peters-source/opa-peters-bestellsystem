@@ -1043,6 +1043,23 @@
       });
     }
   }
+  var cockpitContentOpenLocation = document.getElementById('cockpitContentOpenLocation');
+  if (cockpitContentOpenLocation) {
+    document.addEventListener('click', function (event) {
+      var submitter = event.target.closest ? event.target.closest('button[type="submit"], input[type="submit"]') : null;
+      if (!submitter) return;
+      var panel = submitter.closest ? submitter.closest('.cockpit-content-location[data-location-id]') : null;
+      if (panel) cockpitContentOpenLocation.value = panel.getAttribute('data-location-id') || '';
+    });
+    var cockpitContentForm = cockpitContentOpenLocation.closest('form');
+    if (cockpitContentForm) {
+      cockpitContentForm.addEventListener('submit', function () {
+        if (cockpitContentOpenLocation.value) return;
+        var openPanel = cockpitContentForm.querySelector('.cockpit-content-location[data-location-id][open]');
+        if (openPanel) cockpitContentOpenLocation.value = openPanel.getAttribute('data-location-id') || '';
+      });
+    }
+  }
   document.addEventListener('click', function (event) {
     var button = event.target.closest ? event.target.closest('.activate-template-task') : null;
     if (!button) return;
