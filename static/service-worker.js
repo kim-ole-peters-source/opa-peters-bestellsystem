@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v45-keep-admin-panels-open';
+const CACHE_NAME = 'opa-peters-bestellung-v46-admin-dashboard-polish';
 const STATIC_ASSETS = [
   '/',
   '/login',

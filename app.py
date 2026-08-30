@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-29-keep-admin-panels-open"
+ASSET_VERSION = "2026-08-29-admin-dashboard-polish"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -3709,6 +3709,53 @@ class App(BaseHTTPRequestHandler):
         source_options = "".join(f'<option value="{esc(source)}"></option>' for source in get_source_names())
         active_count = sum(1 for p in all_products if p["active"])
         inactive_count = len(all_products) - active_count
+        all_orders = get_orders()
+        open_orders = [order for order in all_orders if not order["completed_at"]]
+        today = today_iso()
+        current_entries = get_time_entries(current_month())
+        today_time_entries = [entry for entry in current_entries if entry["work_date"] == today]
+        locations = get_locations()
+        active_locations = [location for location in locations if location_can_order(location) or location_can_time(location)]
+        daily_task_count = 0
+        open_production_jobs = 0
+        min_stock_locations = 0
+        for location in locations:
+            if location.get("min_stock_enabled"):
+                min_stock_locations += 1
+            daily_task_count += len([task for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])) if task.get("active")])
+            open_production_jobs += len([job for job in normalize_production_jobs(location.get("production_jobs", [])) if job.get("active")])
+        backup_hint = os.path.abspath(DATA_DIR)
+        admin_overview = f"""
+        <section class="admin-dashboard">
+            <a class="admin-dashboard-card dashboard-orders" href="/admin/orders">
+                <span>Offene Bestellungen</span>
+                <strong>{len(open_orders)}</strong>
+                <small>{len(all_orders)} insgesamt</small>
+            </a>
+            <a class="admin-dashboard-card dashboard-time" href="/admin/time">
+                <span>Zeiterfassung heute</span>
+                <strong>{len(today_time_entries)}</strong>
+                <small>{esc(format_duration(sum(entry['duration_minutes'] for entry in today_time_entries)))}</small>
+            </a>
+            <a class="admin-dashboard-card dashboard-cockpit" href="/admin/cockpit-content">
+                <span>Aufgaben & Produktion</span>
+                <strong>{daily_task_count + open_production_jobs}</strong>
+                <small>{daily_task_count} Tagesaufgaben · {open_production_jobs} Produktion</small>
+            </a>
+            <a class="admin-dashboard-card dashboard-system" href="/admin/locations">
+                <span>Aktive Standorte</span>
+                <strong>{len(active_locations)}</strong>
+                <small>{min_stock_locations} mit Mindestbestand</small>
+            </a>
+        </section>
+        <details class="category-panel admin-system-note">
+            <summary>System & Datensicherheit <span>Info</span></summary>
+            <div class="admin-note-grid">
+                <p><strong>Datenordner:</strong><br>{esc(backup_hint)}</p>
+                <p><strong>Wichtig:</strong><br>Bestellungen, Arbeitszeiten, Bilder und Einstellungen sollten regelmäßig als Server-Backup gesichert werden.</p>
+            </div>
+        </details>
+        """
         rows = []
         rows_by_category = {}
         for p in products:
@@ -3756,6 +3803,7 @@ class App(BaseHTTPRequestHandler):
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
         {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        {admin_overview}
         <section class="stats">
             <div class="stat"><strong>{active_count}</strong><span>aktive Produkte</span></div>
             <div class="stat"><strong>{inactive_count}</strong><span>deaktiviert</span></div>
