@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-05-cockpit-orders-visible"
+ASSET_VERSION = "2026-09-05-cockpit-info"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -378,6 +378,30 @@ def normalize_cockpit_orders(raw_orders):
     return normalized
 
 
+def normalize_cockpit_infos(raw_infos):
+    normalized = []
+    seen = set()
+    for item in raw_infos or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        text = str(item.get("text") or item.get("note") or "").strip()
+        if not title and not text:
+            continue
+        item_id = str(item.get("id") or "").strip() or make_cockpit_item_id("info")
+        if item_id in seen:
+            item_id = make_cockpit_item_id("info")
+        seen.add(item_id)
+        normalized.append({
+            "id": item_id,
+            "title": title[:180] or "Info",
+            "text": text[:1200],
+            "active": bool(item.get("active", True)),
+            "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
+        })
+    return normalized
+
+
 def is_valid_iso_date(value):
     try:
         datetime.strptime(value or "", "%Y-%m-%d")
@@ -434,6 +458,7 @@ def normalize_locations(raw_locations):
             min_stock_items = normalize_min_stock_items(item.get("min_stock_items", []))
             cockpit_tasks = normalize_cockpit_tasks(item.get("cockpit_tasks", []))
             cockpit_orders = normalize_cockpit_orders(item.get("cockpit_orders", []))
+            cockpit_infos = normalize_cockpit_infos(item.get("cockpit_infos", []))
             production_jobs = normalize_production_jobs(item.get("production_jobs", []))
             raw_id = str(item.get("id") or "").strip()
         else:
@@ -447,6 +472,7 @@ def normalize_locations(raw_locations):
             min_stock_items = []
             cockpit_tasks = []
             cockpit_orders = []
+            cockpit_infos = []
             production_jobs = []
             raw_id = ""
         if not name:
@@ -470,6 +496,7 @@ def normalize_locations(raw_locations):
             "min_stock_items": min_stock_items,
             "cockpit_tasks": cockpit_tasks,
             "cockpit_orders": cockpit_orders,
+            "cockpit_infos": cockpit_infos,
             "production_jobs": production_jobs,
         })
     return normalized
@@ -2925,6 +2952,7 @@ class App(BaseHTTPRequestHandler):
             if info.get("state") == "done" and not cockpit_state_is_from_today(info):
                 continue
             tasks.append(task)
+        cockpit_infos = [item for item in normalize_cockpit_infos(location.get("cockpit_infos", [])) if item.get("active")]
         cockpit_orders = [] if is_production_location(location) else [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
         task_cards = []
         for task in tasks:
@@ -3031,6 +3059,24 @@ class App(BaseHTTPRequestHandler):
             quick_actions.append('<a class="button primary" href="/">Shop öffnen</a>')
         if location_can_time(location):
             quick_actions.append('<a class="button primary" href="/time">Zeiterfassung öffnen</a>')
+        info_cards = []
+        for info_item in cockpit_infos:
+            image = f'<img class="cockpit-thumb" src="/uploads/{esc(info_item["image_filename"])}" alt="">' if info_item.get("image_filename") else ""
+            info_cards.append(
+                f"""
+                <article class="cockpit-info-card">
+                    {image}
+                    <strong>{esc(info_item['title'])}</strong>
+                    {f'<p>{esc(info_item["text"])}</p>' if info_item.get("text") else ''}
+                </article>
+                """
+            )
+        info_section = f"""
+            <section class="box cockpit-panel cockpit-info-panel">
+                <div class="section-head"><div><h2>Info</h2><p class="muted">Wichtige Hinweise für diesen Standort.</p></div><span class="pill">{len(cockpit_infos)}</span></div>
+                <div class="cockpit-list">{''.join(info_cards) if info_cards else '<p class="muted">Für diesen Standort sind aktuell keine Infos hinterlegt.</p>'}</div>
+            </section>
+        """
         production_section = ""
         if is_production_location(location):
             weekday_labels = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
@@ -3150,6 +3196,7 @@ class App(BaseHTTPRequestHandler):
                 <div class="section-head"><div><h2>Tagesaufgaben</h2><p class="muted">Zum Erledigen antippen.</p></div><span class="pill">{len(tasks)}</span></div>
                 <div class="cockpit-list">{''.join(task_cards) if task_cards else '<p class="muted">Für diesen Standort sind aktuell keine Tagesaufgaben hinterlegt.</p>'}</div>
             </section>
+            {info_section}
             {order_section}
         </section>
         {production_section}
@@ -4370,6 +4417,39 @@ class App(BaseHTTPRequestHandler):
             """
             return "".join(rows_html), len(row_items), template
 
+        def info_rows(prefix, infos):
+            row_items = normalize_cockpit_infos(infos) or [{"id": "", "title": "", "text": "", "active": True, "image_filename": ""}]
+            rows_html = []
+            for row_index, item in enumerate(row_items):
+                image_filename = item.get("image_filename", "")
+                rows_html.append(
+                    f"""
+                    <div class="cockpit-admin-row cockpit-admin-info-row" data-cockpit-info-row>
+                        <input type="hidden" name="{prefix}_info_id_{row_index}" value="{esc(item.get('id', ''))}">
+                        <input type="hidden" name="{prefix}_info_image_current_{row_index}" value="{esc(image_filename)}">
+                        <label>Überschrift<input name="{prefix}_info_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Wichtig für heute"></label>
+                        <label>Info<textarea name="{prefix}_info_text_{row_index}" rows="3" placeholder="Hinweis für das Cockpit">{esc(item.get('text', ''))}</textarea></label>
+                        <label>Bild<input type="file" name="{prefix}_info_image_{row_index}" accept="image/*">{image_preview(image_filename)}</label>
+                        <label class="check"><input type="checkbox" name="{prefix}_info_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
+                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                    </div>
+                    """
+                )
+            template = f"""
+            <template id="{prefix}_info_template">
+                <div class="cockpit-admin-row cockpit-admin-info-row" data-cockpit-info-row>
+                    <input type="hidden" name="{prefix}_info_id___INDEX__" value="">
+                    <input type="hidden" name="{prefix}_info_image_current___INDEX__" value="">
+                    <label>Überschrift<input name="{prefix}_info_title___INDEX__" placeholder="z. B. Wichtig für heute"></label>
+                    <label>Info<textarea name="{prefix}_info_text___INDEX__" rows="3" placeholder="Hinweis für das Cockpit"></textarea></label>
+                    <label>Bild<input type="file" name="{prefix}_info_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
+                    <label class="check"><input type="checkbox" name="{prefix}_info_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
+                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
+                </div>
+            </template>
+            """
+            return "".join(rows_html), len(row_items), template
+
         def production_rows(prefix, jobs):
             section_options = lambda selected="": "".join(
                 f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
@@ -4418,6 +4498,7 @@ class App(BaseHTTPRequestHandler):
             prefix = f"cockpit_content_{index}"
             task_html, task_count, task_template, task_templates = task_rows(prefix, location.get("cockpit_tasks", []))
             order_html, order_count, order_template = order_rows(prefix, location.get("cockpit_orders", []))
+            info_html, info_count, info_template = info_rows(prefix, location.get("cockpit_infos", []))
             production_html, production_count, production_template = production_rows(prefix, location.get("production_jobs", []))
             order_section = f"""
                     <details class="category-panel cockpit-admin-panel">
@@ -4454,6 +4535,13 @@ class App(BaseHTTPRequestHandler):
                         {task_templates}
                     </details>
                     {order_section}
+                    <details class="category-panel cockpit-admin-panel">
+                        <summary>Info <span>{info_count}</span></summary>
+                        <input type="hidden" id="{prefix}_info_count" name="{prefix}_info_count" value="{info_count}">
+                        <div id="{prefix}_info_rows" class="cockpit-admin-rows" data-template-id="{prefix}_info_template" data-count-id="{prefix}_info_count">{info_html}</div>
+                        {info_template}
+                        <button class="button add-cockpit-row" type="button" data-target="{prefix}_info_rows">Info hinzufügen</button>
+                    </details>
                     {production_section}
                 </details>
                 """
@@ -5565,6 +5653,30 @@ class App(BaseHTTPRequestHandler):
             })
         return normalize_cockpit_orders(items)
 
+    def collect_cockpit_infos(self, form, prefix):
+        try:
+            count = int(self.form_value(form, f"{prefix}_info_count", "0") or "0")
+        except ValueError:
+            count = 0
+        items = []
+        for row_index in range(count):
+            title = self.form_value(form, f"{prefix}_info_title_{row_index}").strip()
+            text = self.form_value(form, f"{prefix}_info_text_{row_index}").strip()
+            if not title and not text:
+                continue
+            items.append({
+                "id": self.form_value(form, f"{prefix}_info_id_{row_index}").strip(),
+                "title": title,
+                "text": text,
+                "active": bool(self.form_value(form, f"{prefix}_info_active_{row_index}")),
+                "image_filename": self.save_cockpit_image_upload(
+                    form,
+                    f"{prefix}_info_image_{row_index}",
+                    self.form_value(form, f"{prefix}_info_image_current_{row_index}").strip(),
+                ),
+            })
+        return normalize_cockpit_infos(items)
+
 
     def save_cockpit_image_upload(self, form, field_name, current_filename=""):
         current_filename = os.path.basename(str(current_filename or "").strip())
@@ -5634,6 +5746,7 @@ class App(BaseHTTPRequestHandler):
             updated = dict(location)
             updated["cockpit_tasks"] = self.collect_cockpit_tasks(form, prefix)
             updated["cockpit_orders"] = self.collect_cockpit_orders(form, prefix)
+            updated["cockpit_infos"] = self.collect_cockpit_infos(form, prefix)
             updated["production_jobs"] = self.collect_production_jobs(form, prefix)
             updated_locations.append(updated)
         updated_by_id = {location["id"]: location for location in updated_locations}
@@ -5681,6 +5794,7 @@ class App(BaseHTTPRequestHandler):
                     "min_stock_items": self.collect_min_stock_items(form, f"location_min_stock_{index}"),
                     "cockpit_tasks": existing_location.get("cockpit_tasks", []),
                     "cockpit_orders": existing_location.get("cockpit_orders", []),
+                    "cockpit_infos": existing_location.get("cockpit_infos", []),
                     "production_jobs": existing_location.get("production_jobs", []),
                 }
             )
@@ -5707,6 +5821,7 @@ class App(BaseHTTPRequestHandler):
                     "min_stock_items": self.collect_min_stock_items(form, "new_location_min_stock"),
                     "cockpit_tasks": [],
                     "cockpit_orders": [],
+                    "cockpit_infos": [],
                     "production_jobs": [],
                 }
             )

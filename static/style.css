@@ -1340,6 +1340,31 @@ tr:hover td { background: var(--primary-soft); }
   color: #fff;
   border-color: var(--primary);
 }
+.cockpit-info-panel {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+.cockpit-info-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  box-shadow: var(--shadow-tiny);
+}
+.cockpit-info-card strong {
+  color: var(--primary);
+  font-size: 16px;
+}
+.cockpit-info-card p {
+  margin: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.cockpit-admin-info-row {
+  grid-template-columns: minmax(180px, .9fr) minmax(240px, 1.4fr) minmax(180px, .8fr) auto auto;
+}
 .task-complete-modal {
   position: fixed;
   inset: 0;
@@ -1507,7 +1532,8 @@ tr:hover td { background: var(--primary-soft); }
   .cockpit-grid { grid-template-columns: 1fr; }
   .cockpit-admin-row,
   .cockpit-admin-order-row,
-  .cockpit-admin-production-row { grid-template-columns: 1fr; }
+  .cockpit-admin-production-row,
+  .cockpit-admin-info-row { grid-template-columns: 1fr; }
   .cockpit-order-actions { grid-template-columns: 1fr; }
   .production-week { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .production-subgrid { grid-template-columns: 1fr; }
@@ -1799,7 +1825,7 @@ tr:hover td { background: var(--primary-soft); }
   .min-stock-row { grid-template-columns: 1fr; padding: 10px; }
   .cockpit-hero { align-items: stretch; }
   .cockpit-actions, .cockpit-actions .button { width: 100%; }
-  .cockpit-item, .cockpit-order { padding: 10px; }
+  .cockpit-item, .cockpit-order, .cockpit-info-card { padding: 10px; }
   .cockpit-admin-row { padding: 10px; }
   .min-stock-info { padding: 11px; }
   .min-stock-info-grid { grid-template-columns: 1fr; }
