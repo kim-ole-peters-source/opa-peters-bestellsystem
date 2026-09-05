@@ -253,6 +253,28 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
 .admin-menu .admin-nav-orders:hover { background: #0369a1; }
 .admin-menu .admin-nav-people:hover { background: #15803d; }
 .admin-menu .admin-nav-system:hover { background: #475569; }
+.admin-menu .button.logout-button,
+.admin-menu .button.logout-button.admin-nav-system,
+.admin-mobile-links .button.logout-button,
+.admin-mobile-links .button.logout-button.admin-nav-system,
+nav a[href="/logout"],
+nav a[href="/admin/logout"],
+.logout-button {
+  background: #b3362b;
+  color: #ffffff;
+  border-color: #b3362b;
+}
+.admin-menu .button.logout-button:hover,
+.admin-menu .button.logout-button.admin-nav-system:hover,
+.admin-mobile-links .button.logout-button:hover,
+.admin-mobile-links .button.logout-button.admin-nav-system:hover,
+nav a[href="/logout"]:hover,
+nav a[href="/admin/logout"]:hover,
+.logout-button:hover {
+  background: #8f261e;
+  color: #ffffff;
+  border-color: #8f261e;
+}
 .nav-icon {
   display: inline-grid;
   place-items: center;
@@ -291,6 +313,7 @@ main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; 
 .admin-mobile-links .admin-nav-orders { background: #075985; }
 .admin-mobile-links .admin-nav-people { background: #166534; }
 .admin-mobile-links .admin-nav-system { background: #334155; }
+.admin-mobile-links .logout-button.admin-nav-system { background: #b3362b; color: #ffffff; }
 
 .stats {
   display: grid;
@@ -561,6 +584,24 @@ button:active, .button:active { transform: translateY(1px); }
   background: var(--red-bg);
 }
 .danger:hover, .logout-button:hover { background: #fbdcd8; border-color: #ef9c92; }
+.logout-button,
+nav a[href="/logout"],
+nav a[href="/admin/logout"],
+.admin-menu .button.logout-button,
+.admin-mobile-links .button.logout-button {
+  background: #b3362b;
+  color: #ffffff;
+  border-color: #b3362b;
+}
+.logout-button:hover,
+nav a[href="/logout"]:hover,
+nav a[href="/admin/logout"]:hover,
+.admin-menu .button.logout-button:hover,
+.admin-mobile-links .button.logout-button:hover {
+  background: #8f261e;
+  color: #ffffff;
+  border-color: #8f261e;
+}
 
 .install-app {
   position: fixed;
@@ -1192,19 +1233,31 @@ tr:hover td { background: var(--primary-soft); }
 .new-location-panel summary span { background: rgba(255, 255, 255, .16); color: #fff; }
 .min-stock-info {
   display: grid; gap: 8px; margin-top: 12px; padding: 8px; border: 1px solid #b9d7c4; border-radius: var(--radius-md);
-  background: rgba(232, 247, 238, .72);
+  background: #e8f7ee;
+  color: var(--text);
   box-shadow: var(--shadow-tiny);
 }
 .min-stock-info summary {
   min-height: 44px;
   padding: 8px 10px;
   border-radius: 12px;
-  background: #fff;
+  background: #ffffff;
+  color: var(--green-text);
+  border: 1px solid #9ad6b5;
 }
-.min-stock-info .muted { margin: 2px 8px 0; font-size: 13px; }
+.min-stock-info summary::before {
+  color: var(--green-text);
+}
+.min-stock-info summary span {
+  background: var(--green-bg);
+  color: var(--green-text);
+  border-color: #9ad6b5;
+}
+.min-stock-info .muted { margin: 2px 8px 0; font-size: 13px; color: #315f46; }
 .min-stock-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; padding: 2px 2px 4px; }
 .min-stock-info-card {
-  display: grid; gap: 3px; padding: 9px 10px; border-radius: 12px; border: 1px solid #c6e3d0; background: #fff;
+  display: grid; gap: 3px; padding: 9px 10px; border-radius: 12px; border: 1px solid #9ad6b5; background: #fff;
+  color: var(--text);
 }
 .min-stock-info-card strong { color: var(--text); font-size: 14px; }
 .min-stock-info-card span, .min-stock-info-card small { color: var(--muted); font-weight: 700; font-size: 12px; }

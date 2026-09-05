@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-08-29-admin-dashboard-polish"
+ASSET_VERSION = "2026-09-05-cockpit-orders-visible"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2925,7 +2925,7 @@ class App(BaseHTTPRequestHandler):
             if info.get("state") == "done" and not cockpit_state_is_from_today(info):
                 continue
             tasks.append(task)
-        cockpit_orders = [] if (is_production_location(location) or is_schwarzenbek_location(location)) else [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
+        cockpit_orders = [] if is_production_location(location) else [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
         task_cards = []
         for task in tasks:
             info = state_details.get(("task", task["id"]), {})
@@ -2945,7 +2945,43 @@ class App(BaseHTTPRequestHandler):
             )
         order_section = ""
         order_cards = []
+        def cockpit_order_card(item):
+            state = states.get(("order", item["id"]), "open")
+            image = f'<img class="cockpit-thumb" src="/uploads/{esc(item["image_filename"])}" alt="">' if item.get("image_filename") else ""
+            state_label = {
+                "paid_picked": "bezahlt & abgeholt",
+                "picked_invoice": "abgeholt & Rechnungsstellung",
+            }.get(state, "offen")
+            return f"""
+            <article class="cockpit-order {'is-done' if state != 'open' else ''}">
+                <div>
+                    {image}
+                    <strong>{esc(item['title'])}</strong>
+                    {f'<p>{esc(item["note"])}</p>' if item.get("note") else ''}
+                    <span class="cockpit-state">{esc(state_label)}</span>
+                </div>
+                <div class="cockpit-order-actions">
+                    <form method="post" action="/cockpit/order-state">
+                        <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                        <input type="hidden" name="state" value="paid_picked">
+                        <button class="button" type="submit">bezahlt & abgeholt</button>
+                    </form>
+                    <form method="post" action="/cockpit/order-state">
+                        <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                        <input type="hidden" name="state" value="picked_invoice">
+                        <button class="button" type="submit">abgeholt & Rechnungsstellung</button>
+                    </form>
+                    <form method="post" action="/cockpit/order-state">
+                        <input type="hidden" name="order_id" value="{esc(item['id'])}">
+                        <input type="hidden" name="state" value="open">
+                        <button class="button" type="submit">zurücksetzen</button>
+                    </form>
+                </div>
+            </article>
+            """
         if is_schwarzenbek_location(location):
+            for item in cockpit_orders:
+                order_cards.append(cockpit_order_card(item))
             today_iso = berlin_now().date().strftime("%Y-%m-%d")
             production_states = {}
             for source_location in get_locations():
@@ -2977,47 +3013,13 @@ class App(BaseHTTPRequestHandler):
                 )
             order_section = f"""
             <section class="box cockpit-panel">
-                <div class="section-head"><div><h2>Bestellungen</h2><p class="muted">Heute fällige Eisvitrinen und Eistorten aus der Produktion.</p></div><span class="pill">{len(today_jobs)}</span></div>
-                <div class="cockpit-list">{''.join(order_cards) if order_cards else '<p class="muted">Für heute sind keine Eisvitrinen oder Eistorten hinterlegt.</p>'}</div>
+                <div class="section-head"><div><h2>Bestellungen</h2><p class="muted">Hinterlegte Bestellungen und heute fällige Eisvitrinen/Eistorten.</p></div><span class="pill">{len(order_cards)}</span></div>
+                <div class="cockpit-list">{''.join(order_cards) if order_cards else '<p class="muted">Für diesen Standort sind aktuell keine Bestellungen hinterlegt.</p>'}</div>
             </section>
             """
         elif cockpit_orders:
             for item in cockpit_orders:
-                state = states.get(("order", item["id"]), "open")
-                image = f'<img class="cockpit-thumb" src="/uploads/{esc(item["image_filename"])}" alt="">' if item.get("image_filename") else ""
-                state_label = {
-                    "paid_picked": "bezahlt & abgeholt",
-                    "picked_invoice": "abgeholt & Rechnungsstellung",
-                }.get(state, "offen")
-                order_cards.append(
-                    f"""
-                    <article class="cockpit-order {'is-done' if state != 'open' else ''}">
-                        <div>
-                            {image}
-                            <strong>{esc(item['title'])}</strong>
-                            {f'<p>{esc(item["note"])}</p>' if item.get("note") else ''}
-                            <span class="cockpit-state">{esc(state_label)}</span>
-                        </div>
-                        <div class="cockpit-order-actions">
-                            <form method="post" action="/cockpit/order-state">
-                                <input type="hidden" name="order_id" value="{esc(item['id'])}">
-                                <input type="hidden" name="state" value="paid_picked">
-                                <button class="button" type="submit">bezahlt & abgeholt</button>
-                            </form>
-                            <form method="post" action="/cockpit/order-state">
-                                <input type="hidden" name="order_id" value="{esc(item['id'])}">
-                                <input type="hidden" name="state" value="picked_invoice">
-                                <button class="button" type="submit">abgeholt & Rechnungsstellung</button>
-                            </form>
-                            <form method="post" action="/cockpit/order-state">
-                                <input type="hidden" name="order_id" value="{esc(item['id'])}">
-                                <input type="hidden" name="state" value="open">
-                                <button class="button" type="submit">zurücksetzen</button>
-                            </form>
-                        </div>
-                    </article>
-                    """
-                )
+                order_cards.append(cockpit_order_card(item))
             order_section = f"""
             <section class="box cockpit-panel">
                 <div class="section-head"><div><h2>Bestellungen</h2><p class="muted">Status für hinterlegte Bestellinformationen setzen.</p></div><span class="pill">{len(cockpit_orders)}</span></div>
