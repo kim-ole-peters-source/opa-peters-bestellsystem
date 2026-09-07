@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v50-messages-invoices';
+const CACHE_NAME = 'opa-peters-bestellung-v51-message-select-scroll';
 const STATIC_ASSETS = [
   '/',
   '/login',

@@ -337,9 +337,65 @@ nav a[href="/admin/logout"]:hover,
   gap: 16px;
   align-items: start;
 }
+.message-layout-single {
+  grid-template-columns: minmax(0, 1fr);
+}
 .message-compose {
   display: grid;
   gap: 12px;
+}
+.message-select-modal {
+  position: static;
+  min-height: min(720px, calc(100dvh - 180px));
+  background: transparent;
+  padding: 0;
+}
+.message-select-card {
+  width: min(560px, 100%);
+}
+.message-unread-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-md);
+  background: #fff1f2;
+}
+.message-unread-box div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.message-unread-box span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 800;
+}
+.message-unread-box b {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #ffffff;
+}
+.message-person-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.message-person-button {
+  justify-content: center;
+  min-height: 58px;
+  font-size: 16px;
+  font-weight: 850;
 }
 .message-thread-list,
 .chat-list {

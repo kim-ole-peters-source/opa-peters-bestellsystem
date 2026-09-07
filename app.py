@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-07-messages-invoices"
+ASSET_VERSION = "2026-09-07-message-select-scroll"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1693,6 +1693,13 @@ def count_unread_messages(for_role, location_id=""):
     return int(row["count"] or 0) if row else 0
 
 
+def unread_message_recipients(location_id):
+    return [
+        thread for thread in cockpit_message_threads(location_id)
+        if int(thread.get("unread_location") or 0) > 0
+    ]
+
+
 def cockpit_message_threads(location_id=""):
     con = db()
     if location_id:
@@ -2601,7 +2608,7 @@ def page(title, body, admin=False, buyer_key=None):
             nav_links.append('<a href="/time">Zeiterfassung</a>')
         unread_messages = count_unread_messages("location", buyer_key)
         message_dot = '<span class="nav-dot" aria-label="Neue Nachrichten"></span>' if unread_messages else ""
-        nav_links.append(f'<a class="nav-with-dot" href="/messages">Nachrichten{message_dot}</a>')
+        nav_links.append(f'<a class="nav-with-dot" href="/messages/select">Nachrichten{message_dot}</a>')
         nav_links.append('<a href="/logout">Logout</a>')
         nav = "".join(nav_links)
     else:
@@ -2921,6 +2928,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_order_form(query=parse_qs(parsed.query))
         if path == "/cockpit":
             return self.show_location_cockpit(query=parse_qs(parsed.query))
+        if path == "/messages/select":
+            return self.show_location_message_select(query=parse_qs(parsed.query))
         if path == "/messages":
             return self.show_location_messages(query=parse_qs(parsed.query))
         if path == "/choose":
@@ -3366,6 +3375,39 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Cockpit", body, buyer_key=buyer_key))
 
+    def show_location_message_select(self, query=None):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        employees = get_time_employee_names(True)
+        unread_threads = unread_message_recipients(buyer_key)
+        unread_names = [
+            f"<span>{esc(thread['recipient_name'])} <b>{int(thread.get('unread_location') or 0)}</b></span>"
+            for thread in unread_threads
+        ]
+        employee_buttons = [
+            f'<a class="button message-person-button" href="/messages?recipient={quote_plus(name)}#messageChat">{esc(name)}</a>'
+            for name in employees
+        ]
+        body = f"""
+        <div class="task-complete-modal message-select-modal">
+            <div class="task-complete-card message-select-card">
+                <h2>Wer möchte Nachrichten öffnen?</h2>
+                <p class="muted">Bitte wähle zuerst den Namen aus. Danach werden nur die Nachrichten dieser Person angezeigt.</p>
+                <div class="message-unread-box">
+                    <strong>Ungelesene Nachrichten</strong>
+                    <div>{''.join(unread_names) if unread_names else '<span>Keine ungelesenen Nachrichten.</span>'}</div>
+                </div>
+                <div class="message-person-grid">{''.join(employee_buttons) if employee_buttons else '<p class="error">Es sind noch keine Personen angelegt.</p>'}</div>
+                <a class="button" href="/cockpit">Zurück zum Cockpit</a>
+            </div>
+        </div>
+        """
+        self.send_html(page("Nachrichten auswählen", body, buyer_key=buyer_key))
+
     def show_location_messages(self, query=None):
         buyer_key = self.current_buyer_key()
         if not buyer_key:
@@ -3378,25 +3420,9 @@ class App(BaseHTTPRequestHandler):
         error = (query.get("error", [""])[0] or "").strip()
         selected_recipient = (query.get("recipient", [""])[0] or "").strip()
         employees = get_time_employee_names(True)
-        recipient_options = '<option value="">Bitte auswählen</option>' + option_html(employees, selected_recipient)
-        threads = cockpit_message_threads(buyer_key)
-        if not selected_recipient and threads:
-            selected_recipient = threads[0]["recipient_name"]
-        messages = get_cockpit_messages(buyer_key, selected_recipient, mark_read_for="location") if selected_recipient else []
-        threads = cockpit_message_threads(buyer_key)
-        thread_rows = []
-        for thread in threads:
-            active = normalize_text_key(thread["recipient_name"]) == normalize_text_key(selected_recipient)
-            unread = thread["unread_location"] > 0
-            thread_rows.append(
-                f"""
-                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/messages?recipient={quote_plus(thread['recipient_name'])}">
-                    <strong>{esc(thread['recipient_name'])}</strong>
-                    <span>{esc(thread['last_created_at'])}</span>
-                    {f'<i>{thread["unread_location"]}</i>' if unread else ''}
-                </a>
-                """
-            )
+        if not selected_recipient or selected_recipient not in employees:
+            return self.redirect("/messages/select")
+        messages = get_cockpit_messages(buyer_key, selected_recipient, mark_read_for="location")
         chat_rows = []
         for message in messages:
             own = message["sender_role"] == "location"
@@ -3412,7 +3438,7 @@ class App(BaseHTTPRequestHandler):
         reply_form = ""
         if selected_recipient:
             reply_form = f"""
-            <form method="post" action="/messages/send" class="message-compose">
+            <form method="post" action="/messages/send" class="message-compose" data-preserve-scroll>
                 <input type="hidden" name="recipient_name" value="{esc(selected_recipient)}">
                 <label>Nachricht<textarea name="message" rows="4" required placeholder="Nachricht schreiben"></textarea></label>
                 <button class="primary" type="submit">Senden</button>
@@ -3423,23 +3449,17 @@ class App(BaseHTTPRequestHandler):
         {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
         <section class="box">
             <div class="section-head">
-                <div><h2>Nachrichten</h2><p class="muted">Austausch zwischen Standort und Backend.</p></div>
-                <a class="button" href="/cockpit">Zurück zum Cockpit</a>
+                <div><h2>Nachrichten für {esc(selected_recipient)}</h2><p class="muted">Hier werden nur Nachrichten von oder für diese Person angezeigt.</p></div>
+                <div class="table-actions">
+                    <a class="button" href="/messages/select">Person wechseln</a>
+                    <a class="button" href="/cockpit">Zurück zum Cockpit</a>
+                </div>
             </div>
-            <form method="post" action="/messages/send" class="message-compose">
-                <label>Für wen ist die Nachricht?<select name="recipient_name" required>{recipient_options}</select></label>
-                <label>Neue Nachricht<textarea name="message" rows="4" required placeholder="Nachricht schreiben"></textarea></label>
-                <button class="primary" type="submit">Nachricht senden</button>
-            </form>
         </section>
-        <section class="message-layout">
-            <div class="box message-inbox">
-                <h2>Inbox</h2>
-                <div class="message-thread-list">{''.join(thread_rows) if thread_rows else '<p class="muted">Noch keine Nachrichten.</p>'}</div>
-            </div>
+        <section class="message-layout message-layout-single" id="messageChat">
             <div class="box message-chat">
                 <h2>{esc(selected_recipient) if selected_recipient else 'Chat'}</h2>
-                <div class="chat-list">{''.join(chat_rows) if chat_rows else '<p class="muted">Wähle einen Namen aus oder schreibe eine neue Nachricht.</p>'}</div>
+                <div class="chat-list">{''.join(chat_rows) if chat_rows else '<p class="muted">Noch keine Nachrichten für diese Person.</p>'}</div>
                 {reply_form}
             </div>
         </section>
@@ -3471,7 +3491,7 @@ class App(BaseHTTPRequestHandler):
             unread = thread["unread_admin"] > 0
             thread_rows.append(
                 f"""
-                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/admin/messages?location={quote_plus(thread['location_id'])}&recipient={quote_plus(thread['recipient_name'])}">
+                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/admin/messages?location={quote_plus(thread['location_id'])}&recipient={quote_plus(thread['recipient_name'])}" data-preserve-scroll>
                     <strong>{esc(thread['recipient_name'])}</strong>
                     <span>{esc(thread['location_name'])} · {esc(thread['last_created_at'])}</span>
                     {f'<i>{thread["unread_admin"]}</i>' if unread else ''}
@@ -3493,7 +3513,7 @@ class App(BaseHTTPRequestHandler):
         reply_form = ""
         if selected_location and selected_recipient:
             reply_form = f"""
-            <form method="post" action="/admin/messages/reply" class="message-compose">
+            <form method="post" action="/admin/messages/reply" class="message-compose" data-preserve-scroll>
                 <input type="hidden" name="location_id" value="{esc(selected_location)}">
                 <input type="hidden" name="recipient_name" value="{esc(selected_recipient)}">
                 <label>Antwort<textarea name="message" rows="4" required placeholder="Antwort schreiben"></textarea></label>
@@ -3508,14 +3528,14 @@ class App(BaseHTTPRequestHandler):
             <div class="section-head">
                 <div><h2>Nachrichten</h2><p class="muted">Hier siehst du alle Nachrichten aus den Standorten und kannst direkt antworten.</p></div>
             </div>
-            <form method="post" action="/admin/messages/reply" class="message-compose two">
+            <form method="post" action="/admin/messages/reply" class="message-compose two" data-preserve-scroll>
                 <label>Standort<select name="location_id" required>{location_options}</select></label>
                 <label>Teammitglied<select name="recipient_name" required>{employee_options}</select></label>
                 <label class="full">Neue Nachricht<textarea name="message" rows="3" required placeholder="Nachricht schreiben"></textarea></label>
                 <button class="primary" type="submit">Nachricht senden</button>
             </form>
         </section>
-        <section class="message-layout">
+        <section class="message-layout" id="messageChat">
             <div class="box message-inbox">
                 <h2>Inbox</h2>
                 <div class="message-thread-list">{''.join(thread_rows) if thread_rows else '<p class="muted">Noch keine Nachrichten.</p>'}</div>
@@ -5435,7 +5455,7 @@ class App(BaseHTTPRequestHandler):
         recipient_name = self.form_value(form, "recipient_name").strip()
         message = self.form_value(form, "message").strip()
         if recipient_name not in get_time_employee_names(True):
-            return self.redirect("/messages?error=" + quote_plus("Bitte einen Namen aus dem Team auswählen."))
+            return self.redirect("/messages/select")
         if not message:
             return self.redirect("/messages?recipient=" + quote_plus(recipient_name) + "&error=" + quote_plus("Bitte eine Nachricht eingeben."))
         create_cockpit_message(location["id"], recipient_name, "location", location["name"], message)

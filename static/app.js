@@ -95,6 +95,33 @@
     });
   }
 
+  var preserveScrollKey = 'opaPetersScroll:' + window.location.pathname;
+  function rememberScrollPosition() {
+    try {
+      sessionStorage.setItem(preserveScrollKey, String(window.pageYOffset || document.documentElement.scrollTop || 0));
+    } catch (error) {}
+  }
+  function restoreScrollPosition() {
+    if (window.location.hash) return;
+    try {
+      var value = sessionStorage.getItem(preserveScrollKey);
+      if (!value) return;
+      sessionStorage.removeItem(preserveScrollKey);
+      window.setTimeout(function () {
+        window.scrollTo(0, Math.max(0, parseInt(value, 10) || 0));
+      }, 80);
+    } catch (error) {}
+  }
+  window.addEventListener('load', restoreScrollPosition);
+  document.addEventListener('click', function (event) {
+    var target = event.target.closest ? event.target.closest('[data-preserve-scroll]') : null;
+    if (target) rememberScrollPosition();
+  });
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (form && form.getAttribute && form.getAttribute('data-preserve-scroll') !== null) rememberScrollPosition();
+  });
+
   var serviceWorkerReady = null;
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
