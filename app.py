@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-05-cockpit-info"
+ASSET_VERSION = "2026-09-07-messages-invoices"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -400,6 +400,10 @@ def normalize_cockpit_infos(raw_infos):
             "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
         })
     return normalized
+
+
+def message_thread_key(location_id, recipient_name):
+    return f"{normalize_text_key(location_id)}:{normalize_text_key(recipient_name)}"
 
 
 def is_valid_iso_date(value):
@@ -780,6 +784,22 @@ def init_db():
         )
     """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cockpit_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_id TEXT NOT NULL,
+            location_name TEXT NOT NULL,
+            recipient_name TEXT NOT NULL,
+            sender_role TEXT NOT NULL,
+            sender_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            read_by_admin_at TEXT,
+            read_by_location_at TEXT,
+            created_at TEXT NOT NULL
+        )
+    """
+    )
 
     # Migration für ältere ZIP-Versionen / bestehende lokale Datenbanken
     add_column_if_missing(con, "products", "category", "TEXT NOT NULL DEFAULT 'Allgemein'")
@@ -797,6 +817,8 @@ def init_db():
     add_column_if_missing(con, "cockpit_item_states", "completed_by", "TEXT")
     add_column_if_missing(con, "time_entries", "updated_at", "TEXT")
     add_column_if_missing(con, "time_entries", "edited", "INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(con, "cockpit_messages", "read_by_admin_at", "TEXT")
+    add_column_if_missing(con, "cockpit_messages", "read_by_location_at", "TEXT")
 
     cur.execute("UPDATE products SET category='Allgemein' WHERE category IS NULL OR TRIM(category)=''")
     cur.execute("UPDATE products SET visible_to=? WHERE visible_to IS NULL OR TRIM(visible_to)=''", (DEFAULT_VISIBLE_TO,))
@@ -1621,6 +1643,127 @@ def set_cockpit_state(location_id, item_type, item_id, state, completed_by=""):
     con.commit()
     con.close()
     return True
+
+
+def create_cockpit_message(location_id, recipient_name, sender_role, sender_name, message):
+    location = find_location(location_id)
+    recipient_name = (recipient_name or "").strip()
+    sender_role = "admin" if sender_role == "admin" else "location"
+    sender_name = (sender_name or "").strip() or ("Admin" if sender_role == "admin" else (location or {}).get("name", "Standort"))
+    message = (message or "").strip()
+    if not location or not recipient_name or not message:
+        return False
+    now = berlin_now().strftime("%d.%m.%Y %H:%M")
+    con = db()
+    con.execute(
+        """
+        INSERT INTO cockpit_messages (
+            location_id, location_name, recipient_name, sender_role, sender_name,
+            message, read_by_admin_at, read_by_location_at, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            location["id"],
+            location["name"],
+            recipient_name[:120],
+            sender_role,
+            sender_name[:120],
+            message[:2000],
+            now if sender_role == "admin" else None,
+            now if sender_role == "location" else None,
+            now,
+        ),
+    )
+    con.commit()
+    con.close()
+    return True
+
+
+def count_unread_messages(for_role, location_id=""):
+    con = db()
+    if for_role == "admin":
+        row = con.execute("SELECT COUNT(*) AS count FROM cockpit_messages WHERE sender_role='location' AND read_by_admin_at IS NULL").fetchone()
+    else:
+        row = con.execute(
+            "SELECT COUNT(*) AS count FROM cockpit_messages WHERE location_id=? AND sender_role='admin' AND read_by_location_at IS NULL",
+            (location_id,),
+        ).fetchone()
+    con.close()
+    return int(row["count"] or 0) if row else 0
+
+
+def cockpit_message_threads(location_id=""):
+    con = db()
+    if location_id:
+        rows = con.execute(
+            "SELECT * FROM cockpit_messages WHERE location_id=? ORDER BY id DESC",
+            (location_id,),
+        ).fetchall()
+    else:
+        rows = con.execute("SELECT * FROM cockpit_messages ORDER BY id DESC").fetchall()
+    con.close()
+    threads = {}
+    for row in rows:
+        key = message_thread_key(row["location_id"], row["recipient_name"])
+        entry = threads.setdefault(
+            key,
+            {
+                "location_id": row["location_id"],
+                "location_name": row["location_name"],
+                "recipient_name": row["recipient_name"],
+                "last_created_at": row["created_at"],
+                "last_message": row["message"],
+                "count": 0,
+                "unread_admin": 0,
+                "unread_location": 0,
+            },
+        )
+        entry["count"] += 1
+        if row["sender_role"] == "location" and not row["read_by_admin_at"]:
+            entry["unread_admin"] += 1
+        if row["sender_role"] == "admin" and not row["read_by_location_at"]:
+            entry["unread_location"] += 1
+    return sorted(threads.values(), key=lambda item: item["last_created_at"], reverse=True)
+
+
+def get_cockpit_messages(location_id, recipient_name, mark_read_for=""):
+    location_id = (location_id or "").strip()
+    recipient_name = (recipient_name or "").strip()
+    if not location_id or not recipient_name:
+        return []
+    con = db()
+    if mark_read_for in ["admin", "location"]:
+        column = "read_by_admin_at" if mark_read_for == "admin" else "read_by_location_at"
+        sender = "location" if mark_read_for == "admin" else "admin"
+        con.execute(
+            f"UPDATE cockpit_messages SET {column}=? WHERE location_id=? AND recipient_name=? COLLATE NOCASE AND sender_role=? AND {column} IS NULL",
+            (berlin_now().strftime("%d.%m.%Y %H:%M"), location_id, recipient_name, sender),
+        )
+        con.commit()
+    rows = con.execute(
+        "SELECT * FROM cockpit_messages WHERE location_id=? AND recipient_name=? COLLATE NOCASE ORDER BY id",
+        (location_id, recipient_name),
+    ).fetchall()
+    con.close()
+    return rows
+
+
+def cockpit_invoice_orders():
+    invoice_rows = []
+    for location in get_locations():
+        if is_production_location(location):
+            continue
+        states = get_cockpit_state_details(location["id"])
+        for item in normalize_cockpit_orders(location.get("cockpit_orders", [])):
+            info = states.get(("order", item["id"]), {})
+            if item.get("active") and info.get("state") == "picked_invoice":
+                invoice_rows.append({
+                    "location": location,
+                    "item": item,
+                    "updated_at": info.get("updated_at", ""),
+                })
+    return sorted(invoice_rows, key=lambda row: (row["location"]["name"].lower(), row["updated_at"], row["item"]["title"].lower()))
 
 
 def get_order_by_pdf_filename(pdf_filename):
@@ -2456,6 +2599,9 @@ def page(title, body, admin=False, buyer_key=None):
             nav_links.append('<a href="/">Shop</a>')
         if location_can_time(location):
             nav_links.append('<a href="/time">Zeiterfassung</a>')
+        unread_messages = count_unread_messages("location", buyer_key)
+        message_dot = '<span class="nav-dot" aria-label="Neue Nachrichten"></span>' if unread_messages else ""
+        nav_links.append(f'<a class="nav-with-dot" href="/messages">Nachrichten{message_dot}</a>')
         nav_links.append('<a href="/logout">Logout</a>')
         nav = "".join(nav_links)
     else:
@@ -2500,6 +2646,10 @@ def page(title, body, admin=False, buyer_key=None):
 
 
 def admin_menu():
+    unread_messages = count_unread_messages("admin")
+    open_orders = len([order for order in get_orders() if not order["completed_at"]])
+    def badge(count):
+        return f'<span class="nav-dot" aria-label="{count} neu"></span>' if count else ""
     groups = [
         ("Sortiment", "shop", [
             ("/admin", "Produkte", "P"),
@@ -2508,8 +2658,9 @@ def admin_menu():
             ("/admin/visibility", "Sichtbarkeit", "V"),
         ]),
         ("Bestellung & Cockpit", "orders", [
-            ("/admin/orders", "Bestellungen", "B"),
+            ("/admin/orders", f"Bestellungen{badge(open_orders)}", "B"),
             ("/admin/cockpit-content", "Aufträge & Aufgaben", "A"),
+            ("/admin/messages", f"Nachrichten{badge(unread_messages)}", "N"),
         ]),
         ("Personal", "people", [
             ("/admin/time", "Zeiterfassung", "Z"),
@@ -2770,6 +2921,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_order_form(query=parse_qs(parsed.query))
         if path == "/cockpit":
             return self.show_location_cockpit(query=parse_qs(parsed.query))
+        if path == "/messages":
+            return self.show_location_messages(query=parse_qs(parsed.query))
         if path == "/choose":
             return self.show_buyer_choice()
         if path == "/time":
@@ -2798,6 +2951,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_admin_orders(query=parse_qs(parsed.query))
         if path == "/admin/cockpit-content":
             return self.show_admin_cockpit_content(query=parse_qs(parsed.query))
+        if path == "/admin/messages":
+            return self.show_admin_messages(query=parse_qs(parsed.query))
         if path == "/pdf-viewer":
             return self.show_pdf_viewer(query=parse_qs(parsed.query))
         if path == "/admin/time":
@@ -2953,7 +3108,15 @@ class App(BaseHTTPRequestHandler):
                 continue
             tasks.append(task)
         cockpit_infos = [item for item in normalize_cockpit_infos(location.get("cockpit_infos", [])) if item.get("active")]
-        cockpit_orders = [] if is_production_location(location) else [item for item in normalize_cockpit_orders(location.get("cockpit_orders", [])) if item.get("active")]
+        cockpit_orders = []
+        if not is_production_location(location):
+            for item in normalize_cockpit_orders(location.get("cockpit_orders", [])):
+                if not item.get("active"):
+                    continue
+                state_info = state_details.get(("order", item["id"]), {})
+                if state_info.get("state") == "paid_picked" and not cockpit_state_is_from_today(state_info):
+                    continue
+                cockpit_orders.append(item)
         task_cards = []
         for task in tasks:
             info = state_details.get(("task", task["id"]), {})
@@ -3202,6 +3365,169 @@ class App(BaseHTTPRequestHandler):
         {production_section}
         """
         self.send_html(page("Cockpit", body, buyer_key=buyer_key))
+
+    def show_location_messages(self, query=None):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        selected_recipient = (query.get("recipient", [""])[0] or "").strip()
+        employees = get_time_employee_names(True)
+        recipient_options = '<option value="">Bitte auswählen</option>' + option_html(employees, selected_recipient)
+        threads = cockpit_message_threads(buyer_key)
+        if not selected_recipient and threads:
+            selected_recipient = threads[0]["recipient_name"]
+        messages = get_cockpit_messages(buyer_key, selected_recipient, mark_read_for="location") if selected_recipient else []
+        threads = cockpit_message_threads(buyer_key)
+        thread_rows = []
+        for thread in threads:
+            active = normalize_text_key(thread["recipient_name"]) == normalize_text_key(selected_recipient)
+            unread = thread["unread_location"] > 0
+            thread_rows.append(
+                f"""
+                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/messages?recipient={quote_plus(thread['recipient_name'])}">
+                    <strong>{esc(thread['recipient_name'])}</strong>
+                    <span>{esc(thread['last_created_at'])}</span>
+                    {f'<i>{thread["unread_location"]}</i>' if unread else ''}
+                </a>
+                """
+            )
+        chat_rows = []
+        for message in messages:
+            own = message["sender_role"] == "location"
+            chat_rows.append(
+                f"""
+                <article class="chat-message {'own' if own else 'other'}">
+                    <strong>{esc(message['sender_name'])}</strong>
+                    <p>{esc(message['message'])}</p>
+                    <span>{esc(message['created_at'])}</span>
+                </article>
+                """
+            )
+        reply_form = ""
+        if selected_recipient:
+            reply_form = f"""
+            <form method="post" action="/messages/send" class="message-compose">
+                <input type="hidden" name="recipient_name" value="{esc(selected_recipient)}">
+                <label>Nachricht<textarea name="message" rows="4" required placeholder="Nachricht schreiben"></textarea></label>
+                <button class="primary" type="submit">Senden</button>
+            </form>
+            """
+        body = f"""
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        <section class="box">
+            <div class="section-head">
+                <div><h2>Nachrichten</h2><p class="muted">Austausch zwischen Standort und Backend.</p></div>
+                <a class="button" href="/cockpit">Zurück zum Cockpit</a>
+            </div>
+            <form method="post" action="/messages/send" class="message-compose">
+                <label>Für wen ist die Nachricht?<select name="recipient_name" required>{recipient_options}</select></label>
+                <label>Neue Nachricht<textarea name="message" rows="4" required placeholder="Nachricht schreiben"></textarea></label>
+                <button class="primary" type="submit">Nachricht senden</button>
+            </form>
+        </section>
+        <section class="message-layout">
+            <div class="box message-inbox">
+                <h2>Inbox</h2>
+                <div class="message-thread-list">{''.join(thread_rows) if thread_rows else '<p class="muted">Noch keine Nachrichten.</p>'}</div>
+            </div>
+            <div class="box message-chat">
+                <h2>{esc(selected_recipient) if selected_recipient else 'Chat'}</h2>
+                <div class="chat-list">{''.join(chat_rows) if chat_rows else '<p class="muted">Wähle einen Namen aus oder schreibe eine neue Nachricht.</p>'}</div>
+                {reply_form}
+            </div>
+        </section>
+        """
+        self.send_html(page("Nachrichten", body, buyer_key=buyer_key))
+
+    def show_admin_messages(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        error = (query.get("error", [""])[0] or "").strip()
+        selected_location = (query.get("location", [""])[0] or "").strip()
+        selected_recipient = (query.get("recipient", [""])[0] or "").strip()
+        threads = cockpit_message_threads()
+        location_options = '<option value="">Standort auswählen</option>' + "".join(
+            f'<option value="{esc(location["id"])}" {"selected" if location["id"] == selected_location else ""}>{esc(location["name"])}</option>'
+            for location in get_locations()
+        )
+        employee_options = '<option value="">Teammitglied auswählen</option>' + option_html(get_time_employee_names(True), selected_recipient)
+        if (not selected_location or not selected_recipient) and threads:
+            selected_location = threads[0]["location_id"]
+            selected_recipient = threads[0]["recipient_name"]
+        messages = get_cockpit_messages(selected_location, selected_recipient, mark_read_for="admin") if selected_location and selected_recipient else []
+        threads = cockpit_message_threads()
+        thread_rows = []
+        for thread in threads:
+            active = thread["location_id"] == selected_location and normalize_text_key(thread["recipient_name"]) == normalize_text_key(selected_recipient)
+            unread = thread["unread_admin"] > 0
+            thread_rows.append(
+                f"""
+                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/admin/messages?location={quote_plus(thread['location_id'])}&recipient={quote_plus(thread['recipient_name'])}">
+                    <strong>{esc(thread['recipient_name'])}</strong>
+                    <span>{esc(thread['location_name'])} · {esc(thread['last_created_at'])}</span>
+                    {f'<i>{thread["unread_admin"]}</i>' if unread else ''}
+                </a>
+                """
+            )
+        chat_rows = []
+        for message in messages:
+            own = message["sender_role"] == "admin"
+            chat_rows.append(
+                f"""
+                <article class="chat-message {'own' if own else 'other'}">
+                    <strong>{esc(message['sender_name'])}</strong>
+                    <p>{esc(message['message'])}</p>
+                    <span>{esc(message['created_at'])}</span>
+                </article>
+                """
+            )
+        reply_form = ""
+        if selected_location and selected_recipient:
+            reply_form = f"""
+            <form method="post" action="/admin/messages/reply" class="message-compose">
+                <input type="hidden" name="location_id" value="{esc(selected_location)}">
+                <input type="hidden" name="recipient_name" value="{esc(selected_recipient)}">
+                <label>Antwort<textarea name="message" rows="4" required placeholder="Antwort schreiben"></textarea></label>
+                <button class="primary" type="submit">Antwort senden</button>
+            </form>
+            """
+        body = f"""
+        {admin_menu()}
+        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
+        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        <section class="box">
+            <div class="section-head">
+                <div><h2>Nachrichten</h2><p class="muted">Hier siehst du alle Nachrichten aus den Standorten und kannst direkt antworten.</p></div>
+            </div>
+            <form method="post" action="/admin/messages/reply" class="message-compose two">
+                <label>Standort<select name="location_id" required>{location_options}</select></label>
+                <label>Teammitglied<select name="recipient_name" required>{employee_options}</select></label>
+                <label class="full">Neue Nachricht<textarea name="message" rows="3" required placeholder="Nachricht schreiben"></textarea></label>
+                <button class="primary" type="submit">Nachricht senden</button>
+            </form>
+        </section>
+        <section class="message-layout">
+            <div class="box message-inbox">
+                <h2>Inbox</h2>
+                <div class="message-thread-list">{''.join(thread_rows) if thread_rows else '<p class="muted">Noch keine Nachrichten.</p>'}</div>
+            </div>
+            <div class="box message-chat">
+                <h2>{esc(selected_recipient) if selected_recipient else 'Chat'}</h2>
+                <div class="chat-list">{''.join(chat_rows) if chat_rows else '<p class="muted">Noch kein Chat ausgewählt.</p>'}</div>
+                {reply_form}
+            </div>
+        </section>
+        """
+        self.send_html(page("Nachrichten", body, admin=True, buyer_key=self.current_buyer_key()))
 
     def show_time_form(self, error="", query=None):
         buyer_key = self.current_buyer_key()
@@ -4546,11 +4872,34 @@ class App(BaseHTTPRequestHandler):
                 </details>
                 """
             )
+        invoice_rows = []
+        for row in cockpit_invoice_orders():
+            item = row["item"]
+            note = f"<br><span class='muted'>{esc(item.get('note', ''))}</span>" if item.get("note") else ""
+            invoice_rows.append(
+                f"""
+                <tr>
+                    <td>{esc(row['location']['name'])}</td>
+                    <td><strong>{esc(item['title'])}</strong>{note}</td>
+                    <td>{esc(row.get('updated_at') or '-')}</td>
+                </tr>
+                """
+            )
+        invoice_section = f"""
+        <section class="box invoice-panel">
+            <div class="section-head">
+                <div><h2>Rechnungsstellung</h2><p class="muted">Cockpit-Bestellungen, die als abgeholt mit Rechnungsstellung markiert wurden.</p></div>
+                <span class="pill">{len(invoice_rows)}</span>
+            </div>
+            <div class="table-wrap"><table><tr><th>Standort</th><th>Bestellung</th><th>Markiert am</th></tr>{''.join(invoice_rows) if invoice_rows else '<tr><td colspan="3">Aktuell keine Einträge für Rechnungsstellung.</td></tr>'}</table></div>
+        </section>
+        """
 
         body = f"""
         {admin_menu()}
         {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
         {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
+        {invoice_section}
         <section class="box">
             <div class="section-head">
                 <div>
@@ -4964,6 +5313,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_cockpit_order_state()
             if path == "/cockpit/production-job":
                 return self.handle_cockpit_production_job_state()
+            if path == "/messages/send":
+                return self.handle_location_message_send()
             if path == "/api/production-job":
                 return self.handle_api_production_job()
             if path == "/push/subscribe":
@@ -5006,6 +5357,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_settings()
             if path == "/admin/cockpit-content":
                 return self.handle_admin_cockpit_content()
+            if path == "/admin/messages/reply":
+                return self.handle_admin_message_reply()
             if path == "/admin/employees":
                 return self.handle_employees()
             if path == "/admin/locations":
@@ -5070,6 +5423,43 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/cockpit?msg=" + quote_plus("Bestellinformation wurde nicht gefunden."))
         set_cockpit_state(buyer_key, "order", order_id, state)
         return self.redirect("/cockpit")
+
+    def handle_location_message_send(self):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        form = self.read_form()
+        recipient_name = self.form_value(form, "recipient_name").strip()
+        message = self.form_value(form, "message").strip()
+        if recipient_name not in get_time_employee_names(True):
+            return self.redirect("/messages?error=" + quote_plus("Bitte einen Namen aus dem Team auswählen."))
+        if not message:
+            return self.redirect("/messages?recipient=" + quote_plus(recipient_name) + "&error=" + quote_plus("Bitte eine Nachricht eingeben."))
+        create_cockpit_message(location["id"], recipient_name, "location", location["name"], message)
+        send_push_notification({
+            "title": "Neue Nachricht",
+            "body": f"{location['name']} an {recipient_name}: {message[:90]}",
+            "url": "/admin/messages",
+            "tag": f"message-{location['id']}-{normalize_text_key(recipient_name)}",
+        })
+        return self.redirect("/messages?recipient=" + quote_plus(recipient_name) + "&msg=" + quote_plus("Nachricht wurde gesendet."))
+
+    def handle_admin_message_reply(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        location_id = self.form_value(form, "location_id").strip()
+        recipient_name = self.form_value(form, "recipient_name").strip()
+        message = self.form_value(form, "message").strip()
+        if not find_location(location_id):
+            return self.redirect("/admin/messages?error=" + quote_plus("Standort wurde nicht gefunden."))
+        if not recipient_name or not message:
+            return self.redirect("/admin/messages?location=" + quote_plus(location_id) + "&recipient=" + quote_plus(recipient_name) + "&error=" + quote_plus("Bitte eine Antwort eingeben."))
+        create_cockpit_message(location_id, recipient_name, "admin", "Backend", message)
+        return self.redirect("/admin/messages?location=" + quote_plus(location_id) + "&recipient=" + quote_plus(recipient_name) + "&msg=" + quote_plus("Antwort wurde gesendet."))
 
     def handle_cockpit_production_job_state(self):
         buyer_key = self.current_buyer_key()

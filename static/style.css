@@ -152,6 +152,7 @@ summary:focus-visible {
 
 nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 nav a, nav .nav-user {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -169,6 +170,21 @@ nav a, nav .nav-user {
 }
 nav a:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
 .nav-user { color: var(--primary) !important; background: var(--primary-soft) !important; border-color: #c9d8f2 !important; }
+.nav-with-dot,
+.admin-menu .button {
+  position: relative;
+}
+.nav-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #dc2626;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, .18);
+}
 
 main { width: 100%; max-width: 1180px; margin: 24px auto 80px; padding: 0 20px; overflow-x: clip; }
 
@@ -314,6 +330,86 @@ nav a[href="/admin/logout"]:hover,
 .admin-mobile-links .admin-nav-people { background: #166534; }
 .admin-mobile-links .admin-nav-system { background: #334155; }
 .admin-mobile-links .logout-button.admin-nav-system { background: #b3362b; color: #ffffff; }
+
+.message-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, .75fr) minmax(0, 1.25fr);
+  gap: 16px;
+  align-items: start;
+}
+.message-compose {
+  display: grid;
+  gap: 12px;
+}
+.message-thread-list,
+.chat-list {
+  display: grid;
+  gap: 10px;
+}
+.message-thread {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 12px 42px 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  color: var(--text);
+  text-decoration: none;
+}
+.message-thread:hover,
+.message-thread.is-active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.message-thread span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.message-thread i {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  min-width: 24px;
+  height: 24px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #ffffff;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+}
+.chat-message {
+  max-width: 82%;
+  padding: 11px 13px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: #ffffff;
+}
+.chat-message.own {
+  justify-self: end;
+  background: #dcfce7;
+  border-color: #9ad6b5;
+}
+.chat-message.other {
+  justify-self: start;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.chat-message p {
+  margin: 5px 0;
+  white-space: pre-wrap;
+}
+.chat-message span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.invoice-panel {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
 
 .stats {
   display: grid;
@@ -1530,6 +1626,7 @@ tr:hover td { background: var(--primary-soft); }
   .min-stock-row { grid-template-columns: 1fr 160px; }
   .min-stock-remove { grid-column: 1 / -1; }
   .cockpit-grid { grid-template-columns: 1fr; }
+  .message-layout { grid-template-columns: 1fr; }
   .cockpit-admin-row,
   .cockpit-admin-order-row,
   .cockpit-admin-production-row,
@@ -1826,6 +1923,9 @@ tr:hover td { background: var(--primary-soft); }
   .cockpit-hero { align-items: stretch; }
   .cockpit-actions, .cockpit-actions .button { width: 100%; }
   .cockpit-item, .cockpit-order, .cockpit-info-card { padding: 10px; }
+  .message-layout { grid-template-columns: 1fr; gap: 12px; }
+  .message-inbox, .message-chat { padding: 14px; }
+  .chat-message { max-width: 100%; }
   .cockpit-admin-row { padding: 10px; }
   .min-stock-info { padding: 11px; }
   .min-stock-info-grid { grid-template-columns: 1fr; }
