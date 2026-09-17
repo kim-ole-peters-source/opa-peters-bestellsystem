@@ -411,10 +411,13 @@
 
   var orderForm = document.querySelector('form[action="/order"]');
   var orderCount = document.getElementById('orderCount');
+  var sidebarOrderCount = document.getElementById('sidebarOrderCount');
   var reviewOrder = document.getElementById('reviewOrder');
   var cartReview = document.getElementById('cartReview');
   var cartItems = document.getElementById('cartItems');
+  var cartSidebarItems = document.getElementById('cartSidebarItems');
   var cartCancel = document.getElementById('cartCancel');
+  var cartMinimize = document.getElementById('cartMinimize');
   var cartSubmit = document.getElementById('cartSubmit');
   var locationInput = orderForm ? orderForm.querySelector('input[name="location"]') : null;
   var cartStorageKey = locationInput ? 'opaPetersCart:' + locationInput.value : 'opaPetersCart';
@@ -590,6 +593,7 @@
     if (!orderForm) return;
     applyCartState(readStoredCart());
     updateOrderCount();
+    renderCart();
   }
 
   function loadServerCart() {
@@ -654,20 +658,23 @@
   }
 
   function updateOrderCount() {
-    if (!orderForm || !orderCount) return;
+    if (!orderForm) return;
     var selected = selectedItems().length;
-    orderCount.textContent = selected === 1 ? '1 Position' : selected + ' Positionen';
+    var label = selected === 1 ? '1 Position' : selected + ' Positionen';
+    if (orderCount) orderCount.textContent = label;
+    if (sidebarOrderCount) sidebarOrderCount.textContent = label;
   }
 
-  function renderCart() {
-    if (!cartItems) return;
-    var items = selectedItems();
+  function renderCartInto(container, items, compact) {
+    if (!container) return;
     if (!items.length) {
-      cartItems.innerHTML = '<p class="error">Bitte wähle mindestens ein Produkt aus.</p>';
+      container.innerHTML = compact
+        ? '<p class="cart-empty">Noch keine Produkte ausgewählt.</p>'
+        : '<p class="error">Bitte wähle mindestens ein Produkt aus.</p>';
       return;
     }
-    cartItems.innerHTML = items.map(function (item) {
-      return '<div class="cart-line" data-product-id="' + item.id + '">' +
+    container.innerHTML = items.map(function (item) {
+      return '<div class="cart-line' + (compact ? ' cart-line-compact' : '') + '" data-product-id="' + item.id + '">' +
         '<div><strong>' + item.name + '</strong><span>' + item.packageSize + '</span></div>' +
         '<div class="quantity-control small">' +
         '<button type="button" class="qty-minus" data-product-id="' + item.id + '">−</button>' +
@@ -679,7 +686,13 @@
     }).join('');
   }
 
-  if (orderForm && orderCount) {
+  function renderCart() {
+    var items = selectedItems();
+    renderCartInto(cartItems, items, false);
+    renderCartInto(cartSidebarItems, items, true);
+  }
+
+  if (orderForm) {
     function handleQuantityAction(event) {
       var target = event.target;
       var plus = target && target.closest ? target.closest('.qty-plus') : null;
@@ -702,13 +715,13 @@
       if (!button) return;
       event.preventDefault();
       var productId = button.getAttribute('data-product-id');
-      var minQty = clampQty(button.getAttribute('data-min-qty') || '1');
       if (!productId || !getHiddenQty(productId)) return;
-      setProductQty(productId, minQty || 1);
+      var current = getHiddenQty(productId);
+      setProductQty(productId, (current ? clampQty(current.value) : 0) + 1);
       renderCart();
-      button.textContent = 'Im Warenkorb';
+      button.textContent = '+1 hinzugefügt';
       window.setTimeout(function () {
-        button.textContent = 'In den Warenkorb';
+        button.textContent = '1 in den Warenkorb';
       }, 1200);
     });
     orderForm.addEventListener('input', function (event) {
@@ -746,6 +759,9 @@
     }
     if (cartCancel && cartReview) {
       addLegacyTapListener(cartCancel, closeCartReview);
+    }
+    if (cartMinimize && cartReview) {
+      addLegacyTapListener(cartMinimize, closeCartReview);
     }
     if (cartSubmit) {
       addLegacyTapListener(cartSubmit, function (event) {

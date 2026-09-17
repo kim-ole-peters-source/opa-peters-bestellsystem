@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v51-message-select-scroll';
+const CACHE_NAME = 'opa-peters-bestellung-v55-min-stock-cart-controls';
 const STATIC_ASSETS = [
   '/',
   '/login',

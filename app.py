@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-07-message-select-scroll"
+ASSET_VERSION = "2026-09-17-min-stock-cart-controls"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -3967,7 +3967,7 @@ class App(BaseHTTPRequestHandler):
         time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if location_can_time(location_data) else ""
         logout_button = '<a class="button logout-button" href="/logout">Logout</a>'
         min_stock_items = get_min_stock_items_for_location(location_data, buyer_key=buyer_key)
-        min_stock_html = ""
+        min_stock_cards = ""
         if min_stock_items:
             min_stock_cards = "".join(
                 f"""
@@ -3976,18 +3976,20 @@ class App(BaseHTTPRequestHandler):
                     <span>{esc(category_text(product_categories(item['product'])))}</span>
                     <small>{esc(item['product']['package_size'])} · {esc(item['product']['source'])}</small>
                     <b>{esc(item['quantity'])} mindestens bestellen</b>
-                    <button class="button min-stock-cart-button" type="button" data-product-id="{item['product']['id']}" data-min-qty="{esc(item['quantity'])}">In den Warenkorb</button>
+                    <button class="button min-stock-cart-button" type="button" data-product-id="{item['product']['id']}">1 in den Warenkorb</button>
                 </article>
                 """
                 for item in min_stock_items
             )
-            min_stock_html = f"""
-            <details class="category-panel min-stock-info">
-                <summary>Mindestbestellmengen <span>{len(min_stock_items)} Produkt(e)</span></summary>
-                <p class="muted">Orientierung für {esc(location_name)}.</p>
-                <div class="min-stock-info-grid">{min_stock_cards}</div>
-            </details>
-            """
+        else:
+            min_stock_cards = '<p class="min-stock-empty">Für diesen Standort sind aktuell keine Mindestbestellmengen hinterlegt.</p>'
+        min_stock_html = f"""
+        <details class="category-panel min-stock-info">
+            <summary>Mindestbestellmengen <span>{len(min_stock_items)} Produkt(e)</span></summary>
+            <p class="muted">Orientierung für {esc(location_name)}.</p>
+            <div class="min-stock-info-grid">{min_stock_cards}</div>
+        </details>
+        """
         cat_options = '<option value="">Alle Kategorien</option>' + "".join(
             f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
         )
@@ -4031,13 +4033,8 @@ class App(BaseHTTPRequestHandler):
         category_panels = []
         all_cards = "".join(product_card(p) for p in products)
         if products:
-            category_panels.append(f"<details class='category-panel'><summary>Alle Produkte <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
-            for category in categories:
-                category_products = [p for p in products if product_has_category(p, category)]
-                if category_products:
-                    category_panels.append(
-                        f"<details class='category-panel'><summary>{esc(category)} <span>{len(category_products)}</span></summary><section class='grid'>{''.join(product_card(p) for p in category_products)}</section></details>"
-                    )
+            panel_title = category_filter or "Alle Produkte"
+            category_panels.append(f"<details class='category-panel order-product-panel'><summary>{esc(panel_title)} <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
         <section class="box">
@@ -4049,16 +4046,31 @@ class App(BaseHTTPRequestHandler):
                 <button class="primary" type="submit">Suchen</button>
                 <a class="button" href="/">Reset</a>
             </form>
-            {min_stock_html}
             <p class="muted">{len(products)} Produkt(e) gefunden.</p>
         </section>
         <form method="post" action="/order" enctype="multipart/form-data">
             {hidden_qty_inputs}
             <input type="hidden" name="location" value="{esc(buyer_key)}">
-            <section class="category-sections">{''.join(category_panels) if category_panels else '<section class="box"><p>Keine passenden Produkte gefunden oder für diesen Standort sind noch keine Produkte sichtbar.</p></section>'}</section>
+            {min_stock_html}
+            <div class="order-workspace">
+                <details class="cart-sidebar" aria-label="Warenkorb" open>
+                    <summary class="cart-sidebar-head">
+                        <h2>Warenkorb</h2>
+                        <span id="sidebarOrderCount" class="order-count">0 Positionen</span>
+                    </summary>
+                    <div class="cart-sidebar-content">
+                        <div id="cartSidebarItems" class="cart-sidebar-items"></div>
+                        <button id="reviewOrder" class="button-yellow cart-review-button" type="button">Warenkorb prüfen</button>
+                    </div>
+                </details>
+                <section class="category-sections order-product-list">{''.join(category_panels) if category_panels else '<section class="box"><p>Keine passenden Produkte gefunden oder für diesen Standort sind noch keine Produkte sichtbar.</p></section>'}</section>
+            </div>
             <section id="cartReview" class="cart-review" hidden>
                 <div class="cart-card">
-                    <h2>Warenkorb & Bestelldaten</h2>
+                    <div class="cart-card-head">
+                        <h2>Warenkorb & Bestelldaten</h2>
+                        <button type="button" id="cartMinimize" class="cart-minimize" aria-label="Warenkorb minimieren" title="Zurück zur Bestellung">−</button>
+                    </div>
                     <p class="muted">Standort: {esc(location_name)}. Bitte prüfe deine Bestellung und ergänze die Bestelldaten.</p>
                     <div id="cartItems"></div>
                     <section class="cart-details">
@@ -4072,12 +4084,11 @@ class App(BaseHTTPRequestHandler):
                         </fieldset>
                     </section>
                     <div class="cart-actions">
-                        <button type="button" id="cartCancel">Weiter bearbeiten</button>
-                        <button class="primary" type="button" id="cartSubmit">Bestellung endgültig absenden</button>
+                        <button type="button" id="cartCancel">Warenkorb minimieren</button>
+                        <button class="button-yellow" type="button" id="cartSubmit">Bestellung endgültig absenden</button>
                     </div>
                 </div>
             </section>
-            <button id="reviewOrder" class="primary" type="button"><span>Warenkorb prüfen</span><span id="orderCount" class="order-count">0 Positionen</span></button>
         </form>"""
         self.send_html(page("Interne Warenbestellung", body, buyer_key=buyer_key))
 
