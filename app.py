@@ -124,7 +124,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-17-min-stock-cart-controls"
+ASSET_VERSION = "2026-09-18-time-limit-settings"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -3613,6 +3613,19 @@ class App(BaseHTTPRequestHandler):
         location_options = '<option value="">Bitte auswählen</option>' + "".join(
             f'<option value="{esc(location["id"])}">{esc(location["name"])}</option>' for location in get_locations()
         )
+        time_limit_rows = []
+        locations = get_locations()
+        for location in locations:
+            selected_limit = location.get("time_tracking_max_end", "")
+            limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), selected_limit)
+            time_limit_rows.append(
+                f"""
+                <label class="time-limit-row">
+                    <span><strong>{esc(location['name'])}</strong><small>{'Zeiterfassung aktiv' if location.get('time_tracking_enabled') else 'Zeiterfassung deaktiviert'}</small></span>
+                    <select name="time_limit_{esc(location['id'])}">{limit_options}</select>
+                </label>
+                """
+            )
         initial_shift_rows = []
         for index in range(3):
             initial_shift_rows.append(
@@ -3741,6 +3754,15 @@ class App(BaseHTTPRequestHandler):
                 <a class="button" href="/admin/time">Zurücksetzen</a>
             </form>
         </section>
+        <details class="category-panel admin-toggle-panel time-limit-panel">
+            <summary>Maximale Endzeiten <span>{len(locations)} Standorte</span></summary>
+            <form method="post" action="/admin/time/settings" class="time-limit-form" data-preserve-scroll>
+                <input type="hidden" name="month" value="{esc(month)}">
+                <p class="muted">Lege für jeden Standort fest, bis zu welcher Uhrzeit Mitarbeitende Zeiten erfassen dürfen. Ohne feste Grenze gilt weiterhin höchstens die aktuelle Uhrzeit.</p>
+                <div class="time-limit-list">{''.join(time_limit_rows)}</div>
+                <button class="primary" type="submit">Maximale Endzeiten speichern</button>
+            </form>
+        </details>
         <details class="category-panel admin-toggle-panel">
             <summary>Schichten manuell nachtragen <span>Admin</span></summary>
             <form method="post" action="/admin/time/create" class="admin-time-create-form">
@@ -5398,6 +5420,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_visibility()
             if path == "/admin/time/create":
                 return self.handle_create_time_entry()
+            if path == "/admin/time/settings":
+                return self.handle_time_settings()
             if path == "/admin/time/update":
                 return self.handle_update_time_entry()
             if path == "/admin/time/delete":
@@ -6417,6 +6441,28 @@ class App(BaseHTTPRequestHandler):
             send_time_entry_push(employee_name, work_location, work_date, start_time, end_time, duration, note, created_by_admin=True)
         message = "Eine Schicht wurde manuell nachgetragen." if len(shift_rows) == 1 else f"{len(shift_rows)} Schichten wurden manuell nachgetragen."
         self.redirect(f"/admin/time?month={quote_plus(first_month)}&msg=" + quote_plus(message))
+
+    def handle_time_settings(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        month = self.form_value(form, "month", current_month()).strip()
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = current_month()
+        locations = get_locations()
+        for location in locations:
+            value = self.form_value(form, f"time_limit_{location['id']}").strip()
+            if value and not is_valid_hhmm(value):
+                return self.redirect(
+                    f"/admin/time?month={quote_plus(month)}&error="
+                    + quote_plus(f"Bitte für {location['name']} eine gültige Uhrzeit in 15-Minuten-Schritten auswählen.")
+                )
+            location["time_tracking_max_end"] = value
+        save_locations(locations)
+        return self.redirect(
+            f"/admin/time?month={quote_plus(month)}&msg="
+            + quote_plus("Die maximalen Endzeiten wurden gespeichert.")
+        )
 
     def handle_update_time_entry(self):
         if not self.is_admin():

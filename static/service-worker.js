@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v55-min-stock-cart-controls';
+const CACHE_NAME = 'opa-peters-bestellung-v56-time-limit-settings';
 const STATIC_ASSETS = [
   '/',
   '/login',
