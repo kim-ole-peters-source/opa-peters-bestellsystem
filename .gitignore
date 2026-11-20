@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 *.db-journal
 .DS_Store
+settings.json
+bestellsystem.db
