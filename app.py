@@ -125,7 +125,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-09-18-time-limit-settings"
+ASSET_VERSION = "2026-11-20-markenauftritt"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2602,15 +2602,16 @@ def page(title, body, admin=False, buyer_key=None):
         nav = ""
     elif buyer_key:
         location = find_location(buyer_key)
-        nav_links = ['<a href="/cockpit">Cockpit</a>']
+        nav_links = []
         if location_can_order(location):
-            nav_links.append('<a href="/">Shop</a>')
+            nav_links.append('<a href="/">Bestellen</a>')
+        nav_links.append('<a href="/cockpit">Mein Tag</a>')
         if location_can_time(location):
-            nav_links.append('<a href="/time">Zeiterfassung</a>')
+            nav_links.append('<a href="/time">Zeiten</a>')
         unread_messages = count_unread_messages("location", buyer_key)
         message_dot = '<span class="nav-dot" aria-label="Neue Nachrichten"></span>' if unread_messages else ""
         nav_links.append(f'<a class="nav-with-dot" href="/messages/select">Nachrichten{message_dot}</a>')
-        nav_links.append('<a href="/logout">Logout</a>')
+        nav_links.append('<a href="/logout">Abmelden</a>')
         nav = "".join(nav_links)
     else:
         nav = '<a href="/login">Standort Login</a><a href="/admin/login">Admin</a>'
@@ -2637,7 +2638,7 @@ def page(title, body, admin=False, buyer_key=None):
 <link rel="stylesheet" href="/static/style.css?v={ASSET_VERSION}">
 </head>
 <body>
-<header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/brand-logo.png" alt="Opa Peters Logo"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
+<header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/opa-peters-logo.png" alt="Opa Peters"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
 <main>{push_control}{body}</main>
 <button id="installApp" class="install-app" hidden>App installieren</button>
 <div id="iosInstallHelp" class="install-help" hidden>
@@ -2648,6 +2649,9 @@ def page(title, body, admin=False, buyer_key=None):
     <p class="muted">Danach erscheint das Bestellsystem wie eine App auf dem Home-Bildschirm.</p>
   </div>
 </div>
+<script>
+(function(){{var p=location.pathname;document.querySelectorAll('.topbar nav a').forEach(function(a){{var h=a.getAttribute('href');if(h===p||(h==='/messages/select'&&p.indexOf('/messages')===0)){{a.setAttribute('aria-current','page');}}}});}})();
+</script>
 <script src="/static/app.js?v={ASSET_VERSION}" defer></script>
 </body>
 </html>""".encode("utf-8")
@@ -4044,19 +4048,18 @@ class App(BaseHTTPRequestHandler):
         sort = (query.get("sort", ["name_az"])[0] or "name_az").strip()
         category_filter = (query.get("category", [""])[0] or "").strip()
         search_text = (query.get("q", [""])[0] or "").strip()
+        # Alle Produkte werden ausgeliefert; Suche und Warengruppen filtern
+        # direkt im Browser (static/shop.js), ohne die Seite neu zu laden.
         all_order_products = get_products(True, buyer_key=buyer_key, sort=sort)
-        products = get_products(True, buyer_key=buyer_key, sort=sort, category_filter=category_filter)
-        products = filter_products_by_search(products, search_text, include_source=False)
         categories = get_categories_for_buyer(buyer_key)
         location_name = location_data["name"] if location_data else buyer_label(buyer_key)
         open_order_product_quantities = get_open_order_product_quantities(location_name)
         contact_name = (location_data or {}).get("contact_name", "").strip()
-        role_badge = f"<p class='role-badge'>{esc(role_label((location_data or {}).get('role')))}</p>"
-        personal_greeting = f"<p class='personal-greeting'>Moin Moin, {esc(contact_name)}</p>" if contact_name else ""
-        time_button = '<a class="button primary" href="/time">Zur Zeiterfassung</a>' if location_can_time(location_data) else ""
-        logout_button = '<a class="button logout-button" href="/logout">Logout</a>'
+        role_text = role_label((location_data or {}).get("role"))
+        greeting = f"Moin Moin, {esc(contact_name)}" if contact_name else "Moin Moin"
+
         min_stock_items = get_min_stock_items_for_location(location_data, buyer_key=buyer_key)
-        min_stock_cards = ""
+        min_stock_html = ""
         if min_stock_items:
             min_stock_cards = "".join(
                 f"""
@@ -4070,48 +4073,58 @@ class App(BaseHTTPRequestHandler):
                 """
                 for item in min_stock_items
             )
-        else:
-            min_stock_cards = '<p class="min-stock-empty">Für diesen Standort sind aktuell keine Mindestbestellmengen hinterlegt.</p>'
-        min_stock_html = f"""
-        <details class="category-panel min-stock-info">
-            <summary>Mindestbestellmengen <span>{len(min_stock_items)} Produkt(e)</span></summary>
-            <p class="muted">Orientierung für {esc(location_name)}.</p>
-            <div class="min-stock-info-grid">{min_stock_cards}</div>
-        </details>
-        """
-        cat_options = '<option value="">Alle Kategorien</option>' + "".join(
-            f'<option value="{esc(c)}" {"selected" if c == category_filter else ""}>{esc(c)}</option>' for c in categories
-        )
-        sort_options = [
-            ("name_az", "Name A–Z"),
-            ("name_za", "Name Z–A"),
-            ("category", "Kategorie + Name"),
-            ("package", "Gebindegröße"),
-            ("newest", "Neueste zuerst"),
-        ]
-        sort_options_html = "".join(
-            f'<option value="{esc(value)}" {"selected" if value == sort else ""}>{esc(label)}</option>' for value, label in sort_options
-        )
+            min_stock_html = f"""
+            <details class="shop-mindest">
+                <summary>Mindestbestellmengen <span>{len(min_stock_items)}</span></summary>
+                <p class="muted">Orientierung für {esc(location_name)}.</p>
+                <div class="min-stock-info-grid">{min_stock_cards}</div>
+            </details>
+            """
+
+        logo_farben = ["#C44D49", "#D8A69F", "#F0C072", "#AABDCE", "#5A7290"]
+        zeichen = {
+            "becher & verpackung": "🥤", "variegato & saucen": "🍯", "aromen & pasten": "🍦",
+            "getränke": "🧃", "toppings": "🍒", "früchte & füllungen": "🍓", "reinigung": "🧽",
+            "milchprodukte & eier": "🥛", "backzutaten": "🌾", "nüsse & marzipan": "🌰",
+            "schokolade & kuvertüre": "🍫", "schnecken b2b": "🥐", "tk": "❄️", "eis": "🍨",
+            "crumbie b2b": "🧁", "tüten & waffeln": "🥠", "frische": "🍌", "kaffee & co": "☕",
+            "backwaren": "🍪", "süßwaren": "🍬", "kakao": "🤎", "backmischungen": "🥣",
+            "geräte & zubehör": "🥄", "divers": "📦",
+        }
+        reihenfolge = list(categories)
+
+        def erste_gruppe(p):
+            cats = product_categories(p)
+            return cats[0] if cats else "Weitere"
+
+        def farbe(gruppe):
+            nummer = reihenfolge.index(gruppe) if gruppe in reihenfolge else len(reihenfolge)
+            return logo_farben[nummer % len(logo_farben)]
+
         def product_card(p):
-            img = f'<img src="/uploads/{esc(p["image_filename"])}" alt="">' if p["image_filename"] else '<div class="noimg">kein Bild</div>'
-            categories_label = category_text(product_categories(p))
+            cats = product_categories(p)
+            gruppe = erste_gruppe(p)
+            f = farbe(gruppe)
+            bild = f'<span aria-hidden="true">{zeichen.get(gruppe.lower(), "📦")}</span>'
+            if p["image_filename"]:
+                bild += f'<img src="/uploads/{esc(p["image_filename"])}" alt="" loading="lazy" onerror="this.remove()">'
             open_quantity = open_order_product_quantities.get(str(p["id"]), 0)
-            already_ordered = open_quantity > 0
-            status_badge = f'<div class="ordered-open-badge">Bereits offen bestellt: {open_quantity}</div>' if already_ordered else ""
-            card_class = "card product-card ordered-open-product" if already_ordered else "card product-card"
+            status_badge = f'<div class="ordered-open-badge">Bereits offen bestellt: {open_quantity}</div>' if open_quantity > 0 else ""
+            card_class = "product-card ordered-open-product" if open_quantity > 0 else "product-card"
+            suchtext = f"{p['name']} {p['package_size']}".lower()
             return f"""
-            <article class="{card_class}" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}">
-                {img}
-                <div class="category-badge">{esc(categories_label)}</div>
+            <article class="{card_class}" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}" data-kategorien="{esc('|'.join(cats))}" data-suche="{esc(suchtext)}">
+                <div class="pk-bild" style="--pk-farbe:{f}">{bild}</div>
                 {status_badge}
-                <h3>{esc(p['name'])}</h3>
-                <p class="muted">Gebindegröße: {esc(p['package_size'])}</p>
+                <div class="pk-text"><h3>{esc(p['name'])}</h3><p>{esc(p['package_size'])}</p></div>
+                <button type="button" class="qty-plus pk-hinzu" data-product-id="{p['id']}">Hinzufügen</button>
                 <div class="quantity-control" aria-label="Menge für {esc(p['name'])}">
-                    <button type="button" class="qty-minus" data-product-id="{p['id']}">−</button>
+                    <button type="button" class="qty-minus" data-product-id="{p['id']}" aria-label="weniger">−</button>
                     <input class="qty-display" type="number" data-product-id="{p['id']}" min="0" max="{MAX_ORDER_QUANTITY}" step="1" value="0" inputmode="numeric" aria-label="Menge">
-                    <button type="button" class="qty-plus" data-product-id="{p['id']}">+</button>
+                    <button type="button" class="qty-plus" data-product-id="{p['id']}" aria-label="mehr">+</button>
                 </div>
             </article>"""
+
         hidden_products = {str(p["id"]): p for p in all_order_products}
         for item in min_stock_items:
             hidden_products[str(item["product"]["id"])] = item["product"]
@@ -4119,67 +4132,93 @@ class App(BaseHTTPRequestHandler):
             f'<input type="hidden" name="qty_{p["id"]}" id="qty_{p["id"]}" value="0" data-product-id="{p["id"]}" data-product-name="{esc(p["name"])}" data-product-package="{esc(p["package_size"])}">'
             for p in hidden_products.values()
         )
-        category_panels = []
-        all_cards = "".join(product_card(p) for p in products)
-        if products:
-            panel_title = category_filter or "Alle Produkte"
-            category_panels.append(f"<details class='category-panel order-product-panel'><summary>{esc(panel_title)} <span>{len(products)}</span></summary><section class='grid'>{all_cards}</section></details>")
+
+        nach_gruppe = {}
+        for p in all_order_products:
+            nach_gruppe.setdefault(erste_gruppe(p), []).append(p)
+        gruppen_folge = [g for g in reihenfolge if g in nach_gruppe] + [g for g in nach_gruppe if g not in reihenfolge]
+        anzahl_je_gruppe = {g: 0 for g in reihenfolge}
+        for p in all_order_products:
+            for c in product_categories(p):
+                anzahl_je_gruppe[c] = anzahl_je_gruppe.get(c, 0) + 1
+
+        chips = f'<button type="button" class="shop-chip" data-gruppe="" aria-pressed="true">Alle <span>{len(all_order_products)}</span></button>' + "".join(
+            f'<button type="button" class="shop-chip" data-gruppe="{esc(g)}" aria-pressed="false">{zeichen.get(g.lower(), "")} {esc(g)} <span>{anzahl_je_gruppe.get(g, 0)}</span></button>'
+            for g in reihenfolge if anzahl_je_gruppe.get(g, 0)
+        )
+        abschnitte = "".join(
+            f"""<section class="shop-abschnitt" data-gruppe="{esc(g)}">
+                <h3 class="shop-abschnitt-titel">{esc(g)} <span>{len(nach_gruppe[g])}</span></h3>
+                <div class="shop-gitter">{''.join(product_card(p) for p in nach_gruppe[g])}</div>
+            </section>"""
+            for g in gruppen_folge
+        )
+        if not all_order_products:
+            abschnitte = '<p class="shop-leer">Für diesen Standort sind noch keine Produkte sichtbar.</p>'
+
+        streifen = "".join(f'<i style="background:{c}"></i>' for c in logo_farben)
         body = f"""
         {f'<div class="error">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head"><div><h2>Angemeldet als: {esc(location_name)}</h2>{role_badge}{personal_greeting}</div><div class="table-actions order-actions">{time_button}<a class="button" href="/logout">Standort wechseln</a>{logout_button}</div></div>
-            <form method="get" action="/" class="filters compact-form order-search">
-                <input type="hidden" name="sort" value="name_az">
-                <label class="search-main"><span>Produkt suchen</span><input name="q" value="{esc(search_text)}" placeholder="z. B. Becher, Servietten, Reinigung"></label>
-                <label class="search-category"><span>Kategorie</span><select name="category">{cat_options}</select></label>
-                <button class="primary" type="submit">Suchen</button>
-                <a class="button" href="/">Reset</a>
+        <div class="shop" data-start-suche="{esc(search_text)}" data-start-gruppe="{esc(category_filter)}">
+            <header class="shop-kopf">
+                <p class="shop-augenbraue">{esc(location_name)} · {esc(role_text)}</p>
+                <h2 class="shop-titel">Bestellen</h2>
+                <div class="shop-streifen">{streifen}</div>
+                <p class="shop-gruss">{greeting}</p>
+            </header>
+            <form method="get" action="/" class="shop-suche" role="search">
+                <span aria-hidden="true">🔍</span>
+                <input id="shopSuche" name="q" type="search" value="{esc(search_text)}" placeholder="Produkt suchen …" autocomplete="off" enterkeyhint="search" aria-label="Produkt suchen">
             </form>
-            <p class="muted">{len(products)} Produkt(e) gefunden.</p>
-        </section>
-        <form method="post" action="/order" enctype="multipart/form-data">
-            {hidden_qty_inputs}
-            <input type="hidden" name="location" value="{esc(buyer_key)}">
-            {min_stock_html}
-            <div class="order-workspace">
-                <details class="cart-sidebar" aria-label="Warenkorb" open>
-                    <summary class="cart-sidebar-head">
+            <div class="shop-chips" id="shopChips">{chips}</div>
+            <form method="post" action="/order" enctype="multipart/form-data">
+                {hidden_qty_inputs}
+                <input type="hidden" name="location" value="{esc(buyer_key)}">
+                {min_stock_html}
+                <div class="shop-flaeche">
+                    <div class="shop-produkte" id="shopProdukte">
+                        <p class="shop-treffer" id="shopTreffer" aria-live="polite"></p>
+                        {abschnitte}
+                        <p class="shop-leer" id="shopLeer" hidden>Nichts gefunden. Tippe weniger Buchstaben oder wähle eine andere Gruppe.</p>
+                    </div>
+                    <aside class="shop-seitenkorb" aria-label="Warenkorb">
                         <h2>Warenkorb</h2>
                         <span id="sidebarOrderCount" class="order-count">0 Positionen</span>
-                    </summary>
-                    <div class="cart-sidebar-content">
                         <div id="cartSidebarItems" class="cart-sidebar-items"></div>
-                        <button id="reviewOrder" class="button-yellow cart-review-button" type="button">Warenkorb prüfen</button>
-                    </div>
-                </details>
-                <section class="category-sections order-product-list">{''.join(category_panels) if category_panels else '<section class="box"><p>Keine passenden Produkte gefunden oder für diesen Standort sind noch keine Produkte sichtbar.</p></section>'}</section>
-            </div>
-            <section id="cartReview" class="cart-review" hidden>
-                <div class="cart-card">
-                    <div class="cart-card-head">
-                        <h2>Warenkorb & Bestelldaten</h2>
-                        <button type="button" id="cartMinimize" class="cart-minimize" aria-label="Warenkorb minimieren" title="Zurück zur Bestellung">−</button>
-                    </div>
-                    <p class="muted">Standort: {esc(location_name)}. Bitte prüfe deine Bestellung und ergänze die Bestelldaten.</p>
-                    <div id="cartItems"></div>
-                    <section class="cart-details">
-                        <h3>Bestelldaten</h3>
-                        <label>Name des Bestellers *<input name="ordered_by" required placeholder="Name eingeben"></label>
-                        <label>Bemerkung / Freitext<textarea name="note" rows="3" placeholder="Optionale Hinweise"></textarea></label>
-                        <fieldset class="visibility-box">
-                            <legend>Bild zur Bestellung</legend>
-                            <label>Bild zur Bestellung hinzufügen<input type="file" name="order_image" accept="image/*"></label>
-                            <p class="muted">Optional, zum Beispiel für Notizen, Schäden oder Lagerbestand. Maximal 10 MB.</p>
-                        </fieldset>
-                    </section>
-                    <div class="cart-actions">
-                        <button type="button" id="cartCancel">Warenkorb minimieren</button>
-                        <button class="button-yellow" type="button" id="cartSubmit">Bestellung endgültig absenden</button>
-                    </div>
+                    </aside>
                 </div>
-            </section>
-        </form>"""
-        self.send_html(page("Interne Warenbestellung", body, buyer_key=buyer_key))
+                <div class="shop-korbleiste" id="shopKorbleiste" data-leer="1">
+                    <div class="shop-korbleiste-text"><b id="orderCount">0 Positionen</b><span>im Warenkorb</span></div>
+                    <button id="reviewOrder" class="shop-korbleiste-knopf" type="button">Prüfen →</button>
+                </div>
+                <section id="cartReview" class="cart-review" hidden>
+                    <div class="cart-card">
+                        <div class="cart-card-head">
+                            <h2>Warenkorb</h2>
+                            <button type="button" id="cartMinimize" class="cart-minimize" aria-label="Warenkorb minimieren" title="Zurück zur Bestellung">−</button>
+                        </div>
+                        <p class="muted">Standort: {esc(location_name)}. Bitte prüfe deine Bestellung und ergänze die Bestelldaten.</p>
+                        <div id="cartItems"></div>
+                        <section class="cart-details">
+                            <h3>Bestelldaten</h3>
+                            <label>Name des Bestellers *<input name="ordered_by" required placeholder="Name eingeben"></label>
+                            <label>Bemerkung / Freitext<textarea name="note" rows="3" placeholder="Optionale Hinweise"></textarea></label>
+                            <fieldset class="visibility-box">
+                                <legend>Bild zur Bestellung</legend>
+                                <label>Bild zur Bestellung hinzufügen<input type="file" name="order_image" accept="image/*"></label>
+                                <p class="muted">Optional, zum Beispiel für Notizen, Schäden oder Lagerbestand. Maximal 10 MB.</p>
+                            </fieldset>
+                        </section>
+                        <div class="cart-actions">
+                            <button type="button" id="cartCancel">Weiter einkaufen</button>
+                            <button class="button-yellow" type="button" id="cartSubmit">Bestellung absenden</button>
+                        </div>
+                    </div>
+                </section>
+            </form>
+        </div>
+        <script src="/static/shop.js?v={ASSET_VERSION}" defer></script>"""
+        self.send_html(page("Bestellen", body, buyer_key=buyer_key))
 
     def show_admin_login(self, error=""):
         body = f"""
