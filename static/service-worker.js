@@ -1,10 +1,11 @@
-const CACHE_NAME = 'opa-peters-bestellung-v57-markenauftritt';
+const CACHE_NAME = 'opa-peters-bestellung-v58-verwaltung';
 const STATIC_ASSETS = [
   '/',
   '/login',
   '/static/style.css',
   '/static/app.js',
   '/static/shop.js',
+  '/static/verwaltung.js',
   '/static/icons/opa-peters-logo.png',
   '/static/icons/brand-logo.png',
   '/static/icons/icon-192.png',

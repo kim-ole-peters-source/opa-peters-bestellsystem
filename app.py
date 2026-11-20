@@ -116,7 +116,7 @@ DEFAULT_SETTINGS = {
     "whatsapp_number": "",
     "central_email_hint": "zentrale@example.com",
     "admin_pin_hash": "",
-    "time_export_email": "info@opapeters",
+    "time_export_email": "info@opapeters.de",
     "last_auto_time_export_month": "",
     "last_auto_time_export_status": "",
     "time_employees": [],
@@ -125,7 +125,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-20-markenauftritt"
+ASSET_VERSION = "2026-11-21-verwaltung"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -219,6 +219,10 @@ def load_settings():
             changed = True
     if not data.get("admin_pin_hash"):
         data["admin_pin_hash"] = hash_pin(ADMIN_PIN)
+        changed = True
+    if str(data.get("time_export_email") or "").strip().lower() == "info@opapeters":
+        # alter Standardwert ohne Endung – konnte nie zugestellt werden
+        data["time_export_email"] = "info@opapeters.de"
         changed = True
     if changed:
         save_settings(data)
@@ -373,6 +377,7 @@ def normalize_cockpit_orders(raw_orders):
             "id": item_id,
             "title": title[:180] or "Bestellung",
             "note": note[:500],
+            "pickup_date": str(item.get("pickup_date") or "").strip() if is_valid_iso_date(str(item.get("pickup_date") or "").strip()) else "",
             "active": bool(item.get("active", True)),
             "image_filename": os.path.basename(str(item.get("image_filename") or "").strip()),
         })
@@ -1010,6 +1015,14 @@ def admin_orders_return_url(message="", error="", pdf="", open_location="", open
         params.append(("error", error))
     if pdf:
         params.append(("pdf", pdf))
+    if open_location in ("offen", "erledigt", "rechnung", "einkauf"):
+        if open_location == "einkauf":
+            url = "/admin/einkauf"
+            if params:
+                url += "?" + urlencode(params)
+            return url
+        params.append(("ansicht", open_location))
+        open_location = ""
     if open_location:
         params.append(("open_location", open_location))
     if open_day:
@@ -1192,8 +1205,21 @@ def category_checkboxes(name_prefix, selected_categories=None):
     selected_keys = {normalize_text_key(category) for category in (selected_categories or [])}
     return "".join(
         f'<label class="visibility-option"><input type="checkbox" name="{esc(category_input_name(name_prefix, category))}" value="1" {"checked" if normalize_text_key(category) in selected_keys else ""}><span>{esc(category)}</span></label>'
-        for category in get_category_names(True)
+        for category in visible_category_names(selected_keys)
     )
+
+
+def visible_category_names(selected_keys=None):
+    """Alle Gruppen – die leere Standardgruppe 'Allgemein' nur, wenn sie benutzt wird."""
+    selected_keys = selected_keys or set()
+    names = get_category_names(True)
+    if "Allgemein" in names and "allgemein" not in selected_keys:
+        con = db()
+        rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
+        con.close()
+        if not any(product_has_category(row["category"], "Allgemein") for row in rows):
+            names = [name for name in names if name != "Allgemein"]
+    return names
 
 
 def form_categories(form, prefix, fallback=None):
@@ -2125,7 +2151,7 @@ def send_time_export_email(month, filename, data, content_type):
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER")
     smtp_password = os.environ.get("SMTP_PASSWORD")
-    recipient = (settings.get("time_export_email") or "info@opapeters").strip()
+    recipient = (settings.get("time_export_email") or "info@opapeters.de").strip()
     sender = os.environ.get("SMTP_FROM", smtp_user or recipient or "")
     if not (smtp_host and smtp_user and smtp_password and recipient and sender):
         raise RuntimeError("SMTP-Daten oder Empfängeradresse sind nicht vollständig konfiguriert.")
@@ -2597,9 +2623,90 @@ def create_combined_order_pdf(orders):
     return filename
 
 
+ADMIN_NAV = [
+    # (Adresse, Name, Symbol, zugehörige Seiten, nur am PC)
+    ("/admin", "Übersicht", "🏠", ["/admin"], False),
+    ("/admin/orders", "Bestellungen", "🧾", ["/admin/orders", "/admin/einkauf"], False),
+    ("/admin/messages", "Nachrichten", "✉️", ["/admin/messages"], False),
+    ("/admin/products", "Sortiment", "📦", ["/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import"], True),
+    ("/admin/time", "Team", "👥", ["/admin/time", "/admin/employees", "/admin/aufgaben", "/admin/cockpit-content", "/admin/task-report"], False),
+    ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility"], True),
+    ("/admin/settings", "Einstellungen", "⚙️", ["/admin/settings", "/admin/mehr"], True),
+    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/settings"], None),
+]
+
+
+def admin_nav_html():
+    try:
+        unread_messages = count_unread_messages("admin")
+        open_orders = len([order for order in get_orders() if not order["completed_at"]])
+    except Exception:
+        unread_messages = open_orders = 0
+    dots = {"/admin/orders": open_orders, "/admin/messages": unread_messages}
+    links = []
+    for href, label, icon, matches, desktop_only in ADMIN_NAV:
+        css = "nav-pc" if desktop_only else ("nav-handy" if desktop_only is None else "")
+        dot = f'<span class="nav-dot" aria-label="{dots[href]} neu"></span>' if dots.get(href) else ""
+        links.append(
+            f'<a class="nav-with-dot {css}" href="{href}" title="{esc(label)}" data-icon="{icon}" data-match="{" ".join(matches)}">{esc(label)}{dot}</a>'
+        )
+    return "".join(links)
+
+
+def admin_meldungen(msg="", error=""):
+    html_parts = []
+    if msg:
+        html_parts.append(f'<div class="vw-meldung ok" role="status">{esc(msg)}</div>')
+    if error:
+        html_parts.append(f'<div class="vw-meldung fehler" role="alert">{esc(error)}</div>')
+    return "".join(html_parts)
+
+
+AKTIV_ATTR = ' aria-current="page"'
+
+
+def admin_kopf(titel, unter="", aktionen="", reiter=None, aktiv=""):
+    """Einheitlicher Seitenkopf der Verwaltung mit optionalen Reitern."""
+    reiter_html = ""
+    if reiter:
+        reiter_html = '<div class="vw-reiter" role="navigation" aria-label="Bereiche">' + "".join(
+            f'<a href="{esc(href)}"{AKTIV_ATTR if key == aktiv else ""}>{esc(label)}</a>'
+            for key, label, href in reiter
+        ) + "</div>"
+    return f"""
+    <header class="vw-kopf">
+        <div class="vw-kopf-text">
+            <h2>{esc(titel)}</h2>
+            {f'<p>{unter}</p>' if unter else ''}
+        </div>
+        {f'<div class="vw-kopf-aktionen">{aktionen}</div>' if aktionen else ''}
+    </header>
+    {reiter_html}
+    """
+
+
+SORTIMENT_REITER = [
+    ("produkte", "Produkte", "/admin/products"),
+    ("kategorien", "Warengruppen", "/admin/categories"),
+    ("import", "Import", "/admin/import"),
+]
+TEAM_REITER = [
+    ("zeiten", "Zeiten", "/admin/time"),
+    ("personen", "Personen", "/admin/employees"),
+    ("aufgaben", "Aufgaben & Aufträge", "/admin/aufgaben"),
+    ("auswertung", "Auswertung", "/admin/task-report"),
+]
+BESTELL_REITER = [
+    ("offen", "Offen", "/admin/orders"),
+    ("einkauf", "Einkaufsliste nach Händler", "/admin/einkauf"),
+    ("erledigt", "Erledigt", "/admin/orders?ansicht=erledigt"),
+    ("rechnung", "Rechnungsstellung", "/admin/orders?ansicht=rechnung"),
+]
+
+
 def page(title, body, admin=False, buyer_key=None):
     if admin:
-        nav = ""
+        nav = admin_nav_html()
     elif buyer_key:
         location = find_location(buyer_key)
         nav_links = []
@@ -2616,12 +2723,9 @@ def page(title, body, admin=False, buyer_key=None):
     else:
         nav = '<a href="/login">Standort Login</a><a href="/admin/login">Admin</a>'
     subtitle = "" if title == "Besteller Login" else "<p>Opa Peters · internes Bestellsystem</p>"
-    push_control = """
-<div id="pushControl" class="push-control" hidden>
-  <span id="pushStatus">Push nicht aktiv</span>
-  <button type="button" id="pushToggle" class="button">Push aktivieren</button>
-</div>
-""" if admin else ""
+    # Der Push-Schalter steht jetzt nur noch in den Einstellungen.
+    push_control = ""
+    body_class = ' class="vw"' if admin else ""
     return f"""<!doctype html>
 <html lang="de">
 <head>
@@ -2637,7 +2741,7 @@ def page(title, body, admin=False, buyer_key=None):
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css?v={ASSET_VERSION}">
 </head>
-<body>
+<body{body_class}>
 <header class="topbar"><div class="brand"><div class="brand-mark"><img src="/static/icons/opa-peters-logo.png" alt="Opa Peters"></div><div><h1>{esc(title)}</h1>{subtitle}</div></div><nav>{nav}</nav></header>
 <main>{push_control}{body}</main>
 <button id="installApp" class="install-app" hidden>App installieren</button>
@@ -2650,7 +2754,7 @@ def page(title, body, admin=False, buyer_key=None):
   </div>
 </div>
 <script>
-(function(){{var p=location.pathname;document.querySelectorAll('.topbar nav a').forEach(function(a){{var h=a.getAttribute('href');if(h===p||(h==='/messages/select'&&p.indexOf('/messages')===0)){{a.setAttribute('aria-current','page');}}}});}})();
+(function(){{var p=location.pathname;document.querySelectorAll('.topbar nav a').forEach(function(a){{var h=a.getAttribute('href');var m=(a.getAttribute('data-match')||'').split(' ').filter(Boolean);var treffer=m.length?m.some(function(x){{return x==='/admin'?p==='/admin':(p===x||p.indexOf(x+'/')===0||p.indexOf(x+'-')===0);}}):(h===p||(h==='/messages/select'&&p.indexOf('/messages')===0));if(treffer){{a.setAttribute('aria-current','page');}}}});}})();
 </script>
 <script src="/static/app.js?v={ASSET_VERSION}" defer></script>
 </body>
@@ -2658,6 +2762,10 @@ def page(title, body, admin=False, buyer_key=None):
 
 
 def admin_menu():
+    return ""
+
+
+def _altes_admin_menu():
     unread_messages = count_unread_messages("admin")
     open_orders = len([order for order in get_orders() if not order["completed_at"]])
     def badge(count):
@@ -2704,6 +2812,221 @@ def admin_menu():
         {links}
     </section>
     """.format(links=links)
+
+
+
+# =====================================================================
+#   VERWALTUNG NEU (November 2026) – gemeinsame Hilfsfunktionen
+# =====================================================================
+
+WOCHENTAGE_KURZ = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+
+def smtp_is_configured():
+    return all(os.environ.get(key) for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"))
+
+
+def email_sieht_gueltig_aus(address):
+    address = str(address or "").strip()
+    if not address or " " in address or address.count("@") != 1:
+        return False
+    domain = address.split("@", 1)[1]
+    return "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
+def freundliches_datum(value, mit_zeit=True):
+    """'heute, 12:15' · 'gestern, 09:02' · 'Mo 16.11., 08:30' · '03.10.2025'"""
+    text = str(value or "").strip()
+    moment = parse_order_created_at(text)
+    if moment == datetime.min:
+        return text
+    heute = berlin_now().date()
+    tag = moment.date()
+    zeit = moment.strftime("%H:%M") if (mit_zeit and (moment.hour or moment.minute)) else ""
+    if tag == heute:
+        datum = "heute"
+    elif tag == heute - timedelta(days=1):
+        datum = "gestern"
+    elif abs((heute - tag).days) < 7:
+        datum = f"{WOCHENTAGE_KURZ[tag.weekday()]} {tag.strftime('%d.%m.')}"
+    elif tag.year == heute.year:
+        datum = tag.strftime("%d.%m.")
+    else:
+        datum = tag.strftime("%d.%m.%Y")
+    return f"{datum}, {zeit}" if zeit else datum
+
+
+def stunden_text(minutes, mit_vorzeichen=False):
+    """Einheitliche Stundenanzeige: 82:30 Std. bzw. +2:30 / −7:30"""
+    minutes = int(round(minutes or 0))
+    vorzeichen = ""
+    if mit_vorzeichen:
+        vorzeichen = "+" if minutes > 0 else ("−" if minutes < 0 else "±")
+    minutes = abs(minutes)
+    return f"{vorzeichen}{minutes // 60}:{minutes % 60:02d} Std."
+
+
+def offene_bestellungen():
+    return [order for order in get_orders() if not order["completed_at"]]
+
+
+def bestell_positionen(order_ids, nur_offene=True):
+    """Alle Positionen der angegebenen Bestellungen in einem Rutsch."""
+    order_ids = [int(order_id) for order_id in order_ids if str(order_id).isdigit()]
+    if not order_ids:
+        return []
+    placeholders = ",".join("?" for _ in order_ids)
+    con = db()
+    query = f"SELECT * FROM order_items WHERE deleted_at IS NULL AND order_id IN ({placeholders})"
+    if nur_offene:
+        query += " AND completed_at IS NULL"
+    rows = con.execute(query, order_ids).fetchall()
+    con.close()
+    return rows
+
+
+def einkaufsliste_offen():
+    """Offene Positionen aller Standorte, gruppiert nach Händler (Bezugsquelle)."""
+    orders = offene_bestellungen()
+    orders_by_id = {order["id"]: order for order in orders}
+    haendler = {}
+    for item in bestell_positionen(orders_by_id.keys()):
+        order = orders_by_id.get(item["order_id"])
+        if not order:
+            continue
+        source = (item["source"] or "").strip() or "Ohne Händler"
+        key = (normalize_text_key(item["product_name"]), normalize_text_key(item["package_size"]))
+        entry = haendler.setdefault(source, {}).setdefault(key, {
+            "product_name": item["product_name"] or "",
+            "package_size": item["package_size"] or "",
+            "category": item["category"] or "",
+            "total": 0,
+            "by_location": {},
+            "item_ids": [],
+        })
+        quantity = int(item["quantity"] or 0)
+        entry["total"] += quantity
+        location = order["location"] or "Ohne Standort"
+        entry["by_location"][location] = entry["by_location"].get(location, 0) + quantity
+        entry["item_ids"].append(str(item["id"]))
+    return haendler
+
+
+def bestellungen_automatisch_erledigen():
+    """Eine Bestellung, deren Positionen alle abgehakt sind, gilt als erledigt."""
+    con = db()
+    rows = con.execute(
+        """
+        SELECT o.id FROM orders o
+        WHERE o.completed_at IS NULL
+          AND EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.deleted_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.deleted_at IS NULL AND i.completed_at IS NULL)
+        """
+    ).fetchall()
+    con.close()
+    ids = [str(row["id"]) for row in rows]
+    if ids:
+        set_orders_completed(ids, completed=True)
+    return len(ids)
+
+
+def create_supplier_pdf(source, entries):
+    """Einkaufsliste für einen Händler als A4-PDF."""
+    number = berlin_now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
+    filename = f"einkauf_{slug_filename(source).rsplit('.', 1)[0][:30]}_{number}.pdf"
+    path = os.path.join(ORDER_DIR, filename)
+    doc = SimpleDocTemplate(path, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
+    styles = getSampleStyleSheet()
+    text = ParagraphStyle("EinkaufText", parent=styles["BodyText"], fontSize=8.6, leading=10.5, wordWrap="CJK")
+    head = ParagraphStyle("EinkaufHead", parent=text, fontName="Helvetica-Bold")
+    story = [
+        Paragraph(f"Einkaufsliste: {esc(source)}", styles["Title"]),
+        Paragraph(f"Erstellt am {berlin_now().strftime('%d.%m.%Y %H:%M')} · alle offenen Bestellungen", styles["Normal"]),
+        Spacer(1, 6 * mm),
+    ]
+    rows = [pdf_table_row(["Produkt", "Gebinde", "Menge", "Aufteilung je Standort"], head)]
+    for entry in sorted(entries, key=lambda e: (e["category"].lower(), e["product_name"].lower())):
+        aufteilung = ", ".join(f"{loc}: {qty}" for loc, qty in sorted(entry["by_location"].items()))
+        rows.append(pdf_table_row([entry["product_name"], entry["package_size"], str(entry["total"]), aufteilung], text))
+    table = Table(rows, colWidths=[70 * mm, 38 * mm, 16 * mm, 58 * mm], repeatRows=1, splitByRow=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(table)
+    doc.build(story)
+    with open(path, "rb") as f:
+        store_pdf_file(filename, f.read())
+    return filename
+
+
+def rename_category(old_name, new_name):
+    """Benennt eine Warengruppe um – auch bei allen Produkten. Gibt die Zahl geänderter Produkte zurück."""
+    old_key = normalize_text_key(old_name)
+    con = db()
+    changed = 0
+    for row in con.execute("SELECT id, category FROM products WHERE deleted_at IS NULL").fetchall():
+        categories = product_categories(row)
+        if any(normalize_text_key(c) == old_key for c in categories):
+            updated = []
+            for category in categories:
+                category = new_name if normalize_text_key(category) == old_key else category
+                if normalize_text_key(category) not in {normalize_text_key(u) for u in updated}:
+                    updated.append(category)
+            con.execute("UPDATE products SET category=? WHERE id=?", (category_text(updated), row["id"]))
+            changed += 1
+    jetzt = berlin_now().isoformat(timespec="seconds")
+    new_row = con.execute("SELECT id FROM categories WHERE name=? COLLATE NOCASE", (new_name,)).fetchone()
+    old_row = con.execute("SELECT id FROM categories WHERE name=? COLLATE NOCASE AND deleted_at IS NULL", (old_name,)).fetchone()
+    if new_row and (not old_row or new_row["id"] != old_row["id"]):
+        con.execute("UPDATE categories SET active=1, deleted_at=NULL, category_key=? WHERE id=?", (category_key(new_name), new_row["id"]))
+        if old_row:
+            con.execute("UPDATE categories SET active=0, deleted_at=? WHERE id=?", (jetzt, old_row["id"]))
+    elif old_row:
+        con.execute("UPDATE categories SET name=?, category_key=? WHERE id=?", (new_name, category_key(new_name), old_row["id"]))
+    con.commit()
+    con.close()
+    if not new_row and not old_row:
+        ensure_category(new_name)
+    return changed
+
+
+GRUPPEN_TRENNZEICHEN = ",;|/\n"
+
+
+def gruppenname_pruefen(name):
+    name = str(name or "").strip()
+    if not name:
+        return "Bitte einen Namen eingeben."
+    if any(zeichen in name for zeichen in GRUPPEN_TRENNZEICHEN):
+        return "Bitte im Namen kein Komma, Semikolon, / oder | verwenden – sonst wird die Gruppe beim Speichern in zwei geteilt. Tipp: „&“ statt Komma."
+    return ""
+
+
+def admin_hinweise():
+    """Dinge, um die sich der Admin kümmern sollte – erscheinen auf der Übersicht."""
+    hinweise = []
+    settings = load_settings()
+    if not smtp_is_configured():
+        hinweise.append(("E-Mail-Versand ist auf dem Server nicht eingerichtet. Bestell-PDFs und der Monats-Export gehen dadurch nicht per Mail raus.", "/admin/settings", "Einstellungen"))
+    for key, label in (("order_email_to", "Bestellungen"), ("time_export_email", "Zeiten-Export")):
+        address = settings.get(key, "")
+        if address and not email_sieht_gueltig_aus(address):
+            hinweise.append((f"Die E-Mail-Adresse für {label} sieht unvollständig aus: {address}", "/admin/settings", "Korrigieren"))
+    status = str(settings.get("last_auto_time_export_status") or "")
+    if "fehl" in status.lower() or "error" in status.lower():
+        hinweise.append((f"Der letzte automatische Zeiten-Export hat nicht geklappt: {status}", "/admin/time", "Ansehen"))
+    if not push_is_configured():
+        hinweise.append(("Push-Nachrichten bei neuen Bestellungen sind auf dem Server noch nicht eingerichtet.", "/admin/settings", "Mehr dazu"))
+    rechnungen = len(cockpit_invoice_orders())
+    if rechnungen:
+        hinweise.append((f"{rechnungen} abgeholte Kundenaufträge warten auf eine Rechnung.", "/admin/orders?ansicht=rechnung", "Ansehen"))
+    return hinweise
+
+ERLEDIGT_MARKE = '<span class="vw-marke gruen">✓ erledigt</span>'
 
 
 class App(BaseHTTPRequestHandler):
@@ -2962,13 +3285,21 @@ class App(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path == "/admin":
-            return self.show_admin(query=parse_qs(parsed.query))
+            return self.show_admin_overview(query=parse_qs(parsed.query))
+        if path == "/admin/mehr":
+            return self.show_admin_more(query=parse_qs(parsed.query))
+        if path == "/admin/products":
+            return self.show_products(query=parse_qs(parsed.query))
         if path == "/admin/edit-product":
             return self.show_edit_product(query=parse_qs(parsed.query))
         if path == "/admin/orders":
             return self.show_admin_orders(query=parse_qs(parsed.query))
+        if path == "/admin/einkauf":
+            return self.show_einkauf(query=parse_qs(parsed.query))
         if path == "/admin/cockpit-content":
-            return self.show_admin_cockpit_content(query=parse_qs(parsed.query))
+            return self.redirect("/admin/aufgaben")
+        if path == "/admin/aufgaben":
+            return self.show_aufgaben(query=parse_qs(parsed.query))
         if path == "/admin/messages":
             return self.show_admin_messages(query=parse_qs(parsed.query))
         if path == "/pdf-viewer":
@@ -2992,7 +3323,10 @@ class App(BaseHTTPRequestHandler):
         if path == "/admin/locations":
             return self.show_locations(query=parse_qs(parsed.query))
         if path == "/admin/visibility":
-            return self.show_visibility(query=parse_qs(parsed.query))
+            ort = (parse_qs(parsed.query).get("location", [""])[0] or (get_locations()[0]["id"] if get_locations() else ""))
+            return self.redirect("/admin/location?tab=sortiment&id=" + quote_plus(ort))
+        if path == "/admin/location":
+            return self.show_location_detail(query=parse_qs(parsed.query))
         self.send_html(page("Nicht gefunden", "<p>Diese Seite gibt es nicht.</p>", buyer_key=self.current_buyer_key()), 404)
 
 
@@ -3228,6 +3562,7 @@ class App(BaseHTTPRequestHandler):
                 <div>
                     {image}
                     <strong>{esc(item['title'])}</strong>
+                    {f'<p class="cockpit-abholung">Abholung: {esc(format_iso_date(item["pickup_date"]))}</p>' if item.get("pickup_date") else ''}
                     {f'<p>{esc(item["note"])}</p>' if item.get("note") else ''}
                     <span class="cockpit-state">{esc(state_label)}</span>
                 </div>
@@ -3537,89 +3872,6 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Nachrichten", body, buyer_key=buyer_key))
 
-    def show_admin_messages(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        selected_location = (query.get("location", [""])[0] or "").strip()
-        selected_recipient = (query.get("recipient", [""])[0] or "").strip()
-        threads = cockpit_message_threads()
-        location_options = '<option value="">Standort auswählen</option>' + "".join(
-            f'<option value="{esc(location["id"])}" {"selected" if location["id"] == selected_location else ""}>{esc(location["name"])}</option>'
-            for location in get_locations()
-        )
-        employee_options = '<option value="">Teammitglied auswählen</option>' + option_html(get_time_employee_names(True), selected_recipient)
-        if (not selected_location or not selected_recipient) and threads:
-            selected_location = threads[0]["location_id"]
-            selected_recipient = threads[0]["recipient_name"]
-        messages = get_cockpit_messages(selected_location, selected_recipient, mark_read_for="admin") if selected_location and selected_recipient else []
-        threads = cockpit_message_threads()
-        thread_rows = []
-        for thread in threads:
-            active = thread["location_id"] == selected_location and normalize_text_key(thread["recipient_name"]) == normalize_text_key(selected_recipient)
-            unread = thread["unread_admin"] > 0
-            thread_rows.append(
-                f"""
-                <a class="message-thread {'is-active' if active else ''} {'has-unread' if unread else ''}" href="/admin/messages?location={quote_plus(thread['location_id'])}&recipient={quote_plus(thread['recipient_name'])}" data-preserve-scroll>
-                    <strong>{esc(thread['recipient_name'])}</strong>
-                    <span>{esc(thread['location_name'])} · {esc(thread['last_created_at'])}</span>
-                    {f'<i>{thread["unread_admin"]}</i>' if unread else ''}
-                </a>
-                """
-            )
-        chat_rows = []
-        for message in messages:
-            own = message["sender_role"] == "admin"
-            chat_rows.append(
-                f"""
-                <article class="chat-message {'own' if own else 'other'}">
-                    <strong>{esc(message['sender_name'])}</strong>
-                    <p>{esc(message['message'])}</p>
-                    <span>{esc(message['created_at'])}</span>
-                </article>
-                """
-            )
-        reply_form = ""
-        if selected_location and selected_recipient:
-            reply_form = f"""
-            <form method="post" action="/admin/messages/reply" class="message-compose" data-preserve-scroll>
-                <input type="hidden" name="location_id" value="{esc(selected_location)}">
-                <input type="hidden" name="recipient_name" value="{esc(selected_recipient)}">
-                <label>Antwort<textarea name="message" rows="4" required placeholder="Antwort schreiben"></textarea></label>
-                <button class="primary" type="submit">Antwort senden</button>
-            </form>
-            """
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head">
-                <div><h2>Nachrichten</h2><p class="muted">Hier siehst du alle Nachrichten aus den Standorten und kannst direkt antworten.</p></div>
-            </div>
-            <form method="post" action="/admin/messages/reply" class="message-compose two" data-preserve-scroll>
-                <label>Standort<select name="location_id" required>{location_options}</select></label>
-                <label>Teammitglied<select name="recipient_name" required>{employee_options}</select></label>
-                <label class="full">Neue Nachricht<textarea name="message" rows="3" required placeholder="Nachricht schreiben"></textarea></label>
-                <button class="primary" type="submit">Nachricht senden</button>
-            </form>
-        </section>
-        <section class="message-layout" id="messageChat">
-            <div class="box message-inbox">
-                <h2>Inbox</h2>
-                <div class="message-thread-list">{''.join(thread_rows) if thread_rows else '<p class="muted">Noch keine Nachrichten.</p>'}</div>
-            </div>
-            <div class="box message-chat">
-                <h2>{esc(selected_recipient) if selected_recipient else 'Chat'}</h2>
-                <div class="chat-list">{''.join(chat_rows) if chat_rows else '<p class="muted">Noch kein Chat ausgewählt.</p>'}</div>
-                {reply_form}
-            </div>
-        </section>
-        """
-        self.send_html(page("Nachrichten", body, admin=True, buyer_key=self.current_buyer_key()))
-
     def show_time_form(self, error="", query=None):
         buyer_key = self.current_buyer_key()
         if not buyer_key:
@@ -3664,222 +3916,6 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Zeiterfassung", body, buyer_key=buyer_key))
 
-    def show_admin_time(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        month = (query.get("month", [current_month()])[0] or current_month()).strip()
-        if not re.match(r"^\d{4}-\d{2}$", month):
-            month = current_month()
-        employee_filter = (query.get("employee", [""])[0] or "").strip()
-        location_filter = (query.get("work_location", [""])[0] or "").strip()
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        entries = get_time_entries(month, employee_filter, location_filter)
-        by_employee, by_location, matrix = summarize_time_entries(entries)
-        full_options = option_html(time_options())
-        active_employee_names = get_time_employee_names(active_only=True)
-        add_employee_options = '<option value="">Bitte auswählen</option>' + option_html(active_employee_names)
-        create_disabled = "" if active_employee_names else " disabled"
-        location_options = '<option value="">Bitte auswählen</option>' + "".join(
-            f'<option value="{esc(location["id"])}">{esc(location["name"])}</option>' for location in get_locations()
-        )
-        time_limit_rows = []
-        locations = get_locations()
-        for location in locations:
-            selected_limit = location.get("time_tracking_max_end", "")
-            limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), selected_limit)
-            time_limit_rows.append(
-                f"""
-                <label class="time-limit-row">
-                    <span><strong>{esc(location['name'])}</strong><small>{'Zeiterfassung aktiv' if location.get('time_tracking_enabled') else 'Zeiterfassung deaktiviert'}</small></span>
-                    <select name="time_limit_{esc(location['id'])}">{limit_options}</select>
-                </label>
-                """
-            )
-        initial_shift_rows = []
-        for index in range(3):
-            initial_shift_rows.append(
-                f"""
-                <div class="bulk-time-row" data-bulk-time-row>
-                    <label>Datum<input name="shift_date_{index}" type="date" value="{esc(today_iso())}"></label>
-                    <label>Anfang<select name="shift_start_{index}"><option value="">Bitte auswählen</option>{full_options}</select></label>
-                    <label>Ende<select name="shift_end_{index}"><option value="">Bitte auswählen</option>{full_options}</select></label>
-                    <label class="bulk-time-note">Hinweis<textarea name="shift_note_{index}" rows="2" placeholder="Optional"></textarea></label>
-                </div>
-                """
-            )
-        bulk_shift_template = esc(
-            """
-            <div class="bulk-time-row" data-bulk-time-row>
-                <label>Datum<input name="shift_date___INDEX__" type="date" value="__TODAY__"></label>
-                <label>Anfang<select name="shift_start___INDEX__"><option value="">Bitte auswählen</option>__START_OPTIONS__</select></label>
-                <label>Ende<select name="shift_end___INDEX__"><option value="">Bitte auswählen</option>__END_OPTIONS__</select></label>
-                <label class="bulk-time-note">Hinweis<textarea name="shift_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
-                <button class="button danger bulk-time-remove" type="button">Zeile entfernen</button>
-            </div>
-            """.replace("__TODAY__", today_iso()).replace("__START_OPTIONS__", full_options).replace("__END_OPTIONS__", full_options)
-        )
-        employees_by_key = employee_settings_map()
-        summary_employee_rows = []
-        for name, minutes in sorted(by_employee.items(), key=lambda item: item[0].lower()):
-            hours, overtime, salary = employee_payroll_values(name, minutes, employees_by_key)
-            summary_employee_rows.append(
-                f"<tr><td>{esc(name)}</td><td>{esc(format_decimal(hours))}</td><td>{esc(format_decimal(overtime))}</td><td>{esc(format_money(salary))}</td></tr>"
-            )
-        summary_employee = "".join(summary_employee_rows)
-        summary_location = "".join(
-            f"<tr><td>{esc(name)}</td><td>{esc(format_duration(minutes))}</td></tr>"
-            for name, minutes in sorted(by_location.items(), key=lambda item: item[0].lower())
-        )
-        matrix_rows = []
-        for employee, locations in sorted(matrix.items(), key=lambda item: item[0].lower()):
-            for work_location, minutes in sorted(locations.items(), key=lambda item: item[0].lower()):
-                matrix_rows.append(f"<tr><td>{esc(employee)}</td><td>{esc(work_location)}</td><td>{esc(format_duration(minutes))}</td></tr>")
-        entries_by_employee = {}
-        employee_names_all = get_time_employee_names(active_only=False)
-        for entry in entries:
-            end_options = option_html(time_options(), entry["end_time"])
-            entry_employee_names = list(employee_names_all)
-            if entry["employee_name"] and entry["employee_name"] not in entry_employee_names:
-                entry_employee_names.append(entry["employee_name"])
-            employee_options = option_html(entry_employee_names, entry["employee_name"])
-            status_text = "bearbeitet" if entry["edited"] else "original"
-            if entry["updated_at"]:
-                status_text += f" · {entry['updated_at']}"
-            employee_name = entry["employee_name"] or "Ohne Namen"
-            entries_by_employee.setdefault(employee_name, []).append(
-                f"""
-                <details class="time-entry-card compact-time-entry">
-                    <summary class="time-entry-summary">
-                        <span class="time-entry-main">
-                            <span>{esc(entry['work_date'])} · {esc(entry['start_time'])}-{esc(entry['end_time'])}</span>
-                            <strong>{esc(entry['work_location'])}</strong>
-                        </span>
-                        <span class="time-entry-meta">
-                            <strong>{esc(format_duration(entry['duration_minutes']))}</strong>
-                        </span>
-                    </summary>
-                    <div class="time-entry-edit">
-                        <p class="entry-meta">{esc(status_text)}</p>
-                    <form method="post" action="/admin/time/update" class="time-entry-form">
-                        <input type="hidden" name="id" value="{entry['id']}">
-                        <label>Datum<input name="work_date" type="date" value="{esc(entry['work_date'])}" required></label>
-                        <label>Mitarbeiter<select name="employee_name" required>{employee_options}</select></label>
-                        <label>Einsatzort<input name="work_location" value="{esc(entry['work_location'])}" required></label>
-                        <label>Anfang<input name="start_time" type="time" value="{esc(entry['start_time'])}" required></label>
-                        <label>Ende<select name="end_time">{end_options}</select></label>
-                        <label>Dauer<input value="{esc(format_duration(entry['duration_minutes']))}" disabled></label>
-                        <label class="full">Vorkommnisse<textarea name="note" rows="3">{esc(entry['note'])}</textarea></label>
-                        <button class="primary" type="submit">Eintrag speichern</button>
-                    </form>
-                    <form method="post" action="/admin/time/delete" data-confirm="Diesen Zeiteintrag wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.">
-                        <input type="hidden" name="id" value="{entry['id']}">
-                        <input type="hidden" name="month" value="{esc(month)}">
-                        <button class="danger" type="submit">Zeiteintrag löschen</button>
-                    </form>
-                    </div>
-                </details>
-                """
-            )
-        employee_entry_panels = []
-        for employee_name, employee_cards in sorted(entries_by_employee.items(), key=lambda item: item[0].lower()):
-            total_minutes = sum(
-                int(entry["duration_minutes"] or 0)
-                for entry in entries
-                if (entry["employee_name"] or "Ohne Namen") == employee_name
-            )
-            employee_entry_panels.append(
-                f"""
-                <details class="time-person-panel">
-                    <summary>
-                        <span><strong>{esc(employee_name)}</strong><small>{len(employee_cards)} Schicht(en)</small></span>
-                        <strong>{esc(format_duration(total_minutes))}</strong>
-                    </summary>
-                    <div class="time-person-shifts">{''.join(employee_cards)}</div>
-                </details>
-                """
-            )
-        latest_log = latest_time_export_log()
-        log_text = "Noch kein Export-Protokoll vorhanden."
-        if latest_log:
-            log_text = f"{latest_log['created_at']}: {latest_log['status']} ({latest_log['export_month']}) {latest_log['message'] or ''}"
-        settings = load_settings()
-        push_configured = push_is_configured()
-        push_count = push_subscription_count(enabled_only=True)
-        push_status = "eingerichtet" if push_configured else "nicht eingerichtet"
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head">
-                <div><h2>Zeiterfassung</h2><p class="muted">Monatsübersicht, Filter, Korrekturen und Export.</p></div>
-                <a class="button primary" href="/admin/time/export?month={esc(month)}">Monat exportieren</a>
-            </div>
-            <form method="get" action="/admin/time" class="filters compact-form">
-                <label>Monat<input type="month" name="month" value="{esc(month)}"></label>
-                <label>Mitarbeiter<input name="employee" value="{esc(employee_filter)}" placeholder="Name filtern"></label>
-                <label>Einsatzort<input name="work_location" value="{esc(location_filter)}" placeholder="Filiale filtern"></label>
-                <button type="submit">Anzeigen</button>
-                <a class="button" href="/admin/time">Zurücksetzen</a>
-            </form>
-        </section>
-        <details class="category-panel admin-toggle-panel time-limit-panel">
-            <summary>Maximale Endzeiten <span>{len(locations)} Standorte</span></summary>
-            <form method="post" action="/admin/time/settings" class="time-limit-form" data-preserve-scroll>
-                <input type="hidden" name="month" value="{esc(month)}">
-                <p class="muted">Lege für jeden Standort fest, bis zu welcher Uhrzeit Mitarbeitende Zeiten erfassen dürfen. Ohne feste Grenze gilt weiterhin höchstens die aktuelle Uhrzeit.</p>
-                <div class="time-limit-list">{''.join(time_limit_rows)}</div>
-                <button class="primary" type="submit">Maximale Endzeiten speichern</button>
-            </form>
-        </details>
-        <details class="category-panel admin-toggle-panel">
-            <summary>Schichten manuell nachtragen <span>Admin</span></summary>
-            <form method="post" action="/admin/time/create" class="admin-time-create-form">
-                <label>Standort<select name="location_id" required>{location_options}</select></label>
-                <label>Mitarbeiter<select name="employee_name" required>{add_employee_options}</select></label>
-                <input type="hidden" name="shift_count" id="bulkTimeShiftCount" value="3">
-                <div class="bulk-time-rows" id="bulkTimeRows" data-template="{bulk_shift_template}">
-                    {''.join(initial_shift_rows)}
-                </div>
-                <div class="bulk-time-actions">
-                    <button class="button" type="button" id="addBulkTimeRow">Weitere Schicht hinzufügen</button>
-                    <button class="primary" type="submit"{create_disabled}>Schichten nachtragen</button>
-                </div>
-            </form>
-            {'' if active_employee_names else '<p class="error">Bitte zuerst unter Personen mindestens eine aktive Person anlegen.</p>'}
-        </details>
-        <section class="stats">
-            <div class="stat"><strong>{len(entries)}</strong><span>Einträge</span></div>
-            <div class="stat"><strong>{esc(format_duration(sum(entry['duration_minutes'] for entry in entries)))}</strong><span>Gesamtstunden</span></div>
-            <div class="stat"><strong>{len(by_employee)}</strong><span>Mitarbeiter</span></div>
-        </section>
-        <section class="box">
-            <h2>Summen je Mitarbeiter</h2>
-            <div class="table-wrap"><table><tr><th>Mitarbeiter</th><th>Gesamtstunden</th><th>Überstunden</th><th>Gehalt</th></tr>{summary_employee if summary_employee else '<tr><td colspan="4">Keine Daten.</td></tr>'}</table></div>
-        </section>
-        <section class="box">
-            <h2>Summen je Einsatzort</h2>
-            <div class="table-wrap"><table><tr><th>Einsatzort</th><th>Stunden</th></tr>{summary_location if summary_location else '<tr><td colspan="2">Keine Daten.</td></tr>'}</table></div>
-        </section>
-        <section class="box">
-            <h2>Mitarbeiter in Filialen</h2>
-            <div class="table-wrap"><table><tr><th>Mitarbeiter</th><th>Einsatzort</th><th>Stunden</th></tr>{''.join(matrix_rows) if matrix_rows else '<tr><td colspan="3">Keine Daten.</td></tr>'}</table></div>
-        </section>
-        <section class="box">
-            <h2>Einträge bearbeiten</h2>
-            <div class="time-entry-list person-entry-list">{''.join(employee_entry_panels) if employee_entry_panels else '<p>Keine Zeiteinträge für diesen Filter.</p>'}</div>
-        </section>
-        <section class="box narrow">
-            <h2>Automatischer Monats-Export</h2>
-            <p><strong>Empfänger:</strong> {esc(settings.get('time_export_email') or 'nicht gesetzt')}</p>
-            <p><strong>Status:</strong> {esc(settings.get('last_auto_time_export_status') or 'Noch kein automatischer Export.')}</p>
-            <p class="muted">{esc(log_text)}</p>
-        </section>
-        """
-        self.send_html(page("Zeiterfassung Admin", body, admin=True, buyer_key=self.current_buyer_key()))
-
     def show_pdf_viewer(self, query=None):
         if not (self.is_admin() or self.current_buyer_key()):
             return self.redirect("/login")
@@ -3903,123 +3939,6 @@ class App(BaseHTTPRequestHandler):
         </section>
         """
         self.send_html(page("PDF", body, admin=self.is_admin(), buyer_key=self.current_buyer_key()))
-
-    def show_employees(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        employees = get_time_employees(active_only=False)
-        rows = []
-        for index, employee in enumerate(employees):
-            checked = "checked" if employee.get("active", True) else ""
-            status = "aktiv" if employee.get("active", True) else "deaktiviert"
-            rows.append(
-                f"""
-                <tr>
-                    <td><input form="employeesForm" type="hidden" name="employee_original_{index}" value="{esc(employee['name'])}"><input form="employeesForm" name="employee_name_{index}" value="{esc(employee['name'])}" required></td>
-                    <td><input form="employeesForm" name="employee_hourly_wage_{index}" value="{esc(format_decimal(employee.get('hourly_wage', 0)))}" inputmode="decimal" placeholder="z. B. 13,50"></td>
-                    <td><input form="employeesForm" name="employee_monthly_hours_{index}" value="{esc(format_decimal(employee.get('monthly_hours', 0)))}" inputmode="decimal" placeholder="z. B. 80"></td>
-                    <td><label class="check"><input form="employeesForm" type="checkbox" name="employee_active_{index}" value="1" {checked}> {status}</label></td>
-                    <td><label class="check danger-check"><input form="employeesForm" type="checkbox" name="employee_remove_{index}" value="1"> Entfernen</label></td>
-                </tr>
-                """
-            )
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head">
-                <div>
-                    <h2>Personen für Zeiterfassung</h2>
-                    <p class="muted">Diese Personen erscheinen im Zeiterfassungsformular als Auswahl. Ein freies Namensfeld gibt es dort nicht mehr.</p>
-                </div>
-                <a class="button" href="/admin/time">Zur Zeiterfassung</a>
-            </div>
-            <form id="employeesForm" method="post" action="/admin/employees" data-confirm="Personenliste speichern?">
-                <input type="hidden" name="employee_count" value="{len(employees)}">
-                <div class="table-wrap">
-                    <table>
-                        <tr><th>Name</th><th>Stundenlohn</th><th>Reguläre Monatsstunden</th><th>Status</th><th>Entfernen</th></tr>
-                        {''.join(rows) if rows else '<tr><td colspan="5">Noch keine Personen angelegt.</td></tr>'}
-                    </table>
-                </div>
-                <fieldset class="visibility-box">
-                    <legend>Neue Person hinzufügen</legend>
-                    <label>Name<input name="new_employee_name" placeholder="z. B. Lisa"></label>
-                    <label>Stundenlohn<input name="new_employee_hourly_wage" inputmode="decimal" placeholder="z. B. 13,50"></label>
-                    <label>Reguläre Monatsstunden<input name="new_employee_monthly_hours" inputmode="decimal" placeholder="z. B. 80"></label>
-                </fieldset>
-                <button class="primary" type="submit">Personen speichern</button>
-            </form>
-        </section>
-        """
-        self.send_html(page("Personen", body, admin=True, buyer_key=self.current_buyer_key()))
-
-    def show_task_report(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        month = (query.get("month", [current_month()])[0] or current_month()).strip()
-        if not re.match(r"^\d{4}-\d{2}$", month):
-            month = current_month()
-        con = db()
-        rows = con.execute(
-            """
-            SELECT location_id, item_id, completed_by, updated_at
-            FROM cockpit_item_states
-            WHERE item_type='task'
-              AND state='done'
-              AND completed_by IS NOT NULL
-              AND TRIM(completed_by) != ''
-            ORDER BY updated_at DESC
-            """
-        ).fetchall()
-        con.close()
-        task_lookup = {}
-        for location in get_locations():
-            for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
-                task_lookup[(location["id"], task["id"])] = {"location": location["name"], "title": task["title"]}
-        report_rows = []
-        counts = {}
-        for row in rows:
-            try:
-                done_at = datetime.strptime(row["updated_at"], "%d.%m.%Y %H:%M")
-            except ValueError:
-                continue
-            if done_at.strftime("%Y-%m") != month:
-                continue
-            person = row["completed_by"] or "Unbekannt"
-            info = task_lookup.get((row["location_id"], row["item_id"]), {"location": row["location_id"], "title": "Aufgabe"})
-            counts[person] = counts.get(person, 0) + 1
-            report_rows.append(
-                f"<tr><td>{esc(done_at.strftime('%d.%m.%Y %H:%M'))}</td><td>{esc(person)}</td><td>{esc(info['location'])}</td><td>{esc(info['title'])}</td></tr>"
-            )
-        summary_rows = "".join(
-            f"<tr><td>{esc(person)}</td><td>{count}</td></tr>"
-            for person, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
-        )
-        body = f"""
-        {admin_menu()}
-        <section class="box">
-            <div class="section-head"><div><h2>Aufgabenreport</h2><p class="muted">Monatsübersicht, wer welche Tagesaufgaben erledigt hat.</p></div></div>
-            <form method="get" action="/admin/task-report" class="filters compact-form">
-                <label>Monat<input type="month" name="month" value="{esc(month)}"></label>
-                <button class="primary" type="submit">Anzeigen</button>
-            </form>
-        </section>
-        <section class="box">
-            <h2>Summe je Person</h2>
-            <div class="table-wrap"><table><tr><th>Person</th><th>Erledigte Aufgaben</th></tr>{summary_rows if summary_rows else '<tr><td colspan="2">Keine erledigten Aufgaben in diesem Monat.</td></tr>'}</table></div>
-        </section>
-        <section class="box">
-            <h2>Einzelne Aufgaben</h2>
-            <div class="table-wrap"><table><tr><th>Datum</th><th>Person</th><th>Standort</th><th>Aufgabe</th></tr>{''.join(report_rows) if report_rows else '<tr><td colspan="4">Keine Einträge vorhanden.</td></tr>'}</table></div>
-        </section>
-        """
-        self.send_html(page("Aufgabenreport", body, admin=True, buyer_key=self.current_buyer_key()))
 
     def show_buyer_login(self, error=""):
         options = "".join(f'<option value="{esc(location["id"])}">{esc(location["name"])} · {esc(role_label(location.get("role")))}</option>' for location in get_locations())
@@ -4470,340 +4389,6 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Adminbereich", body, admin=True, buyer_key=self.current_buyer_key()))
 
-    def show_edit_product(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        product_id = (query.get("id", [""])[0] or "").strip()
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        product = get_product(product_id)
-        if not product:
-            return self.redirect("/admin?error=" + quote_plus("Produkt wurde nicht gefunden."))
-        selected_locations = set(product_visible_location_keys(product["visible_to"]))
-        visibility_checks = "".join(
-            f'<label class="visibility-option"><input type="checkbox" name="visible_{esc(location["id"])}" value="1" {"checked" if location["id"] in selected_locations else ""}><span>{esc(location["name"])}</span></label>'
-            for location in get_locations()
-        )
-        category_checks = category_checkboxes("category", product_categories(product))
-        source_options = "".join(f'<option value="{esc(source)}"></option>' for source in get_source_names())
-        current_image = f'<p><img class="edit-preview" src="/uploads/{esc(product["image_filename"])}" alt=""></p>' if product["image_filename"] else "<p class='muted'>Für dieses Produkt ist noch kein Bild hinterlegt.</p>"
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head"><div><h2>Produkt bearbeiten</h2><p class="muted">Änderungen sind nach dem Speichern sofort im Bestellmenü sichtbar.</p></div><a class="button" href="/admin">Zurück zu Produkten</a></div>
-            <form method="post" action="/admin/update-product" enctype="multipart/form-data" class="two">
-                <datalist id="sourceSuggestions">{source_options}</datalist>
-                <input type="hidden" name="id" value="{esc(product['id'])}">
-                <label>Produktname *<input name="name" required value="{esc(product['name'])}"></label>
-                <fieldset class="visibility-box full">
-                    <legend>Kategorien *</legend>
-                    <div class="visibility-grid">{category_checks}</div>
-                </fieldset>
-                <label>Gebindegröße *<input name="package_size" required value="{esc(product['package_size'])}"></label>
-                <label>Bezugsquelle *<input name="source" list="sourceSuggestions" required value="{esc(product['source'])}"></label>
-                <label>Status<select name="active"><option value="1" {"selected" if product["active"] else ""}>aktiv</option><option value="0" {"selected" if not product["active"] else ""}>deaktiviert</option></select></label>
-                <label>Neues Produktbild<input type="file" name="image" accept="image/*"></label>
-                <div>{current_image}</div>
-                <fieldset class="visibility-box">
-                    <legend>Sichtbar für Standorte *</legend>
-                    <div class="visibility-grid">{visibility_checks}</div>
-                </fieldset>
-                <button class="primary" type="submit">Änderungen speichern</button>
-            </form>
-        </section>
-        """
-        self.send_html(page("Produkt bearbeiten", body, admin=True, buyer_key=self.current_buyer_key()))
-
-    def show_admin_orders(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        combined_pdf = (query.get("pdf", [""])[0] or "").strip()
-        open_location = (query.get("open_location", [""])[0] or "").strip()
-        open_day = (query.get("open_day", [""])[0] or "").strip()
-        orders = get_orders()
-        grouped_orders = {}
-        for order in orders:
-            grouped_orders.setdefault(order["location"] or "Ohne Standort", []).append(order)
-        location_panels = []
-        for location_name in sorted(grouped_orders.keys(), key=lambda value: value.lower()):
-            location_key = normalize_text_key(location_name) or "standort"
-            location_is_open = open_location in {location_key, location_name}
-            location_orders = sorted(grouped_orders[location_name], key=order_created_sort_key, reverse=True)
-            day_groups = {}
-            for order in location_orders:
-                day_groups.setdefault(order_day_key(order), []).append(order)
-            cards = []
-            for day_key in sorted(day_groups.keys(), key=order_day_sort_key, reverse=True):
-                day_panel_id = f"orders-{location_key}-{normalize_text_key(day_key)}"
-                day_is_open = location_is_open and open_day in {day_key, normalize_text_key(day_key)}
-                day_orders = sorted(day_groups[day_key], key=order_created_sort_key, reverse=True)
-                aggregated = {}
-                order_rows = []
-                note_rows = []
-                hidden_inputs = [
-                    f'<input type="hidden" name="return_location" value="{esc(location_key)}">',
-                    f'<input type="hidden" name="return_day" value="{esc(day_key)}">',
-                ]
-                for order in day_orders:
-                    hidden_inputs.append(f'<input type="hidden" name="order_{order["id"]}" value="1">')
-                    is_completed = bool(order["completed_at"])
-                    status_label = f"Erledigt am {esc(order['completed_at'])}" if is_completed else "Offen"
-                    status_class = "order-status done" if is_completed else "order-status open"
-                    image_link = f"<a class='button tiny' href='/order-images/{esc(order['order_image_filename'])}' target='_blank' rel='noopener'>Bild</a>" if order["order_image_filename"] else ""
-                    order_rows.append(
-                        f"""
-                        <tr class="{'order-completed-row' if is_completed else ''}">
-                            <td><label class="check order-select"><input form="combineOrdersForm" class="combine-order-check" type="checkbox" name="order_{order['id']}" value="1"> <span>{esc(order['order_number'])}</span></label></td>
-                            <td>{esc(order['created_at'])}</td>
-                            <td>{esc(order['ordered_by'])}</td>
-                            <td><span class="{status_class}">{status_label}</span></td>
-                            <td><div class="table-actions"><a class="button tiny" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF</a>{image_link}</div></td>
-                        </tr>
-                        """
-                    )
-                    if order["note"]:
-                        note_rows.append(f"<li><strong>{esc(order['order_number'])}:</strong> {esc(order['note'])}</li>")
-                    for item in get_order_items(order["id"]):
-                        key = (
-                            item["product_id"] or "",
-                            item["product_name"] or "",
-                            item["category"] or "",
-                            item["package_size"] or "",
-                            item["source"] or "",
-                        )
-                        entry = aggregated.setdefault(
-                            key,
-                            {
-                                "product_name": item["product_name"] or "",
-                                "category": item["category"] or "",
-                                "package_size": item["package_size"] or "",
-                                "source": item["source"] or "",
-                                "quantity": 0,
-                                "completed": 0,
-                                "open": 0,
-                                "item_ids": [],
-                            },
-                        )
-                        quantity = int(item["quantity"] or 0)
-                        entry["quantity"] += quantity
-                        entry["completed" if item["completed_at"] else "open"] += quantity
-                        entry["item_ids"].append(str(item["id"]))
-                item_rows = []
-                for entry in sorted(aggregated.values(), key=lambda value: (value["source"].lower(), value["category"].lower(), value["product_name"].lower())):
-                    item_rows.append(
-                        f"""
-                        <tr class="{'order-item-completed' if entry['open'] <= 0 and entry['quantity'] > 0 else ''}">
-                            <td>{esc(entry['product_name'])}</td>
-                            <td>{esc(entry['category'])}</td>
-                            <td>{esc(entry['package_size'])}</td>
-                            <td>{esc(entry['source'])}</td>
-                            <td>{esc(entry['quantity'])}</td>
-                            <td>{esc(entry['completed'])} erledigt · {esc(entry['open'])} offen</td>
-                        </tr>
-                        """
-                    )
-                position_count = len(aggregated)
-                quantity_sum = sum(entry["quantity"] for entry in aggregated.values())
-                day_label = order_day_label(day_key)
-                day_completed = all(bool(order["completed_at"]) for order in day_orders)
-                card_class = "box order-card order-day-card order-completed" if day_completed else "box order-card order-day-card"
-                day_details_open = "open" if day_is_open else ""
-                cards.append(
-                    f"""
-                    <article id="{esc(day_panel_id)}" class="{card_class}">
-                        <div class="section-head">
-                            <div>
-                                <h3>{esc(day_label)}</h3>
-                                <p class="muted">{len(day_orders)} Einzelbestellung(en) · {position_count} zusammengefasste Position(en) · {quantity_sum} Gebinde</p>
-                            </div>
-                            <div class="table-actions">
-                                <form method="post" action="/admin/orders/combined-pdf">
-                                    {''.join(hidden_inputs)}
-                                    <button class="primary" type="submit">Tagesbestellung als PDF</button>
-                                </form>
-                                <form method="post" action="/admin/orders/status">
-                                    {''.join(hidden_inputs)}
-                                    <input type="hidden" name="completed" value="{0 if day_completed else 1}">
-                                    <button type="submit" class="{'button' if day_completed else 'primary'}">{'Tag wieder öffnen' if day_completed else 'Tag erledigt'}</button>
-                                </form>
-                                <form method="post" action="/admin/orders/delete" data-confirm="Alle Einzelbestellungen dieses Tages wirklich löschen?">
-                                    {''.join(hidden_inputs)}
-                                    <button type="submit" class="danger">Tag löschen</button>
-                                </form>
-                            </div>
-                        </div>
-                        <details class="category-panel order-day-panel" {day_details_open}>
-                            <summary>Zusammengefasste Produkte <span>{position_count}</span></summary>
-                            <div class="table-wrap"><table><tr><th>Produkt</th><th>Kategorie</th><th>Gebinde</th><th>Bezugsquelle</th><th>Menge</th><th>Status</th></tr>{''.join(item_rows) if item_rows else '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
-                        </details>
-                        <details class="category-panel order-day-panel" {day_details_open}>
-                            <summary>Einzelbestellungen <span>{len(day_orders)}</span></summary>
-                            <div class="table-wrap"><table><tr><th>Bestellnummer</th><th>Zeitpunkt</th><th>Von</th><th>Status</th><th>Dateien</th></tr>{''.join(order_rows)}</table></div>
-                        </details>
-                        {f'<div class="order-note-list"><strong>Bemerkungen:</strong><ul>{"".join(note_rows)}</ul></div>' if note_rows else ''}
-                    </article>
-                    """
-                )
-            location_panels.append(
-                f"""
-                <details id="orders-location-{esc(location_key)}" class="category-panel order-location-panel" {"open" if location_is_open else ""}>
-                    <summary>{esc(location_name)} <span>{len(day_groups)} Tag(e), {len(location_orders)} Bestellung(en)</span></summary>
-                    <div class="order-location-content">{''.join(cards)}</div>
-                </details>
-                """
-            )
-        combined_button = (
-            f'<span class="inline-actions">'
-            f'<a class="button primary" href="{esc(pdf_download_href(combined_pdf))}">Gesamtbestellung als A4-PDF herunterladen</a>'
-            f'<a class="button" href="{esc(pdf_direct_href(combined_pdf))}" target="_blank" rel="noopener">Direkt öffnen / drucken</a>'
-            f'<a class="button" href="{esc(pdf_viewer_href(combined_pdf))}">Vorschau öffnen</a>'
-            f'</span>'
-        ) if combined_pdf else ""
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)} {combined_button}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <h2>Getätigte Bestellungen</h2>
-            <p class="muted">Hier siehst du Datum, Standort, Produkte, Mengen und die Gesamtübersicht jeder Bestellung.</p>
-            <form id="combineOrdersForm" method="post" action="/admin/orders/combined-pdf" class="bulk-editor order-combine-bar" data-confirm="Aktion für die ausgewählten Bestellungen ausführen?">
-                <div class="bulk-editor-actions">
-                    <label class="check"><input id="selectAllOrders" type="checkbox"> Alle angezeigten Bestellungen auswählen</label>
-                    <span class="bulk-selected-count" id="ordersSelectedCount">0 Bestellungen ausgewählt</span>
-                    <button class="primary" type="submit">Gesamtbestellung als PDF erstellen</button>
-                    <button type="submit" class="primary" formaction="/admin/orders/status" name="completed" value="1">Ausgewählte als erledigt markieren</button>
-                    <button type="submit" class="danger" formaction="/admin/orders/delete">Ausgewählte löschen</button>
-                </div>
-            </form>
-        </section>
-        <section class="order-location-sections">{''.join(location_panels) if location_panels else '<section class="box"><p>Noch keine Bestellungen vorhanden.</p></section>'}</section>
-        """
-        self.send_html(page("Bestellungen", body, admin=True, buyer_key=self.current_buyer_key()))
-
-    def show_categories(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        rows = []
-        con = db()
-        categories = get_all_categories(active_only=False)
-        product_rows = con.execute("SELECT category FROM products WHERE deleted_at IS NULL").fetchall()
-        for c in categories:
-            status = "aktiv" if c["active"] else "deaktiviert"
-            product_count = sum(1 for row in product_rows if product_has_category(row["category"], c["name"]))
-            action = "—" if category_key(c["name"]) == category_key("Allgemein") else f"<form method='post' action='/admin/delete-category' data-confirm='Kategorie wirklich löschen? Das klappt nur, wenn keine Produkte mehr zugeordnet sind.'><input type='hidden' name='name' value='{esc(c['name'])}'><button class='danger'>Löschen</button></form>"
-            rows.append(
-                f"<tr><td><span class='pill'>{esc(c['name'])}</span></td><td>{product_count}</td><td>{status}</td><td>{action}</td></tr>"
-            )
-        con.close()
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box narrow">
-            <div class="section-head"><div><h2>Kategorie erstellen</h2><p class="muted">Neu angelegte Kategorien erscheinen beim Produkt-Neuanlegen als Auswahl.</p></div></div>
-            <form method="post" action="/admin/add-category" class="inline-form">
-                <label>Kategoriename *<input name="name" required placeholder="z. B. Getränke, Verpackung, TK-Ware"></label>
-                <button class="primary" type="submit">Kategorie speichern</button>
-            </form>
-        </section>
-        <section class="box">
-            <h2>Alle Kategorien</h2>
-            <p class="muted">Kategorien können gelöscht werden, sobald keine Produkte mehr zugeordnet sind. So gehen keine Produktzuordnungen unbemerkt verloren.</p>
-            <div class="table-wrap"><table><tr><th>Name</th><th>Produkte</th><th>Status</th><th></th></tr>{''.join(rows) if rows else '<tr><td colspan="4">Noch keine Kategorien.</td></tr>'}</table></div>
-        </section>
-        """
-        self.send_html(page("Kategorien", body, admin=True, buyer_key=self.current_buyer_key()))
-
-    def show_import(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box">
-            <div class="section-head"><div><h2>Produkte importieren</h2><p class="muted">CSV funktioniert direkt. Excel-Dateien funktionieren mit installierter openpyxl-Erweiterung.</p></div></div>
-            <form method="post" action="/admin/import-products" enctype="multipart/form-data" class="two">
-                <label>CSV- oder Excel-Datei *<input type="file" name="import_file" accept=".csv,.xlsx" required></label>
-                <button class="primary" type="submit">Import starten</button>
-            </form>
-            <p class="muted">Importierte Produkte sind automatisch für alle Standorte sichtbar. Die Sichtbarkeit kann danach im Produktbereich angepasst werden.</p>
-        </section>
-        <section class="box">
-            <h2>Dateiaufbau</h2>
-            <p>Die Datei braucht eine Kopfzeile. Diese Spalten werden erkannt:</p>
-            <table>
-                <tr><th>Pflicht?</th><th>Spaltenname</th><th>Beispiel</th></tr>
-                <tr><td>Ja</td><td>Produktname oder name</td><td>Kaffeebecher</td></tr>
-                <tr><td>Ja</td><td>Gebindegröße oder package_size</td><td>Karton à 100 Stück</td></tr>
-                <tr><td>Ja</td><td>Bezugsquelle oder source</td><td>Großhandel A</td></tr>
-                <tr><td>Nein</td><td>Kategorie</td><td>Verbrauchsmaterial</td></tr>
-            </table>
-            <p class="muted">Neue Kategorien aus der Importdatei werden automatisch angelegt. Produktbilder können beim Massenimport nicht automatisch hochgeladen werden.</p>
-            <p><a class="button" href="/admin/import-template.csv">CSV-Vorlage herunterladen</a></p>
-        </section>
-        """
-        self.send_html(page("Produktimport", body, admin=True, buyer_key=self.current_buyer_key()))
-
-    def show_settings(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        error = (query.get("error", [""])[0] or "").strip()
-        settings = load_settings()
-        push_configured = push_is_configured()
-        push_count = push_subscription_count(enabled_only=True)
-        push_status = "eingerichtet" if push_configured else "nicht eingerichtet"
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        {f'<div class="error box narrow">{esc(error)}</div>' if error else ''}
-        <section class="box narrow">
-            <h2>Versand-Einstellungen</h2>
-            <form method="post" action="/admin/settings">
-                <label>E-Mail-Adresse für Bestellungen<input type="email" name="order_email_to" value="{esc(settings.get('order_email_to', ''))}" placeholder="zentrale@example.com"></label>
-                <label>WhatsApp-Kontakt / Nummer<input name="whatsapp_number" value="{esc(settings.get('whatsapp_number', ''))}" placeholder="z. B. +491701234567"></label>
-                <label>E-Mail-Adresse für Zeiterfassungs-Export<input name="time_export_email" value="{esc(settings.get('time_export_email', ''))}" placeholder="info@opapeters"></label>
-                <button class="primary" type="submit">Einstellungen speichern</button>
-            </form>
-            <p class="muted">E-Mail-Versand funktioniert nur, wenn zusätzlich SMTP-Daten beim Start gesetzt sind. WhatsApp wird als klickbarer Link vorbereitet; ein vollautomatischer WhatsApp-Versand benötigt die WhatsApp Business API.</p>
-        </section>
-        <section class="box narrow">
-            <h2>Admin-PIN ändern</h2>
-            <form method="post" action="/admin/settings" class="pin-change-form">
-                <input type="hidden" name="change_admin_pin" value="1">
-                <label>Aktuelle Admin-PIN<span class="password-wrap"><input class="password-field" type="password" name="current_admin_pin" inputmode="numeric" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                <label>Neue Admin-PIN<span class="password-wrap"><input class="password-field" type="password" name="new_admin_pin" inputmode="numeric" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                <label>Neue Admin-PIN wiederholen<span class="password-wrap"><input class="password-field" type="password" name="new_admin_pin_confirm" inputmode="numeric" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                <button class="primary" type="submit">Admin-PIN speichern</button>
-            </form>
-        </section>
-        <section class="box narrow">
-            <h2>Aktueller Status</h2>
-            <p><strong>E-Mail-Empfänger:</strong> {esc(settings.get('order_email_to') or 'nicht gesetzt')}</p>
-            <p><strong>WhatsApp-Kontakt:</strong> {esc(settings.get('whatsapp_number') or 'nicht gesetzt')}</p>
-            <p><strong>Zeiterfassungs-Export:</strong> {esc(settings.get('time_export_email') or 'nicht gesetzt')}</p>
-            <p><strong>Push:</strong> {esc(push_status)} · {push_count} aktive(s) Admin-Gerät(e)</p>
-            <form method="post" action="/admin/push/test">
-                <button class="button primary" type="submit" {"disabled" if not push_configured or push_count == 0 else ""}>Push-Test senden</button>
-            </form>
-        </section>"""
-        self.send_html(page("Admin Einstellungen", body, admin=True, buyer_key=self.current_buyer_key()))
-
-
     def show_admin_cockpit_content(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -5078,314 +4663,6 @@ class App(BaseHTTPRequestHandler):
         self.send_html(page("Aufträge & Aufgaben", body, admin=True, buyer_key=self.current_buyer_key()))
 
 
-    def show_locations(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        msg = (query.get("msg", [""])[0] or "").strip()
-        open_location = (query.get("open_location", [""])[0] or "").strip()
-        locations = get_locations()
-        time_limit_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options())
-        categories = get_category_names(True)
-        products_for_visibility = get_products(False, sort="category")
-        products_for_min_stock = get_products(False, sort="category")
-        def min_stock_product_options(selected_product_id=""):
-            selected_product_id = str(selected_product_id or "")
-            options = ['<option value="">Produkt auswählen</option>']
-            for product in products_for_min_stock:
-                label = f"{product['name']} · {product['package_size']} · {category_text(product_categories(product))}"
-                selected = "selected" if str(product["id"]) == selected_product_id else ""
-                options.append(f'<option value="{product["id"]}" {selected}>{esc(label)}</option>')
-            return "".join(options)
-        def min_stock_rows(prefix, items, product_options_blank):
-            normalized_items = normalize_min_stock_items(items)
-            row_items = normalized_items if normalized_items else [{"product_id": "", "quantity": ""}]
-            rows_html = []
-            for row_index, item in enumerate(row_items):
-                rows_html.append(
-                    f"""
-                    <div class="min-stock-row" data-min-stock-row>
-                        <label>Produkt<select name="{prefix}_product_{row_index}">{min_stock_product_options(item.get('product_id'))}</select></label>
-                        <label>Mindestmenge<input type="number" name="{prefix}_qty_{row_index}" min="1" max="{MAX_ORDER_QUANTITY}" step="1" inputmode="numeric" value="{esc(item.get('quantity', ''))}"></label>
-                        <button class="button min-stock-remove" type="button">Zeile entfernen</button>
-                    </div>
-                    """
-                )
-            template = f"""
-            <template id="{prefix}_template">
-                <div class="min-stock-row" data-min-stock-row>
-                    <label>Produkt<select name="{prefix}_product___INDEX__">{product_options_blank}</select></label>
-                    <label>Mindestmenge<input type="number" name="{prefix}_qty___INDEX__" min="1" max="{MAX_ORDER_QUANTITY}" step="1" inputmode="numeric"></label>
-                    <button class="button min-stock-remove" type="button">Zeile entfernen</button>
-                </div>
-            </template>
-            """
-            return "".join(rows_html), len(row_items), template
-        def cockpit_task_rows(prefix, tasks):
-            row_items = normalize_cockpit_tasks(tasks) or [{"id": "", "title": "", "template": False, "active": True, "image_filename": ""}]
-            rows_html = []
-            for row_index, item in enumerate(row_items):
-                image_filename = item.get("image_filename", "")
-                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
-                rows_html.append(
-                    f"""
-                    <div class="cockpit-admin-row" data-cockpit-task-row>
-                        <input type="hidden" name="{prefix}_task_id_{row_index}" value="{esc(item.get('id', ''))}">
-                        <input type="hidden" name="{prefix}_task_image_current_{row_index}" value="{esc(image_filename)}">
-                        <label>Aufgabe<input name="{prefix}_task_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Kühlschrank prüfen"></label>
-                        <label>Bild<input type="file" name="{prefix}_task_image_{row_index}" accept="image/*">{image_preview}</label>
-                        <label class="check"><input id="{prefix}_task_active_{row_index}" type="checkbox" name="{prefix}_task_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
-                        <label class="check"><input type="checkbox" name="{prefix}_task_template_{row_index}" value="1" {"checked" if item.get('template') else ""}> Als Muster speichern</label>
-                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                        <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
-                    </div>
-                    """
-                )
-            template = f"""
-            <template id="{prefix}_task_template">
-                <div class="cockpit-admin-row" data-cockpit-task-row>
-                    <input type="hidden" name="{prefix}_task_id___INDEX__" value="">
-                    <input type="hidden" name="{prefix}_task_image_current___INDEX__" value="">
-                    <label>Aufgabe<input name="{prefix}_task_title___INDEX__" placeholder="z. B. Kühlschrank prüfen"></label>
-                    <label>Bild<input type="file" name="{prefix}_task_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
-                    <label class="check"><input id="{prefix}_task_active___INDEX__" type="checkbox" name="{prefix}_task_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
-                    <label class="check"><input type="checkbox" name="{prefix}_task_template___INDEX__" value="1"> Als Muster speichern</label>
-                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                    <button class="primary cockpit-row-save" type="submit">Diese Aufgabe speichern</button>
-                </div>
-            </template>
-            """
-            template_cards = []
-            for row_index, item in enumerate(row_items):
-                if not item.get("template"):
-                    continue
-                template_cards.append(
-                    f"""
-                    <div class="task-template-card">
-                        <strong>{esc(item.get('title', ''))}</strong>
-                        <button class="button activate-template-task" type="button" data-target="{prefix}_task_active_{row_index}">Im Cockpit anzeigen</button>
-                    </div>
-                    """
-                )
-            template_collection = f"""
-            <div class="task-template-box">
-                <h3>Musteraufgaben</h3>
-                <p class="muted">Gespeicherte Muster kannst du hier schnell aktivieren.</p>
-                <div class="task-template-list">{''.join(template_cards) if template_cards else '<p class="muted">Noch keine Musteraufgaben gespeichert.</p>'}</div>
-            </div>
-            """
-            return "".join(rows_html), len(row_items), template, template_collection
-        def cockpit_order_rows(prefix, orders):
-            row_items = normalize_cockpit_orders(orders) or [{"id": "", "title": "", "note": "", "active": True, "image_filename": ""}]
-            rows_html = []
-            for row_index, item in enumerate(row_items):
-                image_filename = item.get("image_filename", "")
-                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
-                rows_html.append(
-                    f"""
-                    <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
-                        <input type="hidden" name="{prefix}_order_id_{row_index}" value="{esc(item.get('id', ''))}">
-                        <input type="hidden" name="{prefix}_order_image_current_{row_index}" value="{esc(image_filename)}">
-                        <label>Bestellung<input name="{prefix}_order_title_{row_index}" value="{esc(item.get('title', ''))}" placeholder="z. B. Tortenbestellung Müller"></label>
-                        <label>Hinweis<textarea name="{prefix}_order_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
-                        <label>Bild<input type="file" name="{prefix}_order_image_{row_index}" accept="image/*">{image_preview}</label>
-                        <label class="check"><input type="checkbox" name="{prefix}_order_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
-                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                        <button class="primary cockpit-row-save" type="submit">Diese Bestellung speichern</button>
-                    </div>
-                    """
-                )
-            template = f"""
-            <template id="{prefix}_order_template">
-                <div class="cockpit-admin-row cockpit-admin-order-row" data-cockpit-order-row>
-                    <input type="hidden" name="{prefix}_order_id___INDEX__" value="">
-                    <input type="hidden" name="{prefix}_order_image_current___INDEX__" value="">
-                    <label>Bestellung<input name="{prefix}_order_title___INDEX__" placeholder="z. B. Tortenbestellung Müller"></label>
-                    <label>Hinweis<textarea name="{prefix}_order_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
-                    <label>Bild<input type="file" name="{prefix}_order_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
-                    <label class="check"><input type="checkbox" name="{prefix}_order_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
-                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                    <button class="primary cockpit-row-save" type="submit">Diese Bestellung speichern</button>
-                </div>
-            </template>
-            """
-            return "".join(rows_html), len(row_items), template
-        def production_job_rows(prefix, jobs):
-            section_options = lambda selected="": "".join(
-                f'<option value="{esc(key)}" {"selected" if key == selected else ""}>{esc(label)}</option>'
-                for key, label in PRODUCTION_SECTIONS.items()
-            )
-            row_items = normalize_production_jobs(jobs) or [{"id": "", "section": "backen", "customer_name": "", "order_text": "", "due_date": "", "note": "", "active": True, "image_filename": ""}]
-            rows_html = []
-            for row_index, item in enumerate(row_items):
-                image_filename = item.get("image_filename", "")
-                image_preview = f'<a class="cockpit-image-preview" href="/uploads/{esc(image_filename)}" target="_blank" rel="noopener"><img src="/uploads/{esc(image_filename)}" alt="">Bild öffnen</a>' if image_filename else '<span class="muted">Kein Bild hinterlegt.</span>'
-                rows_html.append(
-                    f"""
-                    <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
-                        <input type="hidden" name="{prefix}_production_id_{row_index}" value="{esc(item.get('id', ''))}">
-                        <input type="hidden" name="{prefix}_production_image_current_{row_index}" value="{esc(image_filename)}">
-                        <label>Bereich<select name="{prefix}_production_section_{row_index}">{section_options(item.get('section', 'backen'))}</select></label>
-                        <label>Name<input name="{prefix}_production_customer_name_{row_index}" value="{esc(item.get('customer_name') or item.get('title', ''))}" placeholder="z. B. Müller"></label>
-                        <label>Abholdatum<input type="date" name="{prefix}_production_due_date_{row_index}" value="{esc(item.get('due_date', ''))}"></label>
-                        <label>Was wurde bestellt<textarea name="{prefix}_production_order_text_{row_index}" rows="2" placeholder="z. B. Eistorte Erdbeere">{esc(item.get('order_text', ''))}</textarea></label>
-                        <label>Hinweis<textarea name="{prefix}_production_note_{row_index}" rows="2" placeholder="Optional">{esc(item.get('note', ''))}</textarea></label>
-                        <label>Bild<input type="file" name="{prefix}_production_image_{row_index}" accept="image/*">{image_preview}</label>
-                        <label class="check"><input type="checkbox" name="{prefix}_production_active_{row_index}" value="1" {"checked" if item.get('active', True) else ""}> Im Cockpit anzeigen</label>
-                        <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                        <button class="primary cockpit-row-save" type="submit">Diesen Auftrag speichern</button>
-                    </div>
-                    """
-                )
-            template = f"""
-            <template id="{prefix}_production_template">
-                <div class="cockpit-admin-row cockpit-admin-production-row" data-cockpit-production-row>
-                    <input type="hidden" name="{prefix}_production_id___INDEX__" value="">
-                    <input type="hidden" name="{prefix}_production_image_current___INDEX__" value="">
-                    <label>Bereich<select name="{prefix}_production_section___INDEX__">{section_options('backen')}</select></label>
-                    <label>Name<input name="{prefix}_production_customer_name___INDEX__" placeholder="z. B. Müller"></label>
-                    <label>Abholdatum<input type="date" name="{prefix}_production_due_date___INDEX__"></label>
-                    <label>Was wurde bestellt<textarea name="{prefix}_production_order_text___INDEX__" rows="2" placeholder="z. B. Eistorte Erdbeere"></textarea></label>
-                    <label>Hinweis<textarea name="{prefix}_production_note___INDEX__" rows="2" placeholder="Optional"></textarea></label>
-                    <label>Bild<input type="file" name="{prefix}_production_image___INDEX__" accept="image/*"><span class="muted">Optional</span></label>
-                    <label class="check"><input type="checkbox" name="{prefix}_production_active___INDEX__" value="1" checked> Im Cockpit anzeigen</label>
-                    <button class="button cockpit-row-remove" type="button">Zeile entfernen</button>
-                    <button class="primary cockpit-row-save" type="submit">Diesen Auftrag speichern</button>
-                </div>
-            </template>
-            """
-            return "".join(rows_html), len(row_items), template
-        category_visibility_checks = "".join(
-            f'<label class="visibility-option"><input type="checkbox" name="new_location_category_{esc(category)}" value="1" checked><span>{esc(category)}</span></label>'
-            for category in categories
-        )
-        rows = []
-        for index, location in enumerate(locations):
-            max_end_options = '<option value="">Keine feste maximale Endzeit</option>' + option_html(time_options(), location.get("time_tracking_max_end", ""))
-            current_role_options = role_options(location.get("role", "standard"))
-            location_category_checks = []
-            for category in categories:
-                category_products = [p for p in products_for_visibility if product_has_category(p, category)]
-                all_visible = bool(category_products) and all(location["id"] in product_visible_location_keys(p["visible_to"]) for p in category_products)
-                location_category_checks.append(
-                    f'<label class="visibility-option"><input type="checkbox" name="location_category_{index}_{esc(category)}" value="1" {"checked" if all_visible else ""}><span>{esc(category)} ({len(category_products)})</span></label>'
-                )
-            min_stock_prefix = f"location_min_stock_{index}"
-            min_stock_enabled = bool(location.get("min_stock_enabled"))
-            min_stock_row_html, min_stock_count, min_stock_template = min_stock_rows(
-                min_stock_prefix,
-                location.get("min_stock_items", []),
-                min_stock_product_options(""),
-            )
-            cockpit_prefix = f"location_cockpit_{index}"
-            cockpit_task_html, cockpit_task_count, cockpit_task_template, cockpit_task_templates = cockpit_task_rows(cockpit_prefix, location.get("cockpit_tasks", []))
-            cockpit_order_html, cockpit_order_count, cockpit_order_template = cockpit_order_rows(cockpit_prefix, location.get("cockpit_orders", []))
-            production_job_html, production_job_count, production_job_template = production_job_rows(cockpit_prefix, location.get("production_jobs", []))
-            cockpit_order_section = "" if is_schwarzenbek_location(location) else f"""
-                            <details class="category-panel cockpit-admin-panel">
-                                <summary>Bestellungen <span>{cockpit_order_count}</span></summary>
-                                <p class="muted">Diese Bestellinformationen erscheinen im Cockpit mit Statusauswahl.</p>
-                                <input type="hidden" id="{cockpit_prefix}_order_count" name="{cockpit_prefix}_order_count" value="{cockpit_order_count}">
-                                <div id="{cockpit_prefix}_order_rows" class="cockpit-admin-rows" data-template-id="{cockpit_prefix}_order_template" data-count-id="{cockpit_prefix}_order_count">{cockpit_order_html}</div>
-                                {cockpit_order_template}
-                                <button class="button add-cockpit-row" type="button" data-target="{cockpit_prefix}_order_rows">Bestellung hinzufügen</button>
-                            </details>
-            """
-            rows.append(
-                f"""
-                <details id="location-{esc(location['id'])}" class="category-panel location-panel" data-location-id="{esc(location['id'])}" {"open" if open_location == location["id"] else ""}>
-                    <summary>{esc(location['name'])} <span>{esc(role_label(location.get('role', 'standard')))}</span></summary>
-                    <div class="location-row">
-                        <input type="hidden" name="location_id_{index}" value="{esc(location['id'])}">
-                        <label>Standortname<input name="location_name_{index}" value="{esc(location['name'])}" required></label>
-                        <label>Rolle<select name="location_role_{index}">{current_role_options}</select></label>
-                        <label>Name der bestellenden Person<input name="location_contact_name_{index}" value="{esc(location.get('contact_name', ''))}" placeholder="z. B. Lisa"></label>
-                        <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="location_password_{index}" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="Leer lassen = kein Passwort"><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                        <label class="check feature-check"><input type="checkbox" name="location_time_tracking_{index}" value="1" {"checked" if location.get("time_tracking_enabled") else ""}> Zeiterfassung aktivieren</label>
-                        <label>Maximale Endzeit<select name="location_time_tracking_max_end_{index}">{max_end_options}</select></label>
-                        <button class="danger location-delete-button" type="submit" name="location_remove_{index}" value="1">Diesen Standort löschen</button>
-                        <fieldset class="visibility-box location-category-visibility">
-                            <legend>Produktkategorien für diesen Standort</legend>
-                            <div class="visibility-grid">{''.join(location_category_checks)}</div>
-                            <p class="muted">Hier steuerst du Kategorien. Einzelne Produkte kannst du zusätzlich unter <a href="/admin/visibility?location={esc(location['id'])}">Sichtbarkeit</a> bearbeiten.</p>
-                        </fieldset>
-                        <fieldset class="visibility-box min-stock-admin full">
-                            <legend>Mindestbestand</legend>
-                            <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="location_min_stock_enabled_{index}" value="1" data-target="min_stock_content_{index}" {"checked" if min_stock_enabled else ""}> Mindestbestellmengen für diesen Standort aktivieren</label>
-                            <div id="min_stock_content_{index}" class="min-stock-admin-content" {"hidden" if not min_stock_enabled else ""}>
-                                <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
-                                <input type="hidden" id="{min_stock_prefix}_count" name="{min_stock_prefix}_count" value="{min_stock_count}">
-                                <div id="{min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{min_stock_prefix}_template" data-count-id="{min_stock_prefix}_count">{min_stock_row_html}</div>
-                                {min_stock_template}
-                                <button class="button add-min-stock-row" type="button" data-target="{min_stock_prefix}_rows">Produkt hinzufügen</button>
-                            </div>
-                        </fieldset>
-                        <div class="visibility-box cockpit-admin-link full">
-                            <strong>Aufträge & Tagesaufgaben</strong>
-                            <p class="muted">Tagesaufgaben, Bestellhinweise und Produktionsaufgaben werden jetzt auf einer eigenen Admin-Seite gepflegt.</p>
-                            <a class="button primary" href="/admin/cockpit-content?location={esc(location['id'])}">Aufträge & Aufgaben bearbeiten</a>
-                        </div>
-                    </div>
-                </details>
-                """
-            )
-        new_min_stock_prefix = "new_location_min_stock"
-        new_min_stock_row_html, new_min_stock_count, new_min_stock_template = min_stock_rows(
-            new_min_stock_prefix,
-            [],
-            min_stock_product_options(""),
-        )
-        new_cockpit_prefix = "new_location_cockpit"
-        new_cockpit_task_html, new_cockpit_task_count, new_cockpit_task_template, new_cockpit_task_templates = cockpit_task_rows(new_cockpit_prefix, [])
-        new_cockpit_order_html, new_cockpit_order_count, new_cockpit_order_template = cockpit_order_rows(new_cockpit_prefix, [])
-        new_production_job_html, new_production_job_count, new_production_job_template = production_job_rows(new_cockpit_prefix, [])
-        body = f"""
-        {admin_menu()}
-        {f'<div class="success box narrow">{esc(msg)}</div>' if msg else ''}
-        <section class="box">
-            <h2>Standorte bearbeiten</h2>
-            <form method="post" action="/admin/locations" enctype="multipart/form-data">
-                <input type="hidden" name="location_count" value="{len(locations)}">
-                <input type="hidden" id="locationsOpenLocation" name="open_location" value="{esc(open_location)}">
-                <div class="location-list">{''.join(rows) if rows else '<p>Noch keine Standorte.</p>'}</div>
-                <details class="category-panel location-panel new-location-panel">
-                    <summary>Neuen Standort anlegen <span>+</span></summary>
-                    <div class="location-row new-location">
-                        <label>Neuer Standort<input name="new_location_name" placeholder="z. B. Filiale 4"></label>
-                        <label>Rolle<select name="new_location_role">{role_options("standard")}</select></label>
-                        <label>Name der bestellenden Person<input name="new_location_contact_name" placeholder="Optional"></label>
-                        <label>Passwort<span class="password-wrap"><input class="password-field" type="password" name="new_location_password" autocomplete="new-password" placeholder="Optional"><button type="button" class="password-toggle">Anzeigen</button></span></label>
-                        <label class="check feature-check"><input type="checkbox" name="new_location_time_tracking" value="1"> Zeiterfassung aktivieren</label>
-                        <label>Maximale Endzeit<select name="new_location_time_tracking_max_end">{time_limit_options}</select></label>
-                        <fieldset class="visibility-box location-category-visibility">
-                            <legend>Produktkategorien für neuen Standort</legend>
-                            <div class="visibility-grid">{category_visibility_checks}</div>
-                            <p class="muted">Nur Produkte aus diesen Kategorien werden für den neuen Standort sichtbar.</p>
-                        </fieldset>
-                        <fieldset class="visibility-box min-stock-admin full">
-                            <legend>Mindestbestand</legend>
-                            <label class="check feature-check"><input class="min-stock-toggle" type="checkbox" name="new_location_min_stock_enabled" value="1" data-target="new_location_min_stock_content"> Mindestbestellmengen für diesen Standort aktivieren</label>
-                            <div id="new_location_min_stock_content" class="min-stock-admin-content" hidden>
-                                <p class="muted">Wähle Produkte aus dem Sortiment und hinterlege pro Produkt eine Orientierungsmindestmenge.</p>
-                                <input type="hidden" id="{new_min_stock_prefix}_count" name="{new_min_stock_prefix}_count" value="{new_min_stock_count}">
-                                <div id="{new_min_stock_prefix}_rows" class="min-stock-rows" data-template-id="{new_min_stock_prefix}_template" data-count-id="{new_min_stock_prefix}_count">{new_min_stock_row_html}</div>
-                                {new_min_stock_template}
-                                <button class="button add-min-stock-row" type="button" data-target="{new_min_stock_prefix}_rows">Produkt hinzufügen</button>
-                            </div>
-                        </fieldset>
-                        <div class="visibility-box cockpit-admin-link full">
-                            <strong>Aufträge & Tagesaufgaben</strong>
-                            <p class="muted">Nach dem Anlegen des Standortes kannst du die Cockpit-Inhalte auf der eigenen Admin-Seite zuordnen.</p>
-                            <a class="button" href="/admin/cockpit-content">Zur Aufgaben-Seite</a>
-                        </div>
-                    </div>
-                </details>
-                <button class="primary" type="submit">Standorte speichern</button>
-            </form>
-            <p class="muted">Das Passwort wird bei der Bestellung für den gewählten Standort abgefragt. Leeres Passwort bedeutet: keine Passwortprüfung für diesen Standort.</p>
-        </section>"""
-        self.send_html(page("Standorte", body, admin=True, buyer_key=self.current_buyer_key()))
-
     def show_visibility(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -5457,6 +4734,1597 @@ class App(BaseHTTPRequestHandler):
         """
         self.send_html(page("Sichtbarkeit", body, admin=True, buyer_key=self.current_buyer_key()))
 
+
+    # =================================================================
+    #   VERWALTUNG NEU – Übersicht, Mehr, Sortiment
+    # =================================================================
+
+    def query_text(self, query, key):
+        return ((query or {}).get(key, [""])[0] or "").strip()
+
+    def admin_seite(self, titel, body, status=200):
+        self.send_html(page(titel, body, admin=True, buyer_key=self.current_buyer_key()), status)
+
+    def show_admin_overview(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        # Alte Links mit Produktsuche (/admin?q=…) landen auf der Produktseite
+        if self.query_text(query, "q"):
+            return self.redirect("/admin/products?q=" + quote_plus(self.query_text(query, "q")))
+        heute = berlin_now()
+        offene = offene_bestellungen()
+        bestell_zeilen = []
+        for order in offene[:6]:
+            anzahl = len(get_order_items(order["id"]))
+            notiz = f'<small class="vw-notiz">„{esc(order["note"])}“</small>' if order["note"] else ""
+            bestell_zeilen.append(
+                f'<a class="vw-zeile" href="/admin/orders#bestellung-{order["id"]}">'
+                f'<span><b>{esc(order["location"])}</b><small>{esc(freundliches_datum(order["created_at"]))} · {anzahl} Positionen · {esc(order["ordered_by"] or "")}</small>{notiz}</span>'
+                f'<span class="vw-pfeil" aria-hidden="true">›</span></a>'
+            )
+        mehr_bestellungen = f'<p class="vw-klein">… und {len(offene) - 6} weitere</p>' if len(offene) > 6 else ""
+        bestell_karte = f"""
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Neue Bestellungen</h3><span class="vw-zahl {'rot' if offene else ''}">{len(offene)}</span></div>
+            <div class="vw-liste">{''.join(bestell_zeilen) if bestell_zeilen else '<p class="vw-leer">Keine offenen Bestellungen. 👍</p>'}</div>
+            {mehr_bestellungen}
+            <div class="vw-karte-fuss">
+                <a class="button primary" href="/admin/einkauf">Einkaufsliste nach Händler</a>
+                <a class="button" href="/admin/orders">Alle offenen</a>
+            </div>
+        </section>"""
+
+        threads = cockpit_message_threads()
+        ungelesen = [t for t in threads if t["unread_admin"]]
+        nachricht_zeilen = []
+        for thread in (ungelesen or threads)[:5]:
+            vorschau = (thread.get("last_message") or "")[:80]
+            punkt = f'<i class="vw-punkt">{thread["unread_admin"]}</i>' if thread["unread_admin"] else ""
+            link = f'/admin/messages?location={quote_plus(thread["location_id"])}&recipient={quote_plus(thread["recipient_name"])}'
+            nachricht_zeilen.append(
+                f'<a class="vw-zeile" href="{link}">'
+                f'<span><b>{esc(thread["recipient_name"])} · {esc(thread["location_name"])}</b><small>{esc(vorschau)}</small></span>'
+                f'<span class="vw-zeit">{esc(freundliches_datum(thread["last_created_at"]))}{punkt}</span></a>'
+            )
+        nachrichten_karte = f"""
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>{'Ungelesene Nachrichten' if ungelesen else 'Nachrichten'}</h3><span class="vw-zahl {'rot' if ungelesen else ''}">{sum(t['unread_admin'] for t in threads)}</span></div>
+            <div class="vw-liste">{''.join(nachricht_zeilen) if nachricht_zeilen else '<p class="vw-leer">Noch keine Nachrichten.</p>'}</div>
+            <div class="vw-karte-fuss"><a class="button" href="/admin/messages">Alle Nachrichten</a></div>
+        </section>"""
+
+        heute_iso = today_iso()
+        heute_eintraege = [e for e in get_time_entries(current_month()) if e["work_date"] == heute_iso]
+        dienst_zeilen = "".join(
+            f'<div class="vw-zeile"><span><b>{esc(e["employee_name"])}</b><small>{esc(e["work_location"])}</small></span>'
+            f'<span class="vw-zeit">{esc(e["start_time"])}–{esc(e["end_time"])}</span></div>'
+            for e in sorted(heute_eintraege, key=lambda e: e["start_time"] or "")
+        )
+        aufgaben_zeilen = []
+        for location in get_locations():
+            tasks = [t for t in normalize_cockpit_tasks(location.get("cockpit_tasks", [])) if t.get("active")]
+            if not tasks:
+                continue
+            states = get_cockpit_state_details(location["id"])
+            erledigt = sum(
+                1 for t in tasks
+                if states.get(("task", t["id"]), {}).get("state") == "done" and cockpit_state_is_from_today(states.get(("task", t["id"])))
+            )
+            prozent = round(100 * erledigt / len(tasks))
+            aufgaben_zeilen.append(
+                f'<a class="vw-zeile" href="/admin/aufgaben?standort={quote_plus(location["id"])}"><span><b>{esc(location["name"])}</b>'
+                f'<small>Tagesaufgaben: {erledigt} von {len(tasks)} erledigt</small><span class="vw-balken"><span style="width:{prozent}%"></span></span></span></a>'
+            )
+        dienst_karte = f"""
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Heute im Dienst</h3><span class="vw-zahl">{len(heute_eintraege)}</span></div>
+            <div class="vw-liste">{dienst_zeilen or '<p class="vw-leer">Heute hat noch niemand Zeiten eingetragen.</p>'}</div>
+            {f'<h4 class="vw-zwischentitel">Aufgaben heute</h4><div class="vw-liste">{"".join(aufgaben_zeilen)}</div>' if aufgaben_zeilen else ''}
+            <div class="vw-karte-fuss"><a class="button" href="/admin/time">Zeiten</a><a class="button" href="/admin/aufgaben">Aufgaben</a></div>
+        </section>"""
+
+        hinweise = admin_hinweise()
+        hinweis_html = ""
+        if hinweise:
+            hinweis_html = '<section class="vw-hinweise"><h3>Zu erledigen</h3>' + "".join(
+                f'<div class="vw-hinweis"><span>{esc(text)}</span><a class="button" href="{esc(link)}">{esc(label)}</a></div>'
+                for text, link, label in hinweise
+            ) + "</section>"
+        produkte = get_products(False)
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Übersicht', f'{WOCHENTAGE_KURZ[heute.weekday()]}, {heute.strftime("%d.%m.%Y")} · {len(produkte)} Produkte · {len(get_locations())} Standorte')}
+        <div class="vw-raster-3">{bestell_karte}{nachrichten_karte}{dienst_karte}</div>
+        {hinweis_html}
+        """
+        self.admin_seite("Verwaltung", body)
+
+    def show_admin_more(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        punkte = [
+            ("/admin/products", "📦", "Sortiment", "Produkte, Warengruppen, Import"),
+            ("/admin/time", "👥", "Team", "Zeiten, Personen, Aufgaben"),
+            ("/admin/locations", "📍", "Standorte", "Zugänge, Sortiment je Standort, Mindestbestand"),
+            ("/admin/settings", "⚙️", "Einstellungen", "E-Mail, PIN, Push, Sicherung"),
+            ("/admin/logout", "↩", "Abmelden", "Verwaltung verlassen"),
+        ]
+        body = admin_kopf("Mehr") + '<div class="vw-liste vw-mehr">' + "".join(
+            f'<a class="vw-zeile" href="{href}"><span class="vw-symbol">{icon}</span><span><b>{esc(t)}</b><small>{esc(u)}</small></span><span class="vw-pfeil">›</span></a>'
+            for href, icon, t, u in punkte
+        ) + "</div>"
+        self.admin_seite("Mehr", body)
+
+    # ---------------------------------------------------------- Produkte
+    def show_products(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        produkte = get_products(False, sort="category")
+        gruppen = visible_category_names()
+        haendler = get_source_names()
+        standorte = get_locations()
+        alle_standorte = set(location_ids())
+        zaehler = {}
+        zeilen = []
+        for p in produkte:
+            kategorien = product_categories(p)
+            for k in kategorien:
+                zaehler[k] = zaehler.get(k, 0) + 1
+            sichtbar = set(product_visible_location_keys(p["visible_to"]))
+            if sichtbar >= alle_standorte:
+                sichtbar_text = "alle Standorte"
+            elif not sichtbar:
+                sichtbar_text = "kein Standort"
+            else:
+                sichtbar_text = ", ".join(l["name"] for l in standorte if l["id"] in sichtbar)
+            bild = (
+                f'<span>{esc((p["name"] or "?")[:1].upper())}</span><img src="/uploads/{esc(p["image_filename"])}" alt="" loading="lazy" onerror="this.remove()">'
+                if p["image_filename"] else f'<span>{esc((p["name"] or "?")[:1].upper())}</span>'
+            )
+            suche = normalize_text_key(" ".join([p["name"] or "", p["package_size"] or "", p["source"] or "", " ".join(kategorien)]))
+            status = "" if p["active"] else '<span class="vw-marke grau">ausgeblendet</span>'
+            zeilen.append(f"""
+            <div class="vw-produkt {'ist-aus' if not p['active'] else ''}" id="p-{p['id']}" data-id="{p['id']}" data-suche="{esc(suche)}"
+                 data-gruppen="{esc(' '.join(normalize_text_key(k) for k in kategorien))}" data-haendler="{esc(normalize_text_key(p['source']))}" data-status="{'aktiv' if p['active'] else 'aus'}">
+                <label class="vw-auswahl"><input class="vw-produkt-check" type="checkbox" form="bulkProductForm" name="selected_{p['id']}" value="1" aria-label="{esc(p['name'])} auswählen"></label>
+                <button type="button" class="vw-produkt-knopf" data-produkt="{p['id']}">
+                    <span class="vw-bild">{bild}</span>
+                    <span class="vw-produkt-text"><b>{esc(p['name'])}</b><small>{esc(p['package_size'])} · {esc(category_text(kategorien))}</small></span>
+                    <span class="vw-produkt-haendler">{esc(p['source'])}</span>
+                    <span class="vw-produkt-sicht">{esc(sichtbar_text)}</span>
+                    <span class="vw-produkt-status">{status}</span>
+                </button>
+            </div>""")
+        chips = '<button type="button" class="vw-chip" data-gruppe="" aria-pressed="true">Alle <span>' + str(len(produkte)) + "</span></button>" + "".join(
+            f'<button type="button" class="vw-chip" data-gruppe="{esc(normalize_text_key(g))}" aria-pressed="false">{esc(g)} <span>{zaehler.get(g, 0)}</span></button>'
+            for g in gruppen if zaehler.get(g)
+        )
+        haendler_optionen = '<option value="">Alle Händler</option>' + "".join(
+            f'<option value="{esc(normalize_text_key(h))}">{esc(h)}</option>' for h in haendler
+        )
+        quelle_liste = "".join(f'<option value="{esc(h)}"></option>' for h in haendler)
+        sichtbar_hidden = "".join(f'<input type="hidden" name="visible_{esc(l["id"])}" value="1">' for l in standorte)
+        bulk_sicht = "".join(
+            f'<label class="vw-schalter"><input type="checkbox" name="bulk_visible_{esc(l["id"])}" value="1"><span>{esc(l["name"])}</span></label>'
+            for l in standorte
+        )
+        aus = sum(1 for p in produkte if not p["active"])
+        aktionen = (
+            '<button type="button" class="primary" data-dialog="neuesProdukt">+ Neues Produkt</button>'
+            '<a class="button" href="/admin/import">Aus Datei importieren</a>'
+        )
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Sortiment', f'{len(produkte)} Produkte' + (f' · {aus} ausgeblendet' if aus else ''), aktionen, SORTIMENT_REITER, 'produkte')}
+        <datalist id="sourceSuggestions">{quelle_liste}</datalist>
+        <datalist id="vwGruppenListe">{''.join(f'<option value="{esc(g)}"></option>' for g in gruppen)}</datalist>
+        <section class="vw-werkzeug">
+            <label class="vw-suche"><span class="sr-only">Suchen</span><input id="vwProduktSuche" type="search" value="{esc(self.query_text(query, 'q'))}" placeholder="Produkt, Gebinde oder Händler suchen …" autocomplete="off"></label>
+            <select id="vwHaendlerFilter" aria-label="Händler">{haendler_optionen}</select>
+            <select id="vwStatusFilter" aria-label="Status"><option value="">Alle</option><option value="aktiv">nur sichtbare</option><option value="aus">nur ausgeblendete</option></select>
+        </section>
+        <div class="vw-chips" id="vwGruppenChips">{chips}</div>
+        <div class="vw-produkt-kopf"><label class="vw-auswahl"><input type="checkbox" id="vwAlleWaehlen" aria-label="Alle angezeigten auswählen"></label><span>Produkt</span><span>Händler</span><span>Sichtbar für</span><span></span></div>
+        <div class="vw-produktliste" id="vwProduktliste">{''.join(zeilen) or '<p class="vw-leer">Noch keine Produkte angelegt.</p>'}</div>
+        <p class="vw-leer" id="vwKeinTreffer" hidden>Kein Produkt passt zur Suche.</p>
+
+        <form id="bulkProductForm" method="post" action="/admin/bulk-products">
+            <div class="vw-massenleiste" id="vwMassenleiste" hidden>
+                <span id="vwAuswahlZahl">0 ausgewählt</span>
+                <button type="button" class="vw-hell" data-dialog="massenBearbeiten">Bearbeiten …</button>
+                <button type="submit" class="vw-gefahr-hell" name="bulk_action" value="delete" data-vw-confirm="Ausgewählte Produkte wirklich löschen? Bereits gespeicherte Bestellungen behalten ihre Daten.">Löschen</button>
+                <button type="button" class="vw-leise" id="vwAuswahlAufheben">Auswahl aufheben</button>
+            </div>
+            <dialog class="vw-dialog" id="massenBearbeiten">
+                <div class="vw-dialog-kopf"><h3>Ausgewählte Produkte ändern</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+                <p class="vw-klein">Nur was du hier ausfüllst, wird geändert. Leere Felder bleiben wie sie sind.</p>
+                <fieldset class="vw-feldgruppe"><legend>Warengruppe setzen</legend><div class="vw-schalter-raster">{category_checkboxes('bulk_category')}</div></fieldset>
+                <label>Händler<input name="bulk_source" list="sourceSuggestions" placeholder="leer lassen = behalten"></label>
+                <label>Sichtbarkeit im Bestellbereich<select name="bulk_active"><option value="keep">so lassen</option><option value="1">sichtbar</option><option value="0">ausblenden</option></select></label>
+                <label>Für welche Standorte<select name="bulk_visibility_mode" id="vwMassenSicht"><option value="keep">so lassen</option><option value="all">für alle Standorte</option><option value="custom">nur für diese:</option></select></label>
+                <div class="vw-schalter-raster" id="vwMassenStandorte" hidden>{bulk_sicht}</div>
+                <div class="vw-dialog-fuss"><button type="submit" class="primary" name="bulk_action" value="update">Änderungen anwenden</button></div>
+            </dialog>
+        </form>
+
+        <dialog class="vw-dialog vw-seitenfenster" id="vwProduktPanel" aria-label="Produkt bearbeiten">
+            <div id="vwProduktPanelInhalt"><p class="vw-leer">Wird geladen …</p></div>
+        </dialog>
+
+        <dialog class="vw-dialog vw-seitenfenster" id="neuesProdukt">
+            <div class="vw-dialog-kopf"><h3>Neues Produkt</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/add-product" enctype="multipart/form-data" class="vw-formular">
+                {sichtbar_hidden}
+                <label>Produktname *<input name="name" required></label>
+                <div class="vw-zwei">
+                    <label>Gebinde *<input name="package_size" required placeholder="z. B. Karton à 12 Stück"></label>
+                    <label>Händler *<input name="source" list="sourceSuggestions" required placeholder="aus der Liste wählen"></label>
+                </div>
+                <fieldset class="vw-feldgruppe"><legend>Warengruppe *</legend><div class="vw-schalter-raster">{category_checkboxes('category')}</div></fieldset>
+                <label>Bild (optional)<input type="file" name="image" accept="image/*"></label>
+                <p class="vw-klein">Neue Produkte sind für alle Standorte sichtbar. Einschränken kannst du das beim jeweiligen Standort unter „Sortiment“.</p>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Produkt speichern</button></div>
+            </form>
+            <details class="vw-aufklapp">
+                <summary>Mehrere Produkte auf einmal anlegen</summary>
+                <form method="post" action="/admin/add-product" class="vw-formular">
+                    <input type="hidden" id="bulkAddProductCount" name="bulk_add_count" value="3">
+                    <p class="vw-klein">Eine Zeile pro Produkt. Leere Zeilen werden übersprungen.</p>
+                    <div id="bulkAddProductRows" class="vw-mehrfach">
+                        {''.join(self._bulk_add_row(i) for i in range(3))}
+                    </div>
+                    <template id="bulkAddProductTemplate">{self._bulk_add_row('__INDEX__', entfernen=True)}</template>
+                    <div class="vw-dialog-fuss"><button class="button" id="addBulkProductRow" type="button">+ Zeile</button><button class="primary" type="submit">Alle speichern</button></div>
+                </form>
+            </details>
+        </dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Sortiment", body)
+
+    def _bulk_add_row(self, index, entfernen=False):
+        knopf = '<button class="vw-leise bulk-add-remove" type="button" aria-label="Zeile entfernen">×</button>' if entfernen else ""
+        return (
+            f'<div class="vw-mehrfach-zeile" data-bulk-add-row>'
+            f'<input name="bulk_name_{index}" placeholder="Produktname" aria-label="Produktname">'
+            f'<input name="bulk_package_size_{index}" placeholder="Gebinde" aria-label="Gebinde">'
+            f'<input name="bulk_source_{index}" list="sourceSuggestions" placeholder="Händler" aria-label="Händler">'
+            f'<input name="bulk_category_{index}" placeholder="Warengruppe" list="vwGruppenListe" aria-label="Warengruppe">'
+            f'{knopf}</div>'
+        )
+
+    def product_edit_form(self, product):
+        """Bearbeiten-Formular – im Seitenfenster und als eigene Seite."""
+        sichtbar = set(product_visible_location_keys(product["visible_to"]))
+        sichtbar_namen = [l["name"] for l in get_locations() if l["id"] in sichtbar]
+        sichtbar_hidden = "".join(
+            f'<input type="hidden" name="visible_{esc(l["id"])}" value="1">' for l in get_locations() if l["id"] in sichtbar
+        )
+        if not sichtbar_namen:
+            sichtbar_text = "für keinen Standort"
+        elif len(sichtbar_namen) == len(get_locations()):
+            sichtbar_text = "für alle Standorte"
+        else:
+            sichtbar_text = "nur für " + ", ".join(sichtbar_namen)
+        bild = (
+            f'<img class="vw-vorschau" src="/uploads/{esc(product["image_filename"])}" alt="">'
+            if product["image_filename"] else '<p class="vw-klein">Noch kein Bild hinterlegt.</p>'
+        )
+        quelle_liste = "".join(f'<option value="{esc(h)}"></option>' for h in get_source_names())
+        return f"""
+        <div class="vw-dialog-kopf"><h3>{esc(product['name'])}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+        <form method="post" action="/admin/update-product" enctype="multipart/form-data" class="vw-formular">
+            <datalist id="sourceSuggestionsPanel">{quelle_liste}</datalist>
+            <input type="hidden" name="id" value="{esc(product['id'])}">
+            {sichtbar_hidden}
+            <label>Produktname *<input name="name" required value="{esc(product['name'])}"></label>
+            <div class="vw-zwei">
+                <label>Gebinde *<input name="package_size" required value="{esc(product['package_size'])}"></label>
+                <label>Händler *<input name="source" list="sourceSuggestionsPanel" required value="{esc(product['source'])}"></label>
+            </div>
+            <fieldset class="vw-feldgruppe"><legend>Warengruppe *</legend><div class="vw-schalter-raster">{category_checkboxes('category', product_categories(product))}</div></fieldset>
+            <label>Im Bestellbereich<select name="active"><option value="1" {"selected" if product["active"] else ""}>sichtbar</option><option value="0" {"selected" if not product["active"] else ""}>ausgeblendet</option></select></label>
+            <div class="vw-zwei vw-bildfeld"><div>{bild}</div><label>Neues Bild<input type="file" name="image" accept="image/*"></label></div>
+            <p class="vw-klein">Sichtbar {esc(sichtbar_text)}. Ändern kannst du das beim jeweiligen <a href="/admin/locations">Standort</a> unter „Sortiment“.</p>
+            <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+        </form>
+        <form method="post" action="/admin/delete-product" class="vw-gefahrzone" data-vw-confirm="„{esc(product['name'])}“ wirklich löschen? Es verschwindet aus dem Bestellbereich. Alte Bestellungen behalten ihre Daten.">
+            <input type="hidden" name="id" value="{esc(product['id'])}">
+            <span>Produkt endgültig entfernen</span>
+            <button class="danger" type="submit">Löschen</button>
+        </form>
+        """
+
+    def show_edit_product(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        product = get_product(self.query_text(query, "id"))
+        if not product:
+            if self.query_text(query, "embed"):
+                return self.send_html(b'<p class="vw-leer">Produkt wurde nicht gefunden.</p>', 404)
+            return self.redirect("/admin/products?error=" + quote_plus("Produkt wurde nicht gefunden."))
+        formular = self.product_edit_form(product)
+        if self.query_text(query, "embed"):
+            return self.send_html(formular.encode("utf-8"))
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Sortiment', '', '<a class="button" href="/admin/products">‹ Zurück zur Liste</a>', SORTIMENT_REITER, 'produkte')}
+        <section class="vw-karte vw-schmal">{formular}</section>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Produkt bearbeiten", body)
+
+    # ---------------------------------------------------------- Warengruppen
+    def show_categories(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        produkte = get_products(False)
+        zeilen = []
+        for name in get_category_names(True):
+            anzahl = sum(1 for p in produkte if product_has_category(p, name))
+            if name == "Allgemein" and not anzahl:
+                continue
+            if anzahl:
+                loeschen = f'<span class="vw-klein">Löschen geht erst, wenn keine Produkte mehr drin sind.</span>'
+            else:
+                loeschen = (
+                    f'<form method="post" action="/admin/delete-category" data-vw-confirm="Warengruppe „{esc(name)}“ löschen?">'
+                    f'<input type="hidden" name="name" value="{esc(name)}"><button class="danger" type="submit">Löschen</button></form>'
+                )
+            zeilen.append(f"""
+            <tr>
+                <td><b>{esc(name)}</b></td>
+                <td class="zahl"><a href="/admin/products?gruppe={esc(normalize_text_key(name))}">{anzahl}</a></td>
+                <td>
+                    <form method="post" action="/admin/rename-category" class="vw-inline-form">
+                        <input type="hidden" name="old_name" value="{esc(name)}">
+                        <input name="new_name" value="{esc(name)}" aria-label="Neuer Name für {esc(name)}" required>
+                        <button class="button" type="submit">Umbenennen</button>
+                    </form>
+                </td>
+                <td>{loeschen}</td>
+            </tr>""")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Sortiment', 'Warengruppen ordnen die Produkte im Bestellbereich.', '', SORTIMENT_REITER, 'kategorien')}
+        <section class="vw-karte vw-schmal">
+            <form method="post" action="/admin/add-category" class="vw-inline-form">
+                <label class="vw-wachsen">Neue Warengruppe<input name="name" required placeholder="z. B. Saisonware"></label>
+                <button class="primary" type="submit">Anlegen</button>
+            </form>
+            <p class="vw-klein">Bitte kein Komma im Namen – „&amp;“ geht (z. B. „Milchprodukte &amp; Eier“).</p>
+        </section>
+        <div class="vw-tabelle-wrap">
+            <table class="vw-tabelle">
+                <tr><th>Warengruppe</th><th class="zahl">Produkte</th><th>Umbenennen</th><th></th></tr>
+                {''.join(zeilen) or '<tr><td colspan="4">Noch keine Warengruppen.</td></tr>'}
+            </table>
+        </div>
+        <p class="vw-klein">Beim Umbenennen ändert sich der Name automatisch bei allen Produkten dieser Gruppe. Gibt es den neuen Namen schon, werden beide Gruppen zusammengelegt.</p>
+        """
+        self.admin_seite("Warengruppen", body)
+
+    def handle_add_category(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        name = self.form_value(form, "name").strip()
+        fehler = gruppenname_pruefen(name)
+        if fehler:
+            return self.redirect("/admin/categories?error=" + quote_plus(fehler))
+        ensure_category(name)
+        self.redirect("/admin/categories?msg=" + quote_plus(f"Warengruppe „{name}“ angelegt."))
+
+    def handle_rename_category(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        old_name = self.form_value(form, "old_name").strip()
+        new_name = self.form_value(form, "new_name").strip()
+        fehler = gruppenname_pruefen(new_name)
+        if fehler:
+            return self.redirect("/admin/categories?error=" + quote_plus(fehler))
+        if not old_name or old_name == new_name:
+            return self.redirect("/admin/categories")
+        geaendert = rename_category(old_name, new_name)
+        self.redirect("/admin/categories?msg=" + quote_plus(f"„{old_name}“ heißt jetzt „{new_name}“. {geaendert} Produkt(e) angepasst."))
+
+    # ---------------------------------------------------------- Import mit Vorschau
+    def import_vorschau_pfad(self, token):
+        token = re.sub(r"[^a-f0-9]", "", str(token or ""))[:32]
+        if not token:
+            return ""
+        ordner = os.path.join(DATA_DIR, "import_vorschau")
+        os.makedirs(ordner, exist_ok=True)
+        return os.path.join(ordner, token + ".json")
+
+    def show_import(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        pfad = self.import_vorschau_pfad(self.query_text(query, "vorschau"))
+        vorschau_html = ""
+        if pfad and os.path.exists(pfad):
+            with open(pfad, "r", encoding="utf-8") as f:
+                daten = json.load(f)
+            zeilen = daten.get("zeilen", [])
+            neu = sum(1 for z in zeilen if z["aktion"] == "neu")
+            aendern = sum(1 for z in zeilen if z["aktion"] == "aendern")
+            gleich = sum(1 for z in zeilen if z["aktion"] == "gleich")
+            fehler = sum(1 for z in zeilen if z["aktion"] == "fehler")
+            marken = {
+                "neu": '<span class="vw-marke gruen">neu</span>',
+                "aendern": '<span class="vw-marke honig">wird geändert</span>',
+                "gleich": '<span class="vw-marke grau">schon vorhanden</span>',
+                "fehler": '<span class="vw-marke rot">fehlt etwas</span>',
+            }
+            tabelle = "".join(
+                f'<tr><td>{marken[z["aktion"]]}</td><td>{esc(z["name"])}</td><td>{esc(z["package_size"])}</td><td>{esc(z["source"])}</td><td>{esc(z["category"])}</td><td class="vw-klein">{esc(z.get("hinweis", ""))}</td></tr>'
+                for z in sorted(zeilen, key=lambda z: ["fehler", "neu", "aendern", "gleich"].index(z["aktion"]))
+            )
+            vorschau_html = f"""
+            <section class="vw-karte">
+                <div class="vw-karte-kopf"><h3>Vorschau: {esc(daten.get('dateiname', ''))}</h3></div>
+                <p><b>{neu}</b> neu · <b>{aendern}</b> werden geändert · <b>{gleich}</b> schon vorhanden (bleiben, wie sie sind) · <b>{fehler}</b> mit fehlenden Angaben (werden übersprungen)</p>
+                <p class="vw-klein">Ein Produkt gilt als „schon vorhanden“, wenn Name und Gebinde übereinstimmen. Dann werden nur Warengruppe und Händler aktualisiert – es entsteht kein doppeltes Produkt.</p>
+                <div class="vw-karte-fuss">
+                    <form method="post" action="/admin/import-confirm"><input type="hidden" name="token" value="{esc(self.query_text(query, 'vorschau'))}"><button class="primary" type="submit" {'disabled' if not (neu or aendern) else ''}>Jetzt übernehmen</button></form>
+                    <a class="button" href="/admin/import">Abbrechen</a>
+                </div>
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th></th><th>Produkt</th><th>Gebinde</th><th>Händler</th><th>Warengruppe</th><th></th></tr>{tabelle}</table></div>
+            </section>"""
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Sortiment', 'Viele Produkte auf einmal aus einer Excel- oder CSV-Datei übernehmen.', '', SORTIMENT_REITER, 'import')}
+        {vorschau_html}
+        <div class="vw-raster-2">
+            <section class="vw-karte">
+                <h3>Datei hochladen</h3>
+                <form method="post" action="/admin/import-products" enctype="multipart/form-data" class="vw-formular">
+                    <label>CSV- oder Excel-Datei<input type="file" name="import_file" accept=".csv,.xlsx,.xlsm,text/csv" required></label>
+                    <p class="vw-klein">Du siehst zuerst eine Vorschau. Gespeichert wird erst, wenn du „Jetzt übernehmen“ klickst.</p>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Vorschau anzeigen</button></div>
+                </form>
+            </section>
+            <section class="vw-karte">
+                <h3>So muss die Datei aussehen</h3>
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+                    <tr><th>Spalte</th><th>Pflicht</th><th>Beispiel</th></tr>
+                    <tr><td>Produktname</td><td>ja</td><td>Kaffeebecher 200 ml</td></tr>
+                    <tr><td>Gebindegröße</td><td>ja</td><td>Karton à 100 Stück</td></tr>
+                    <tr><td>Bezugsquelle</td><td>ja</td><td>Hefe van Haag</td></tr>
+                    <tr><td>Kategorie</td><td>nein</td><td>Becher &amp; Verpackung</td></tr>
+                </table></div>
+                <p class="vw-klein">Neue Produkte sind für alle Standorte sichtbar. Bilder lassen sich danach einzeln ergänzen.</p>
+                <a class="button" href="/admin/import-template.csv">Vorlage herunterladen</a>
+            </section>
+        </div>
+        """
+        self.admin_seite("Import", body)
+
+    def handle_import_products(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        uploaded = form.get("import_file")
+        if not isinstance(uploaded, UploadedFile) or not uploaded.content:
+            return self.redirect("/admin/import?error=" + quote_plus("Bitte eine CSV- oder Excel-Datei auswählen."))
+        if len(uploaded.content) > MAX_IMPORT_BYTES:
+            return self.redirect("/admin/import?error=" + quote_plus("Die Importdatei ist zu groß. Bitte maximal 5 MB hochladen."))
+        try:
+            rows = parse_import_file(uploaded)
+        except Exception as exc:
+            return self.redirect("/admin/import?error=" + quote_plus(str(exc)))
+        vorhandene = {}
+        for p in get_products(False):
+            vorhandene[(normalize_text_key(p["name"]), normalize_text_key(p["package_size"]))] = p
+        zeilen = []
+        gesehen = set()
+        for row in rows:
+            name = (row.get("name") or "").strip()
+            package_size = (row.get("package_size") or "").strip()
+            source = (row.get("source") or "").strip()
+            category = category_text(split_categories(row.get("category") or "Allgemein"))
+            zeile = {"name": name, "package_size": package_size, "source": source, "category": category, "aktion": "neu", "id": None, "hinweis": ""}
+            schluessel = (normalize_text_key(name), normalize_text_key(package_size))
+            if not (name and package_size and source):
+                zeile["aktion"] = "fehler"
+                fehlt = [t for t, v in (("Name", name), ("Gebinde", package_size), ("Händler", source)) if not v]
+                zeile["hinweis"] = "Es fehlt: " + ", ".join(fehlt)
+            elif schluessel in gesehen:
+                zeile["aktion"] = "fehler"
+                zeile["hinweis"] = "Steht doppelt in der Datei"
+            elif schluessel in vorhandene:
+                alt = vorhandene[schluessel]
+                zeile["id"] = alt["id"]
+                unterschiede = []
+                if normalize_text_key(alt["source"]) != normalize_text_key(source):
+                    unterschiede.append(f'Händler: {alt["source"]} → {source}')
+                if {normalize_text_key(c) for c in product_categories(alt)} != {normalize_text_key(c) for c in split_categories(category)}:
+                    unterschiede.append(f'Gruppe: {category_text(product_categories(alt))} → {category}')
+                zeile["aktion"] = "aendern" if unterschiede else "gleich"
+                zeile["hinweis"] = "; ".join(unterschiede)
+            gesehen.add(schluessel)
+            zeilen.append(zeile)
+        if not zeilen:
+            return self.redirect("/admin/import?error=" + quote_plus("In der Datei wurden keine Zeilen gefunden."))
+        token = uuid.uuid4().hex
+        with open(self.import_vorschau_pfad(token), "w", encoding="utf-8") as f:
+            json.dump({"dateiname": uploaded.filename or "", "zeilen": zeilen}, f, ensure_ascii=False)
+        self.redirect("/admin/import?vorschau=" + token)
+
+    def handle_import_confirm(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        pfad = self.import_vorschau_pfad(self.form_value(form, "token"))
+        if not pfad or not os.path.exists(pfad):
+            return self.redirect("/admin/import?error=" + quote_plus("Die Vorschau ist abgelaufen. Bitte die Datei noch einmal hochladen."))
+        with open(pfad, "r", encoding="utf-8") as f:
+            zeilen = json.load(f).get("zeilen", [])
+        con = db()
+        category_map = {}
+        for zeile in zeilen:
+            if zeile["aktion"] in ("neu", "aendern"):
+                for category in split_categories(zeile["category"]):
+                    if category not in category_map:
+                        category_map[category] = ensure_category_in_connection(con, category, active=1)
+        sync_category_metadata(con)
+        neu = geaendert = 0
+        jetzt = datetime.now().isoformat(timespec="seconds")
+        for zeile in zeilen:
+            kategorien = category_text([category_map.get(c, c) for c in split_categories(zeile["category"])])
+            if zeile["aktion"] == "neu":
+                con.execute(
+                    "INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (zeile["name"], zeile["package_size"], kategorien, zeile["source"], ALL_LOCATIONS_KEY, None, jetzt),
+                )
+                neu += 1
+            elif zeile["aktion"] == "aendern" and zeile.get("id"):
+                con.execute("UPDATE products SET category=?, source=? WHERE id=? AND deleted_at IS NULL", (kategorien, zeile["source"], zeile["id"]))
+                geaendert += 1
+        con.commit()
+        con.close()
+        os.remove(pfad)
+        self.redirect("/admin/products?msg=" + quote_plus(f"Import übernommen: {neu} neu, {geaendert} geändert."))
+
+    # =================================================================
+    #   Bestellungen: Offen · Einkaufsliste · Erledigt · Rechnungsstellung
+    # =================================================================
+    def bestell_karte(self, order, ansicht):
+        items = get_order_items(order["id"])
+        offen_items = [i for i in items if not i["completed_at"]]
+        erledigt = bool(order["completed_at"])
+        zeilen = "".join(
+            f'<tr class="{"ist-erledigt" if i["completed_at"] else ""}">'
+            f'<td><label class="vw-auswahl"><input type="checkbox" name="item_{i["id"]}" value="1" form="positionen-{order["id"]}" aria-label="{esc(i["product_name"])} auswählen"></label></td>'
+            f'<td><b>{esc(i["product_name"])}</b><small class="vw-klein-block">{esc(i["category"] or "")}</small></td>'
+            f'<td>{esc(i["package_size"])}</td><td>{esc(i["source"])}</td>'
+            f'<td class="zahl"><b>{esc(i["quantity"])}</b></td>'
+            f'<td>{ERLEDIGT_MARKE if i["completed_at"] else ""}</td></tr>'
+            for i in sorted(items, key=lambda i: ((i["source"] or "").lower(), (i["product_name"] or "").lower()))
+        )
+        bild = f'<a class="button" href="/order-images/{esc(order["order_image_filename"])}" target="_blank" rel="noopener">Foto</a>' if order["order_image_filename"] else ""
+        if erledigt:
+            status_knopf = f"""<form method="post" action="/admin/orders/status"><input type="hidden" name="order_{order['id']}" value="1"><input type="hidden" name="completed" value="0"><input type="hidden" name="return_location" value="{ansicht}"><button class="button" type="submit">Wieder öffnen</button></form>"""
+            loeschen = f"""<form method="post" action="/admin/orders/delete" data-vw-confirm="Bestellung {esc(order['order_number'])} endgültig löschen?"><input type="hidden" name="order_{order['id']}" value="1"><input type="hidden" name="return_location" value="{ansicht}"><button class="danger" type="submit">Löschen</button></form>"""
+        else:
+            status_knopf = f"""<form method="post" action="/admin/orders/status"><input type="hidden" name="order_{order['id']}" value="1"><input type="hidden" name="completed" value="1"><input type="hidden" name="return_location" value="{ansicht}"><button class="primary" type="submit">✓ Erledigt</button></form>"""
+            loeschen = ""
+        notiz = f'<p class="vw-bemerkung">„{esc(order["note"])}“</p>' if order["note"] else ""
+        unter = f'{esc(freundliches_datum(order["created_at"]))} · {esc(order["order_number"])} · {esc(order["ordered_by"] or "")}'
+        if erledigt:
+            unter += f' · erledigt {esc(order["completed_at"])}'
+        teil = f'{len(offen_items)} von {len(items)} offen' if (not erledigt and 0 < len(offen_items) < len(items)) else (f'{len(items)} Positionen' if len(items) != 1 else '1 Position')
+        return f"""
+        <div class="vw-bestellung-wrap {'ist-erledigt' if erledigt else ''}" id="order-{order['id']}">
+        <label class="vw-auswahl"><input class="vw-bestell-check" type="checkbox" name="order_{order['id']}" value="1" form="sammelForm" aria-label="Bestellung {esc(order['order_number'])} auswählen"></label>
+        <details class="vw-bestellung">
+            <summary>
+                <span class="vw-bestellung-text"><b>{esc(order['location'])}</b><small>{unter}</small>{notiz}</span>
+                <span class="vw-marke {'grau' if erledigt else 'blau'}">{teil}</span>
+            </summary>
+            <div class="vw-bestellung-inhalt">
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th></th><th>Produkt</th><th>Gebinde</th><th>Händler</th><th class="zahl">Menge</th><th></th></tr>{zeilen or '<tr><td colspan="6">Keine Positionen gespeichert.</td></tr>'}</table></div>
+                <form id="positionen-{order['id']}" method="post" action="/admin/order-items/status" class="vw-knopfreihe vw-klein-knopfe">
+                    <input type="hidden" name="return_order" value="{order['id']}">
+                    <input type="hidden" name="return_location" value="{ansicht}">
+                    <span class="vw-klein">Markierte Positionen:</span>
+                    <button class="button" type="submit" name="completed" value="1">abhaken</button>
+                    <button class="button" type="submit" name="completed" value="0">wieder öffnen</button>
+                    <button class="danger" type="submit" formaction="/admin/order-items/delete" data-vw-confirm="Markierte Positionen aus der Bestellung löschen?">löschen</button>
+                </form>
+                <div class="vw-knopfreihe">
+                    <a class="button" href="{esc(pdf_viewer_href(order['pdf_filename']))}">PDF</a>{bild}{status_knopf}{loeschen}
+                </div>
+            </div>
+        </details>
+        </div>"""
+
+    def pdf_meldung(self, pdf):
+        if not pdf:
+            return ""
+        return (
+            f'<div class="vw-meldung ok">PDF ist fertig. '
+            f'<a class="button primary" href="{esc(pdf_download_href(pdf))}">Herunterladen</a>'
+            f'<a class="button" href="{esc(pdf_direct_href(pdf))}" target="_blank" rel="noopener">Öffnen / Drucken</a></div>'
+        )
+
+    def show_admin_orders(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        ansicht = self.query_text(query, "ansicht") or "offen"
+        if ansicht not in ("offen", "erledigt", "rechnung"):
+            ansicht = "offen"
+        standort = self.query_text(query, "standort")
+        alle = get_orders()
+        offene = [o for o in alle if not o["completed_at"]]
+        kopf = admin_kopf(
+            "Bestellungen",
+            f"{len(offene)} offen · {len(alle)} insgesamt",
+            "",
+            [(k, (f"{l} ({len(offene)})" if k == "offen" else l), h) for k, l, h in BESTELL_REITER],
+            ansicht,
+        )
+        meldungen = admin_meldungen(self.query_text(query, "msg"), self.query_text(query, "error")) + self.pdf_meldung(self.query_text(query, "pdf"))
+
+        if ansicht == "rechnung":
+            zeilen = "".join(
+                f'<tr><td>{esc(r["location"]["name"])}</td><td><b>{esc(r["item"]["title"])}</b>'
+                f'{"<small class=vw-klein-block>" + esc(r["item"].get("note", "")) + "</small>" if r["item"].get("note") else ""}</td>'
+                f'<td>{esc(r["item"].get("pickup_date") and format_iso_date(r["item"]["pickup_date"]) or "–")}</td><td>{esc(r.get("updated_at") or "–")}</td></tr>'
+                for r in cockpit_invoice_orders()
+            )
+            body = f"""{meldungen}{kopf}
+            <p class="vw-klein">Kundenaufträge, die ein Standort als „abgeholt – Rechnung schreiben“ markiert hat.</p>
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Standort</th><th>Auftrag</th><th>Abholung</th><th>Markiert am</th></tr>{zeilen or '<tr><td colspan="4">Gerade wartet nichts auf eine Rechnung.</td></tr>'}</table></div>
+            <p class="vw-klein">Kundenaufträge legst du unter <a href="/admin/aufgaben?art=auftraege">Team › Aufgaben &amp; Aufträge</a> an.</p>"""
+            return self.admin_seite("Rechnungsstellung", body)
+
+        if ansicht == "erledigt":
+            monat = self.query_text(query, "monat") or current_month()
+            liste = [o for o in alle if o["completed_at"]]
+            monate = sorted({parse_order_created_at(o["created_at"]).strftime("%Y-%m") for o in liste if parse_order_created_at(o["created_at"]) != datetime.min}, reverse=True)
+            if monat != "alle":
+                liste = [o for o in liste if parse_order_created_at(o["created_at"]).strftime("%Y-%m") == monat]
+        else:
+            liste = offene
+            monate = []
+            monat = ""
+        standorte_in_liste = sorted({o["location"] or "" for o in liste}, key=str.lower)
+        if standort:
+            liste = [o for o in liste if (o["location"] or "") == standort]
+        chips = "".join(
+            f'<a class="vw-chip" aria-pressed="{"true" if s == standort else "false"}" href="/admin/orders?ansicht={ansicht}&monat={quote_plus(monat)}&standort={quote_plus(s)}">{esc(s)}</a>'
+            for s in standorte_in_liste
+        )
+        chips = (f'<a class="vw-chip" aria-pressed="{"false" if standort else "true"}" href="/admin/orders?ansicht={ansicht}&monat={quote_plus(monat)}">Alle Standorte</a>' + chips) if len(standorte_in_liste) > 1 else ""
+        monat_auswahl = ""
+        if ansicht == "erledigt":
+            optionen = '<option value="alle">Alle Monate</option>' + "".join(
+                f'<option value="{m}" {"selected" if m == monat else ""}>{esc(datetime.strptime(m, "%Y-%m").strftime("%m/%Y"))}</option>' for m in monate
+            )
+            if monat not in monate and monat != "alle":
+                optionen = f'<option value="{esc(monat)}" selected>{esc(monat)}</option>' + optionen
+            monat_auswahl = f'<form method="get" action="/admin/orders" class="vw-werkzeug"><input type="hidden" name="ansicht" value="erledigt"><select name="monat" data-auto-submit aria-label="Monat">{optionen}</select></form>'
+
+        karten = []
+        letzter_tag = None
+        for order in liste:
+            tag = order_day_key(order)
+            if ansicht == "erledigt" and tag != letzter_tag:
+                karten.append(f'<h3 class="vw-tag">{esc(freundliches_datum(order["created_at"], mit_zeit=False))}</h3>')
+                letzter_tag = tag
+            karten.append(self.bestell_karte(order, ansicht))
+        if ansicht == "offen":
+            leer = '<p class="vw-leer">Keine offenen Bestellungen. 👍</p>'
+            sammel_knoepfe = (
+                '<button type="submit" class="vw-hell">Als ein PDF</button>'
+                '<button type="submit" class="vw-hell" formaction="/admin/orders/status" name="completed" value="1">✓ Erledigt</button>'
+            )
+            alle_pdf = ""
+            if offene:
+                alle_pdf = '<form method="post" action="/admin/orders/combined-pdf" class="vw-knopfreihe">' + "".join(
+                    f'<input type="hidden" name="order_{o["id"]}" value="1">' for o in liste
+                ) + f'<input type="hidden" name="return_location" value="offen"><button class="button" type="submit">{"Alle angezeigten" if standort else "Alle offenen"} als ein PDF</button><a class="button primary" href="/admin/einkauf">Einkaufsliste nach Händler</a></form>'
+        else:
+            leer = '<p class="vw-leer">In diesem Zeitraum gibt es keine erledigten Bestellungen.</p>'
+            sammel_knoepfe = (
+                '<button type="submit" class="vw-hell">Als ein PDF</button>'
+                '<button type="submit" class="vw-hell" formaction="/admin/orders/status" name="completed" value="0">Wieder öffnen</button>'
+                '<button type="submit" class="vw-gefahr-hell" formaction="/admin/orders/delete" data-vw-confirm="Ausgewählte Bestellungen endgültig löschen?">Löschen</button>'
+            )
+            alle_pdf = ""
+        body = f"""{meldungen}{kopf}
+        {monat_auswahl}
+        {f'<div class="vw-chips">{chips}</div>' if chips else ''}
+        {alle_pdf}
+        <div class="vw-bestellliste">{''.join(karten) or leer}</div>
+        <form id="sammelForm" method="post" action="/admin/orders/combined-pdf">
+            <input type="hidden" name="return_location" value="{ansicht}">
+            <div class="vw-massenleiste" id="vwSammelLeiste" hidden>
+                <span id="vwSammelZahl">0 ausgewählt</span>{sammel_knoepfe}
+            </div>
+        </form>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Bestellungen", body)
+
+    # ---------------------------------------------------------- Einkaufsliste
+    def show_einkauf(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        haendler = einkaufsliste_offen()
+        offene = offene_bestellungen()
+        kopf = admin_kopf(
+            "Bestellungen",
+            "Alles, was offen ist – zusammengezählt und nach Händler sortiert.",
+            "",
+            [(k, (f"{l} ({len(offene)})" if k == "offen" else l), h) for k, l, h in BESTELL_REITER],
+            "einkauf",
+        )
+        bloecke = []
+        for quelle in sorted(haendler, key=lambda q: (-len(haendler[q]), q.lower())):
+            eintraege = sorted(haendler[quelle].values(), key=lambda e: (e["category"].lower(), e["product_name"].lower()))
+            gebinde = sum(e["total"] for e in eintraege)
+            zeilen = "".join(
+                f'<tr><td><b>{esc(e["product_name"])}</b><small class="vw-klein-block">{esc(e["category"])}</small></td><td>{esc(e["package_size"])}</td>'
+                f'<td class="zahl vw-gross">{e["total"]}</td>'
+                f'<td>{"".join(f"<span class=vw-standort-menge>{esc(loc)} <b>{qty}</b></span>" for loc, qty in sorted(e["by_location"].items()))}</td>'
+                f'<td><form method="post" action="/admin/einkauf/erledigt">{"".join(f"<input type=hidden name=item_{i} value=1>" for i in e["item_ids"])}'
+                f'<button class="button vw-haken" type="submit" title="Abhaken" aria-label="{esc(e["product_name"])} abhaken">✓</button></form></td></tr>'
+                for e in eintraege
+            )
+            schluessel = normalize_text_key(quelle) or "ohne"
+            bloecke.append(f"""
+            <details class="vw-haendler" open data-merken="einkauf-{esc(schluessel)}">
+                <summary><span><b>{esc(quelle)}</b><small>{len(eintraege)} Produkte · {gebinde} Gebinde</small></span></summary>
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Produkt</th><th>Gebinde</th><th class="zahl">Menge</th><th>Für</th><th></th></tr>{zeilen}</table></div>
+                <div class="vw-knopfreihe">
+                    <form method="post" action="/admin/einkauf/pdf"><input type="hidden" name="source" value="{esc(quelle)}"><button class="button" type="submit">PDF für {esc(quelle)}</button></form>
+                    <form method="post" action="/admin/einkauf/erledigt" data-vw-confirm="Alle {len(eintraege)} Produkte von {esc(quelle)} als bestellt abhaken?"><input type="hidden" name="source" value="{esc(quelle)}"><button class="primary" type="submit">✓ Alles von {esc(quelle)} abhaken</button></form>
+                </div>
+            </details>""")
+        body = f"""{admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}{self.pdf_meldung(self.query_text(query, 'pdf'))}{kopf}
+        <p class="vw-klein">Abgehakte Produkte verschwinden aus der Liste. Sind alle Produkte einer Bestellung abgehakt, wandert sie automatisch zu „Erledigt“.</p>
+        {''.join(bloecke) or '<p class="vw-leer">Nichts offen – alles bestellt. 👍</p>'}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Einkaufsliste", body)
+
+    def handle_einkauf_pdf(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        quelle = self.form_value(form, "source").strip()
+        eintraege = list(einkaufsliste_offen().get(quelle, {}).values())
+        if not eintraege:
+            return self.redirect("/admin/einkauf?error=" + quote_plus("Für diesen Händler ist nichts offen."))
+        try:
+            pdf = create_supplier_pdf(quelle, eintraege)
+        except Exception as exc:
+            print(f"Einkaufs-PDF fehlgeschlagen: {exc}")
+            return self.redirect("/admin/einkauf?error=" + quote_plus("Das PDF konnte nicht erstellt werden."))
+        self.redirect("/admin/einkauf?pdf=" + quote_plus(pdf))
+
+    def handle_einkauf_erledigt(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        quelle = self.form_value(form, "source").strip()
+        if quelle:
+            item_ids = [i for e in einkaufsliste_offen().get(quelle, {}).values() for i in e["item_ids"]]
+        else:
+            item_ids = [key[5:] for key, value in form.items() if key.startswith("item_") and value]
+        if not item_ids:
+            return self.redirect("/admin/einkauf?error=" + quote_plus("Nichts zum Abhaken gefunden."))
+        set_order_items_completed(item_ids, completed=True)
+        fertig = bestellungen_automatisch_erledigen()
+        text = f"{len(item_ids)} Position(en) abgehakt."
+        if fertig:
+            text += f" {fertig} Bestellung(en) sind damit komplett erledigt."
+        self.redirect("/admin/einkauf?msg=" + quote_plus(text))
+
+    # =================================================================
+    #   Team: Zeiten · Personen · Aufgaben & Aufträge · Auswertung
+    # =================================================================
+    def team_kopf(self, aktiv, unter="", aktionen=""):
+        return admin_kopf("Team", unter, aktionen, TEAM_REITER, aktiv)
+
+    def zeit_eintrag_karte(self, entry, month, mitarbeiter_namen):
+        namen = list(mitarbeiter_namen)
+        if entry["employee_name"] and entry["employee_name"] not in namen:
+            namen.append(entry["employee_name"])
+        status = "nachträglich geändert" if entry["edited"] else "so eingetragen"
+        notiz = f'<small class="vw-notiz">„{esc(entry["note"])}“</small>' if entry["note"] else ""
+        return f"""
+        <details class="vw-schicht">
+            <summary>
+                <span class="vw-schicht-datum">{esc(freundliches_datum(entry['work_date'], mit_zeit=False))}</span>
+                <span class="vw-schicht-zeit">{esc(entry['start_time'])}–{esc(entry['end_time'])}</span>
+                <span class="vw-schicht-ort">{esc(entry['work_location'])}{notiz}</span>
+                <b class="vw-schicht-dauer">{esc(stunden_text(entry['duration_minutes']))}</b>
+            </summary>
+            <form method="post" action="/admin/time/update" class="vw-formular vw-schicht-form">
+                <input type="hidden" name="id" value="{entry['id']}">
+                <div class="vw-drei">
+                    <label>Datum<input name="work_date" type="date" value="{esc(entry['work_date'])}" required></label>
+                    <label>Anfang<input name="start_time" type="time" step="900" value="{esc(entry['start_time'])}" required></label>
+                    <label>Ende<select name="end_time">{option_html(time_options(), entry['end_time'])}</select></label>
+                </div>
+                <div class="vw-zwei">
+                    <label>Person<select name="employee_name" required>{option_html(namen, entry['employee_name'])}</select></label>
+                    <label>Einsatzort<input name="work_location" value="{esc(entry['work_location'])}" required></label>
+                </div>
+                <label>Vorkommnisse<textarea name="note" rows="2">{esc(entry['note'])}</textarea></label>
+                <div class="vw-knopfreihe"><span class="vw-klein">{esc(status)}</span><span class="vw-wachsen"></span>
+                    <button class="primary" type="submit">Speichern</button>
+                    <button class="danger" type="submit" form="loeschen-{entry['id']}">Löschen</button>
+                </div>
+            </form>
+            <form id="loeschen-{entry['id']}" method="post" action="/admin/time/delete" data-vw-confirm="Diese Schicht wirklich löschen?"><input type="hidden" name="id" value="{entry['id']}"><input type="hidden" name="month" value="{esc(month)}"></form>
+        </details>"""
+
+    def show_admin_time(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        month = self.query_text(query, "month") or current_month()
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = current_month()
+        ort_filter = self.query_text(query, "work_location")
+        entries = get_time_entries(month, self.query_text(query, "employee"), ort_filter)
+        by_employee, by_location, matrix = summarize_time_entries(entries)
+        personen = get_time_employees(active_only=False)
+        settings_by_key = employee_settings_map()
+        aktive_namen = get_time_employee_names(active_only=True)
+        alle_namen = get_time_employee_names(active_only=False)
+        namen = list(by_employee.keys()) + [n for n in aktive_namen if n not in by_employee]
+        locations = get_locations()
+        standort_optionen = "".join(f'<option value="{esc(l["id"])}">{esc(l["name"])}</option>' for l in locations)
+        zeit_optionen = '<option value="">–</option>' + option_html(time_options())
+        karten = []
+        summe_ist = summe_lohn = 0
+        for name in sorted(namen, key=str.lower):
+            ist = by_employee.get(name, 0)
+            einstellungen = settings_by_key.get(normalize_text_key(name), {})
+            soll = int(round(parse_decimal(einstellungen.get("monthly_hours", 0)) * 60))
+            stunden, _ueber, lohn = employee_payroll_values(name, ist, settings_by_key)
+            summe_ist += ist
+            summe_lohn += lohn
+            if soll:
+                diff = ist - soll
+                diff_html = f'<span class="{"plus" if diff > 0 else ("minus" if diff < 0 else "")}">{esc(stunden_text(diff, mit_vorzeichen=True))}</span>'
+                soll_text = stunden_text(soll)
+            else:
+                diff_html = '<span class="vw-klein">kein Soll</span>'
+                soll_text = "–"
+            schichten = [e for e in entries if (e["employee_name"] or "Ohne Namen") == name]
+            nachtragen = ""
+            if name in aktive_namen:
+                nachtragen = f"""
+                <form method="post" action="/admin/time/create" class="vw-nachtragen">
+                    <input type="hidden" name="employee_name" value="{esc(name)}">
+                    <input type="hidden" name="shift_count" value="1">
+                    <b>Schicht nachtragen</b>
+                    <label>Standort<select name="location_id" required>{standort_optionen}</select></label>
+                    <label>Datum<input type="date" name="shift_date_0" value="{esc(today_iso())}" required></label>
+                    <label>Anfang<select name="shift_start_0" required>{zeit_optionen}</select></label>
+                    <label>Ende<select name="shift_end_0" required>{zeit_optionen}</select></label>
+                    <label class="vw-wachsen">Hinweis<input name="shift_note_0" placeholder="optional"></label>
+                    <button class="primary" type="submit">Eintragen</button>
+                </form>"""
+            ausgeschieden = '' if name in aktive_namen or name not in alle_namen else ' <span class="vw-marke grau">ausgeschieden</span>'
+            karten.append(f"""
+            <details class="vw-person" id="person-{esc(normalize_text_key(name))}">
+                <summary>
+                    <span class="vw-person-name"><b>{esc(name)}{ausgeschieden}</b><small>{len(schichten)} Schicht(en)</small></span>
+                    <span class="vw-person-zahl"><small>Soll</small>{esc(soll_text)}</span>
+                    <span class="vw-person-zahl"><small>Ist</small><b>{esc(stunden_text(ist))}</b></span>
+                    <span class="vw-person-zahl"><small>Plus / Minus</small>{diff_html}</span>
+                    <span class="vw-person-zahl"><small>Lohn</small>{esc(format_money(lohn)) if lohn else '–'}</span>
+                </summary>
+                <div class="vw-person-inhalt">
+                    {''.join(self.zeit_eintrag_karte(e, month, alle_namen) for e in schichten) or '<p class="vw-leer">In diesem Monat keine Schichten.</p>'}
+                    {nachtragen}
+                </div>
+            </details>""")
+        ort_zeilen = "".join(
+            f'<tr><td>{esc(n)}</td><td class="zahl">{esc(stunden_text(m))}</td></tr>' for n, m in sorted(by_location.items(), key=lambda i: i[0].lower())
+        )
+        matrix_zeilen = "".join(
+            f'<tr><td>{esc(p)}</td><td>{esc(o)}</td><td class="zahl">{esc(stunden_text(m))}</td></tr>'
+            for p, orte in sorted(matrix.items(), key=lambda i: i[0].lower()) for o, m in sorted(orte.items(), key=lambda i: i[0].lower())
+        )
+        settings = load_settings()
+        log = latest_time_export_log()
+        log_text = f"{log['created_at']}: {log['status']} ({log['export_month']}) {log['message'] or ''}" if log else "Noch kein automatischer Export gelaufen."
+        ort_optionen = '<option value="">Alle Einsatzorte</option>' + "".join(
+            f'<option value="{esc(l["name"])}" {"selected" if l["name"] == ort_filter else ""}>{esc(l["name"])}</option>' for l in locations
+        )
+        monat_name = datetime.strptime(month, "%Y-%m").strftime("%m/%Y")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.team_kopf('zeiten', f'Arbeitszeiten {monat_name} · {stunden_text(summe_ist)} · {len(entries)} Schichten', f'<a class="button primary" href="/admin/time/export?month={esc(month)}">Monat exportieren</a>')}
+        <form method="get" action="/admin/time" class="vw-werkzeug">
+            <input type="month" name="month" value="{esc(month)}" data-auto-submit aria-label="Monat">
+            <select name="work_location" data-auto-submit aria-label="Einsatzort">{ort_optionen}</select>
+        </form>
+        <div class="vw-personenliste">{''.join(karten) or '<p class="vw-leer">Noch keine Personen angelegt. <a href="/admin/employees">Personen anlegen</a></p>'}</div>
+        <p class="vw-summe">Gesamt: <b>{esc(stunden_text(summe_ist))}</b> · Lohnsumme <b>{esc(format_money(summe_lohn))}</b></p>
+        <details class="vw-aufklapp vw-karte">
+            <summary>Stunden nach Standort</summary>
+            <div class="vw-raster-2">
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Einsatzort</th><th class="zahl">Stunden</th></tr>{ort_zeilen or '<tr><td colspan="2">Keine Daten.</td></tr>'}</table></div>
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Person</th><th>Einsatzort</th><th class="zahl">Stunden</th></tr>{matrix_zeilen or '<tr><td colspan="3">Keine Daten.</td></tr>'}</table></div>
+            </div>
+        </details>
+        <p class="vw-klein">Automatischer Monats-Export an <b>{esc(settings.get('time_export_email') or 'niemanden')}</b> · {esc(settings.get('last_auto_time_export_status') or log_text)} · Die späteste Uhrzeit fürs Eintragen stellst du beim jeweiligen <a href="/admin/locations">Standort</a> ein.</p>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Zeiten", body)
+
+    def show_employees(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        personen = get_time_employees(active_only=False)
+        zeilen = "".join(f"""
+            <tr class="{'' if p.get('active', True) else 'ist-aus'}">
+                <td><input form="personenForm" name="employee_name_{i}" value="{esc(p['name'])}" aria-label="Name"></td>
+                <td><input form="personenForm" name="employee_hourly_wage_{i}" value="{esc(format_decimal(p.get('hourly_wage', 0)))}" inputmode="decimal" aria-label="Stundenlohn"></td>
+                <td><input form="personenForm" name="employee_monthly_hours_{i}" value="{esc(format_decimal(p.get('monthly_hours', 0)))}" inputmode="decimal" aria-label="Soll-Stunden im Monat"></td>
+                <td><select form="personenForm" name="employee_status_{i}" aria-label="Status">
+                    <option value="aktiv" {'selected' if p.get('active', True) else ''}>arbeitet bei uns</option>
+                    <option value="ausgeschieden" {'' if p.get('active', True) else 'selected'}>ausgeschieden</option>
+                    <option value="loeschen">aus der Liste löschen</option>
+                </select></td>
+            </tr>""" for i, p in enumerate(personen))
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.team_kopf('personen', 'Wer hier steht, kann im Standort Zeiten eintragen und Aufgaben abhaken.')}
+        <form id="personenForm" method="post" action="/admin/employees">
+            <input type="hidden" name="employee_count" value="{len(personen)}">
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+                <tr><th>Name</th><th>Stundenlohn (€)</th><th>Soll-Stunden / Monat</th><th>Status</th></tr>
+                {zeilen or '<tr><td colspan="4">Noch keine Personen.</td></tr>'}
+                <tr class="summe"><td><input name="new_employee_name" placeholder="+ Neue Person: Name"></td><td><input name="new_employee_hourly_wage" inputmode="decimal" placeholder="z. B. 14,00"></td><td><input name="new_employee_monthly_hours" inputmode="decimal" placeholder="z. B. 80"></td><td></td></tr>
+            </table></div>
+            <div class="vw-knopfreihe"><button class="primary" type="submit" data-vw-confirm="Personenliste speichern?">Speichern</button></div>
+        </form>
+        <p class="vw-klein">„Ausgeschieden“ blendet die Person bei der Zeiterfassung aus – ihre Stunden bleiben erhalten. Leer gelassene Soll-Stunden bedeuten: kein Plus/Minus.</p>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Personen", body)
+
+    def show_task_report(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        month = self.query_text(query, "month") or current_month()
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = current_month()
+        con = db()
+        rows = con.execute(
+            "SELECT location_id, item_id, completed_by, updated_at FROM cockpit_item_states WHERE item_type='task' AND state='done' AND completed_by IS NOT NULL AND TRIM(completed_by) != '' ORDER BY updated_at DESC"
+        ).fetchall()
+        con.close()
+        lookup = {}
+        for location in get_locations():
+            for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
+                lookup[(location["id"], task["id"])] = (location["name"], task["title"])
+        zeilen, zaehler = [], {}
+        for row in rows:
+            try:
+                wann = datetime.strptime(row["updated_at"], "%d.%m.%Y %H:%M")
+            except ValueError:
+                continue
+            if wann.strftime("%Y-%m") != month:
+                continue
+            ort, titel = lookup.get((row["location_id"], row["item_id"]), (row["location_id"], "Aufgabe"))
+            zaehler[row["completed_by"]] = zaehler.get(row["completed_by"], 0) + 1
+            zeilen.append(f'<tr><td>{esc(row["updated_at"])}</td><td>{esc(row["completed_by"])}</td><td>{esc(ort)}</td><td>{esc(titel)}</td></tr>')
+        summe = "".join(f'<tr><td>{esc(p)}</td><td class="zahl">{n}</td></tr>' for p, n in sorted(zaehler.items(), key=lambda i: (-i[1], i[0].lower())))
+        body = f"""
+        {self.team_kopf('auswertung', 'Wer hat welche Tagesaufgaben abgehakt?')}
+        <form method="get" action="/admin/task-report" class="vw-werkzeug"><input type="month" name="month" value="{esc(month)}" data-auto-submit aria-label="Monat"></form>
+        <div class="vw-raster-2">
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Person</th><th class="zahl">Erledigt</th></tr>{summe or '<tr><td colspan="2">In diesem Monat nichts erledigt.</td></tr>'}</table></div>
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Wann</th><th>Person</th><th>Standort</th><th>Aufgabe</th></tr>{''.join(zeilen) or '<tr><td colspan="4">Keine Einträge.</td></tr>'}</table></div>
+        </div>
+        <p class="vw-klein">Hinweis: Es zählt jeweils das letzte Abhaken einer Aufgabe – wird sie am nächsten Tag wieder abgehakt, ersetzt das den alten Eintrag.</p>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Auswertung", body)
+
+    # ---------------------------------------------------------- Aufgaben & Aufträge
+    AUFGABEN_ARTEN = [
+        ("tagesaufgaben", "Tagesaufgaben", "cockpit_tasks"),
+        ("auftraege", "Kundenaufträge", "cockpit_orders"),
+        ("infos", "Infos", "cockpit_infos"),
+        ("produktion", "Produktion", "production_jobs"),
+    ]
+
+    def show_aufgaben(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        locations = get_locations()
+        produktion = [l for l in locations if is_production_location(l)]
+        arten = [a for a in self.AUFGABEN_ARTEN if a[0] != "produktion" or produktion]
+        art = self.query_text(query, "art") or "tagesaufgaben"
+        if art not in [a[0] for a in arten]:
+            art = "tagesaufgaben"
+        schluessel = dict((a[0], a[2]) for a in arten)[art]
+        standort = self.query_text(query, "standort")
+        ziel_orte = produktion if art == "produktion" else locations
+        art_chips = "".join(
+            f'<a class="vw-chip" aria-pressed="{"true" if a[0] == art else "false"}" href="/admin/aufgaben?art={a[0]}&standort={quote_plus(standort)}">{esc(a[1])}</a>' for a in arten
+        )
+        ort_chips = "".join(
+            f'<a class="vw-chip" aria-pressed="{"true" if l["id"] == standort else "false"}" href="/admin/aufgaben?art={art}&standort={quote_plus(l["id"])}">{esc(l["name"])}</a>' for l in ziel_orte
+        )
+        if len(ziel_orte) > 1:
+            ort_chips = f'<a class="vw-chip" aria-pressed="{"false" if standort else "true"}" href="/admin/aufgaben?art={art}">Alle Standorte</a>' + ort_chips
+
+        # Formular "Neu anlegen"
+        if len(ziel_orte) > 1:
+            ort_haken = '<fieldset class="vw-feldgruppe"><legend>Für welche Standorte?</legend><div class="vw-schalter-raster">' + \
+                '<label class="vw-schalter"><input type="checkbox" data-alle-standorte><span>Alle</span></label>' + "".join(
+                    f'<label class="vw-schalter"><input type="checkbox" data-standort name="standort_{esc(l["id"])}" value="1" {"checked" if l["id"] == standort else ""}><span>{esc(l["name"])}</span></label>'
+                    for l in ziel_orte) + "</div></fieldset>"
+        else:
+            ort_haken = "".join(f'<input type="hidden" name="standort_{esc(l["id"])}" value="1">' for l in ziel_orte)
+        felder = self.aufgaben_felder(art, {})
+        neu_titel = {"tagesaufgaben": "Neue Tagesaufgabe", "auftraege": "Neuer Kundenauftrag", "infos": "Neue Info", "produktion": "Neuer Produktionsauftrag"}[art]
+        neu_form = f"""
+        <details class="vw-karte vw-aufklapp" {'open' if self.query_text(query, 'neu') else ''}>
+            <summary>+ {neu_titel}</summary>
+            <form method="post" action="/admin/aufgaben/neu" enctype="multipart/form-data" class="vw-formular">
+                <input type="hidden" name="art" value="{art}">
+                {felder}
+                {ort_haken}
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Anlegen</button></div>
+            </form>
+        </details>"""
+
+        erklaerung = {
+            "tagesaufgaben": "Aktive Tagesaufgaben erscheinen jeden Tag im Cockpit des Standorts und werden dort abgehakt. Über Nacht sind sie wieder offen. „Pausiert“ = gespeichert, aber gerade nicht im Cockpit (früher „Muster“).",
+            "auftraege": "Kundenaufträge erscheinen im Cockpit. Der Standort markiert sie als „bezahlt & abgeholt“ oder „abgeholt – Rechnung schreiben“. Letztere landen unter Bestellungen › Rechnungsstellung.",
+            "infos": "Infos sind Hinweise, die das Team im Cockpit liest – z. B. neue Preise oder Termine.",
+            "produktion": "Produktionsaufträge erscheinen im Wochenplan der Produktion.",
+        }[art]
+        bloecke = []
+        for location in (l for l in ziel_orte if not standort or l["id"] == standort):
+            eintraege = self.aufgaben_liste(location, schluessel)
+            states = get_cockpit_state_details(location["id"])
+            zeilen = [self.aufgaben_zeile(art, location, e, states) for e in eintraege]
+            bloecke.append(f"""
+            <section class="vw-aufgaben-ort">
+                <h3>{esc(location['name'])} <span class="vw-zahl">{len(eintraege)}</span></h3>
+                {''.join(zeilen) or '<p class="vw-leer">Hier ist noch nichts angelegt.</p>'}
+            </section>""")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.team_kopf('aufgaben', 'Was im Cockpit der Standorte erscheint.')}
+        <div class="vw-chips vw-chips-gross">{art_chips}</div>
+        {f'<div class="vw-chips">{ort_chips}</div>' if ort_chips else ''}
+        <p class="vw-klein">{esc(erklaerung)}</p>
+        {neu_form}
+        {''.join(bloecke)}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Aufgaben & Aufträge", body)
+
+    def aufgaben_liste(self, location, schluessel):
+        normalisierer = {
+            "cockpit_tasks": normalize_cockpit_tasks,
+            "cockpit_orders": normalize_cockpit_orders,
+            "cockpit_infos": normalize_cockpit_infos,
+            "production_jobs": normalize_production_jobs,
+        }[schluessel]
+        return normalisierer(location.get(schluessel, []))
+
+    def aufgaben_felder(self, art, e):
+        bild_feld = '<label>Bild (optional)<input type="file" name="image" accept="image/*"></label>'
+        if art == "tagesaufgaben":
+            return f'<label>Aufgabe *<input name="title" required value="{esc(e.get("title", ""))}" placeholder="z. B. Vitrine reinigen"></label>{bild_feld}'
+        if art == "auftraege":
+            return f"""<div class="vw-zwei"><label>Kunde / Auftrag *<input name="title" required value="{esc(e.get('title', ''))}" placeholder="z. B. Geburtstagstorte Müller"></label>
+                <label>Abholung am<input type="date" name="pickup_date" value="{esc(e.get('pickup_date', ''))}"></label></div>
+                <label>Was genau?<textarea name="note" rows="2" placeholder="z. B. Erdbeere, Schrift „Alles Gute“">{esc(e.get('note', ''))}</textarea></label>{bild_feld}"""
+        if art == "infos":
+            return f"""<label>Überschrift *<input name="title" required value="{esc(e.get('title', ''))}"></label>
+                <label>Text<textarea name="text" rows="3">{esc(e.get('text', ''))}</textarea></label>{bild_feld}"""
+        bereiche = "".join(f'<option value="{esc(k)}" {"selected" if k == e.get("section") else ""}>{esc(v)}</option>' for k, v in PRODUCTION_SECTIONS.items())
+        return f"""<div class="vw-drei"><label>Bereich<select name="section">{bereiche}</select></label>
+            <label>Kunde *<input name="customer_name" required value="{esc(e.get('customer_name') or e.get('title', ''))}"></label>
+            <label>Fertig bis *<input type="date" name="due_date" required value="{esc(e.get('due_date', ''))}"></label></div>
+            <label>Was wurde bestellt?<textarea name="order_text" rows="2">{esc(e.get('order_text', ''))}</textarea></label>
+            <label>Hinweis<input name="note" value="{esc(e.get('note', ''))}"></label>{bild_feld}"""
+
+    def aufgaben_zeile(self, art, location, e, states):
+        typ = {"tagesaufgaben": "task", "auftraege": "order", "produktion": "production_job"}.get(art)
+        info = states.get((typ, e["id"]), {}) if typ else {}
+        zustand = info.get("state", "open")
+        if not e.get("active", True):
+            marke = '<span class="vw-marke grau">pausiert</span>'
+        elif art == "tagesaufgaben":
+            if zustand == "done" and cockpit_state_is_from_today(info):
+                wer = f' von {esc(info["completed_by"])}' if info.get("completed_by") else ""
+                marke = f'<span class="vw-marke gruen">✓ heute erledigt{wer} · {esc(info["updated_at"][-5:])}</span>'
+            else:
+                marke = '<span class="vw-marke honig">heute offen</span>'
+        elif art == "auftraege":
+            marke = {
+                "paid_picked": '<span class="vw-marke gruen">bezahlt &amp; abgeholt</span>',
+                "picked_invoice": '<span class="vw-marke rot">abgeholt – Rechnung offen</span>',
+            }.get(zustand, '<span class="vw-marke blau">offen</span>')
+        elif art == "produktion":
+            marke = {"started": '<span class="vw-marke honig">in Arbeit</span>', "done": '<span class="vw-marke gruen">fertig</span>'}.get(zustand, '<span class="vw-marke blau">offen</span>')
+        else:
+            marke = '<span class="vw-marke gruen">sichtbar</span>'
+        titel = e.get("title") or e.get("customer_name") or ""
+        unter = []
+        if e.get("pickup_date"):
+            unter.append("Abholung " + format_iso_date(e["pickup_date"]))
+        if e.get("due_date"):
+            unter.append(PRODUCTION_SECTIONS.get(e.get("section"), "") + " · fertig bis " + format_iso_date(e["due_date"]))
+        if e.get("note"):
+            unter.append(e["note"])
+        if e.get("text"):
+            unter.append(e["text"][:120])
+        bild = f'<img class="vw-mini-bild" src="/uploads/{esc(e["image_filename"])}" alt="" onerror="this.remove()">' if e.get("image_filename") else ""
+        aktiv_auswahl = f"""<label>Im Cockpit<select name="active"><option value="1" {'selected' if e.get('active', True) else ''}>{'aktiv' if art == 'tagesaufgaben' else 'anzeigen'}</option><option value="0" {'' if e.get('active', True) else 'selected'}>pausiert</option></select></label>"""
+        return f"""
+        <details class="vw-aufgabe" id="a-{esc(e['id'])}">
+            <summary>{bild}<span class="vw-aufgabe-text"><b>{esc(titel)}</b>{f'<small>{esc(" · ".join(unter))}</small>' if unter else ''}</span>{marke}</summary>
+            <form method="post" action="/admin/aufgaben/speichern" enctype="multipart/form-data" class="vw-formular">
+                <input type="hidden" name="art" value="{art}"><input type="hidden" name="location_id" value="{esc(location['id'])}"><input type="hidden" name="item_id" value="{esc(e['id'])}">
+                {self.aufgaben_felder(art, e)}
+                {aktiv_auswahl}
+                <div class="vw-knopfreihe"><span class="vw-wachsen"></span>
+                    <button class="primary" type="submit">Speichern</button>
+                    <button class="danger" type="submit" formaction="/admin/aufgaben/loeschen" data-vw-confirm="„{esc(titel)}“ bei {esc(location['name'])} löschen?">Löschen</button>
+                </div>
+            </form>
+        </details>"""
+
+    def aufgaben_eintrag_aus_formular(self, form, art, alt=None):
+        alt = alt or {}
+        bild = self.save_cockpit_image_upload(form, "image", alt.get("image_filename", ""))
+        aktiv = self.form_value(form, "active", "1") != "0"
+        if art == "tagesaufgaben":
+            return {"id": alt.get("id", ""), "title": self.form_value(form, "title").strip(), "template": bool(alt.get("template")), "active": aktiv, "image_filename": bild}
+        if art == "auftraege":
+            return {"id": alt.get("id", ""), "title": self.form_value(form, "title").strip(), "note": self.form_value(form, "note").strip(),
+                    "pickup_date": self.form_value(form, "pickup_date").strip(), "active": aktiv, "image_filename": bild}
+        if art == "infos":
+            return {"id": alt.get("id", ""), "title": self.form_value(form, "title").strip(), "text": self.form_value(form, "text").strip(), "active": aktiv, "image_filename": bild}
+        kunde = self.form_value(form, "customer_name").strip()
+        return {"id": alt.get("id", ""), "section": self.form_value(form, "section").strip(), "title": kunde, "customer_name": kunde,
+                "order_text": self.form_value(form, "order_text").strip(), "due_date": self.form_value(form, "due_date").strip(),
+                "note": self.form_value(form, "note").strip(), "active": aktiv, "source": alt.get("source", "admin"), "image_filename": bild}
+
+    def handle_aufgaben(self, aktion):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        art = self.form_value(form, "art").strip()
+        arten = dict((a[0], a[2]) for a in self.AUFGABEN_ARTEN)
+        if art not in arten:
+            return self.redirect("/admin/aufgaben?error=" + quote_plus("Unbekannte Art."))
+        schluessel = arten[art]
+        locations = get_locations()
+        zurueck = f"/admin/aufgaben?art={art}"
+        if aktion == "neu":
+            ziele = [l["id"] for l in locations if self.form_value(form, f"standort_{l['id']}")]
+            if not ziele:
+                return self.redirect(zurueck + "&neu=1&error=" + quote_plus("Bitte mindestens einen Standort ankreuzen."))
+            eintrag = self.aufgaben_eintrag_aus_formular(form, art)
+            if not (eintrag.get("title") or eintrag.get("note")):
+                return self.redirect(zurueck + "&neu=1&error=" + quote_plus("Bitte einen Titel eingeben."))
+            anzahl = 0
+            for location in locations:
+                if location["id"] in ziele:
+                    neu = dict(eintrag)
+                    neu["id"] = make_cockpit_item_id(art[:5])
+                    location[schluessel] = list(self.aufgaben_liste(location, schluessel)) + [neu]
+                    anzahl += 1
+            save_locations(normalize_locations(locations))
+            namen = ", ".join(l["name"] for l in locations if l["id"] in ziele)
+            return self.redirect(zurueck + "&msg=" + quote_plus(f"Angelegt für {namen}."))
+        location_id = self.form_value(form, "location_id").strip()
+        item_id = self.form_value(form, "item_id").strip()
+        for location in locations:
+            if location["id"] != location_id:
+                continue
+            eintraege = list(self.aufgaben_liste(location, schluessel))
+            for index, alt in enumerate(eintraege):
+                if alt["id"] != item_id:
+                    continue
+                if aktion == "loeschen":
+                    eintraege.pop(index)
+                    text = "Gelöscht."
+                else:
+                    neu = self.aufgaben_eintrag_aus_formular(form, art, alt)
+                    neu["id"] = alt["id"]
+                    eintraege[index] = neu
+                    text = "Gespeichert."
+                location[schluessel] = eintraege
+                save_locations(normalize_locations(locations))
+                anker = "" if aktion == "loeschen" else f"#a-{item_id}"
+                return self.redirect(zurueck + "&msg=" + quote_plus(text) + anker)
+        self.redirect(zurueck + "&error=" + quote_plus("Eintrag wurde nicht gefunden – vielleicht schon gelöscht?"))
+
+    # =================================================================
+    #   Standorte – Liste und je Standort eine Seite mit Reitern
+    # =================================================================
+    STANDORT_REITER = [
+        ("allgemein", "Allgemein"),
+        ("sortiment", "Sortiment"),
+        ("mindestbestand", "Mindestbestand"),
+        ("zeiterfassung", "Zeiterfassung"),
+    ]
+
+    def show_locations(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        if self.query_text(query, "open_location"):
+            return self.redirect("/admin/location?id=" + quote_plus(self.query_text(query, "open_location")))
+        produkte = get_products(False)
+        karten = []
+        for l in get_locations():
+            sichtbar = sum(1 for p in produkte if l["id"] in product_visible_location_keys(p["visible_to"]))
+            merkmale = [
+                f'<span class="vw-marke blau">{esc(role_label(l.get("role", "standard")))}</span>',
+                f'<span class="vw-marke {"gruen" if l.get("time_tracking_enabled") else "grau"}">Zeiterfassung {"an" if l.get("time_tracking_enabled") else "aus"}</span>',
+            ]
+            if l.get("min_stock_enabled"):
+                merkmale.append('<span class="vw-marke honig">Mindestbestand</span>')
+            if not l.get("password"):
+                merkmale.append('<span class="vw-marke rot">ohne PIN</span>')
+            karten.append(f"""
+            <a class="vw-karte vw-standort-karte" href="/admin/location?id={quote_plus(l['id'])}">
+                <span class="vw-karte-kopf"><h3>{esc(l['name'])}</h3><span class="vw-pfeil">›</span></span>
+                <span class="vw-klein">{sichtbar} von {len(produkte)} Produkten sichtbar{(' · bestellt: ' + esc(l.get('contact_name'))) if l.get('contact_name') else ''}</span>
+                <span class="vw-merkmale">{''.join(merkmale)}</span>
+            </a>""")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Standorte', 'Zugang, Sortiment, Mindestbestand und Zeiterfassung – je Standort an einem Platz.', '<button type="button" class="primary" data-dialog="neuerStandort">+ Neuer Standort</button>')}
+        <div class="vw-raster-3">{''.join(karten) or '<p class="vw-leer">Noch keine Standorte.</p>'}</div>
+        <dialog class="vw-dialog" id="neuerStandort">
+            <div class="vw-dialog-kopf"><h3>Neuer Standort</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/location/neu" class="vw-formular">
+                <label>Name *<input name="name" required placeholder="z. B. Filiale Mölln"></label>
+                <div class="vw-zwei"><label>Art<select name="role">{role_options('standard')}</select></label>
+                <label>PIN für den Zugang<input name="password" autocomplete="new-password" placeholder="leer = ohne PIN"></label></div>
+                <p class="vw-klein">Der neue Standort sieht zunächst alle Produkte. Das kannst du danach unter „Sortiment“ einschränken.</p>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Anlegen</button></div>
+            </form>
+        </dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Standorte", body)
+
+    def show_location_detail(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        location = find_location(self.query_text(query, "id"))
+        if not location:
+            return self.redirect("/admin/locations?error=" + quote_plus("Standort wurde nicht gefunden."))
+        tab = self.query_text(query, "tab") or "allgemein"
+        if tab not in [t[0] for t in self.STANDORT_REITER]:
+            tab = "allgemein"
+        lid = quote_plus(location["id"])
+        reiter = [(k, l, f"/admin/location?id={lid}&tab={k}") for k, l in self.STANDORT_REITER]
+        kopf = admin_kopf(location["name"], esc(role_label(location.get("role", "standard"))), '<a class="button" href="/admin/locations">‹ Alle Standorte</a>', reiter, tab)
+        versteckt = f'<input type="hidden" name="location_id" value="{esc(location["id"])}"><input type="hidden" name="tab" value="{tab}">'
+        if tab == "allgemein":
+            inhalt = f"""
+            <section class="vw-karte vw-schmal">
+                <form method="post" action="/admin/location/speichern" class="vw-formular">{versteckt}
+                    <label>Name des Standorts *<input name="name" required value="{esc(location['name'])}"></label>
+                    <div class="vw-zwei">
+                        <label>Art<select name="role">{role_options(location.get('role', 'standard'))}</select></label>
+                        <label>Wer bestellt hier? (optional)<input name="contact_name" value="{esc(location.get('contact_name', ''))}" placeholder="z. B. Lisa"></label>
+                    </div>
+                    <label>PIN für den Zugang<span class="password-wrap"><input class="password-field" type="password" name="password" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="leer = ohne PIN"><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                    <p class="vw-klein">Mit dieser PIN meldet sich der Standort im Bestellbereich an.</p>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+                </form>
+                <form method="post" action="/admin/location/loeschen" class="vw-gefahrzone" data-vw-confirm="Standort „{esc(location['name'])}“ wirklich löschen? Bestellungen und Zeiten bleiben gespeichert, aber der Standort kann sich nicht mehr anmelden.">
+                    <input type="hidden" name="location_id" value="{esc(location['id'])}">
+                    <span>Standort löschen</span><button class="danger" type="submit">Löschen</button>
+                </form>
+            </section>"""
+        elif tab == "sortiment":
+            inhalt = self.standort_sortiment_html(location)
+        elif tab == "mindestbestand":
+            produkte = get_products(False, sort="category")
+            optionen = '<option value="">Produkt wählen</option>' + "".join(
+                f'<option value="{p["id"]}">{esc(p["name"])} · {esc(p["package_size"])}</option>' for p in produkte
+            )
+            eintraege = normalize_min_stock_items(location.get("min_stock_items", [])) or [{"product_id": "", "quantity": ""}]
+            prefix = "min"
+            def zeile(i, item):
+                auswahl = optionen.replace(f'value="{item.get("product_id")}"', f'value="{item.get("product_id")}" selected', 1) if item.get("product_id") else optionen
+                return (f'<div class="min-stock-row vw-mindest-zeile" data-min-stock-row><label>Produkt<select name="{prefix}_product_{i}">{auswahl}</select></label>'
+                        f'<label>Mindestmenge<input type="number" name="{prefix}_qty_{i}" min="1" max="{MAX_ORDER_QUANTITY}" value="{esc(item.get("quantity", ""))}"></label>'
+                        f'<button class="vw-leise min-stock-remove" type="button" aria-label="Zeile entfernen">×</button></div>')
+            zeilen = "".join(zeile(i, it) for i, it in enumerate(eintraege))
+            vorlage = zeile("__INDEX__", {}).replace(' selected', '')
+            inhalt = f"""
+            <section class="vw-karte">
+                <form method="post" action="/admin/location/speichern" class="vw-formular">{versteckt}
+                    <label class="vw-schalter"><input class="min-stock-toggle" type="checkbox" name="min_stock_enabled" value="1" data-target="vwMindestInhalt" {'checked' if location.get('min_stock_enabled') else ''}><span>Mindestbestand für {esc(location['name'])} benutzen</span></label>
+                    <p class="vw-klein">Beim Bestellen erscheint dann ein Knopf „Mindestbestand in den Korb“ mit diesen Mengen als Vorschlag.</p>
+                    <div id="vwMindestInhalt" {'hidden' if not location.get('min_stock_enabled') else ''}>
+                        <input type="hidden" id="{prefix}_count" name="{prefix}_count" value="{len(eintraege)}">
+                        <div id="{prefix}_rows" class="min-stock-rows" data-template-id="{prefix}_template" data-count-id="{prefix}_count">{zeilen}</div>
+                        <template id="{prefix}_template">{vorlage}</template>
+                        <button class="button add-min-stock-row" type="button" data-target="{prefix}_rows">+ Produkt</button>
+                    </div>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+                </form>
+            </section>"""
+        else:
+            ende = '<option value="">keine feste Grenze</option>' + option_html(time_options(), location.get("time_tracking_max_end", ""))
+            inhalt = f"""
+            <section class="vw-karte vw-schmal">
+                <form method="post" action="/admin/location/speichern" class="vw-formular">{versteckt}
+                    <label class="vw-schalter"><input type="checkbox" name="time_tracking_enabled" value="1" {'checked' if location.get('time_tracking_enabled') else ''}><span>Zeiterfassung an diesem Standort</span></label>
+                    <label>Späteste Uhrzeit beim Eintragen<select name="time_tracking_max_end">{ende}</select></label>
+                    <p class="vw-klein">Bis zu dieser Uhrzeit kann das Team ein Schichtende eintragen. Ohne Grenze gilt die aktuelle Uhrzeit.</p>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+                </form>
+            </section>"""
+        body = f"""{admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}{kopf}{inhalt}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite(location["name"], body)
+
+    def standort_sortiment_html(self, location):
+        produkte = get_products(False, sort="category")
+        lid = location["id"]
+        sichtbar_ids = {str(p["id"]) for p in produkte if lid in product_visible_location_keys(p["visible_to"])}
+        gruppen = sorted({c for p in produkte for c in product_categories(p)}, key=str.lower)
+        gruppen_haken, bloecke = [], []
+        for g in gruppen:
+            in_gruppe = [p for p in produkte if product_has_category(p, g)]
+            alle = bool(in_gruppe) and all(str(p["id"]) in sichtbar_ids for p in in_gruppe)
+            an = sum(1 for p in in_gruppe if str(p["id"]) in sichtbar_ids)
+            gruppen_haken.append(
+                f'<label class="vw-schalter"><input class="visibility-category-toggle" type="checkbox" name="category_{esc(g)}" value="1" data-category="{esc(g)}" {"checked" if alle else ""}><span>{esc(g)} <small>{an}/{len(in_gruppe)}</small></span></label>'
+            )
+            haken = "".join(
+                f'<label class="vw-haken-zeile"><input class="visibility-product-check" type="checkbox" name="product_{p["id"]}" value="1" data-category="{esc(g)}" {"checked" if str(p["id"]) in sichtbar_ids else ""}> {esc(p["name"])} <small>{esc(p["package_size"])}</small></label>'
+                for p in in_gruppe
+            )
+            bloecke.append(f'<details class="vw-aufklapp vw-sicht-gruppe"><summary>{esc(g)} <span class="vw-klein">{an} von {len(in_gruppe)} sichtbar</span></summary><div class="vw-haken-liste">{haken}</div></details>')
+        return f"""
+        <section class="vw-karte">
+            <p>Welche Produkte sieht <b>{esc(location['name'])}</b> beim Bestellen? Aktuell: <b>{len(sichtbar_ids)} von {len(produkte)}</b>.</p>
+            <form method="post" action="/admin/visibility" class="vw-formular">
+                <input type="hidden" name="location_id" value="{esc(lid)}">
+                <input type="hidden" name="zurueck" value="standort">
+                <fieldset class="vw-feldgruppe"><legend>Ganze Warengruppen an/aus</legend><div class="vw-schalter-raster">{''.join(gruppen_haken)}</div></fieldset>
+                <p class="vw-klein">Für einzelne Produkte die Gruppe aufklappen:</p>
+                {''.join(bloecke)}
+                <div class="vw-dialog-fuss vw-klebend"><button class="primary" type="submit">Sortiment speichern</button></div>
+            </form>
+        </section>"""
+
+    def handle_location_speichern(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        lid = self.form_value(form, "location_id").strip()
+        tab = self.form_value(form, "tab").strip()
+        locations = get_locations()
+        location = next((l for l in locations if l["id"] == lid), None)
+        if not location:
+            return self.redirect("/admin/locations?error=" + quote_plus("Standort wurde nicht gefunden."))
+        if tab == "allgemein":
+            name = self.form_value(form, "name").strip()
+            if not name:
+                return self.redirect(f"/admin/location?id={quote_plus(lid)}&error=" + quote_plus("Bitte einen Namen eingeben."))
+            location["name"] = name
+            location["role"] = self.form_value(form, "role", "standard").strip()
+            location["contact_name"] = self.form_value(form, "contact_name").strip()
+            location["password"] = self.form_value(form, "password").strip()
+        elif tab == "mindestbestand":
+            location["min_stock_enabled"] = bool(self.form_value(form, "min_stock_enabled"))
+            location["min_stock_items"] = self.collect_min_stock_items(form, "min")
+        elif tab == "zeiterfassung":
+            location["time_tracking_enabled"] = bool(self.form_value(form, "time_tracking_enabled"))
+            location["time_tracking_max_end"] = self.form_value(form, "time_tracking_max_end").strip()
+        save_locations(normalize_locations(locations))
+        self.redirect(f"/admin/location?id={quote_plus(lid)}&tab={quote_plus(tab)}&msg=" + quote_plus("Gespeichert."))
+
+    def handle_location_neu(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        name = self.form_value(form, "name").strip()
+        if not name:
+            return self.redirect("/admin/locations?error=" + quote_plus("Bitte einen Namen eingeben."))
+        locations = get_locations()
+        locations.append({
+            "id": make_location_id(name), "name": name, "role": self.form_value(form, "role", "standard").strip(),
+            "contact_name": "", "password": self.form_value(form, "password").strip(),
+            "time_tracking_enabled": False, "time_tracking_max_end": "", "min_stock_enabled": False, "min_stock_items": [],
+            "cockpit_tasks": [], "cockpit_orders": [], "cockpit_infos": [], "production_jobs": [],
+        })
+        normalized = normalize_locations(locations)
+        save_locations(normalized)
+        new_id = normalized[-1]["id"]
+        apply_category_visibility_for_location(new_id, get_category_names(True))
+        self.redirect(f"/admin/location?id={quote_plus(new_id)}&tab=sortiment&msg=" + quote_plus(f"„{name}“ angelegt. Wähle jetzt, welche Produkte der Standort sehen soll."))
+
+    def handle_location_loeschen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        lid = self.form_value(form, "location_id").strip()
+        locations = get_locations()
+        rest = [l for l in locations if l["id"] != lid]
+        if not rest:
+            return self.redirect(f"/admin/location?id={quote_plus(lid)}&error=" + quote_plus("Der letzte Standort kann nicht gelöscht werden."))
+        name = next((l["name"] for l in locations if l["id"] == lid), "")
+        save_locations(normalize_locations(rest))
+        self.redirect("/admin/locations?msg=" + quote_plus(f"Standort „{name}“ gelöscht."))
+
+    # =================================================================
+    #   Nachrichten im Chat-Stil
+    # =================================================================
+    def show_admin_messages(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        ort = self.query_text(query, "location")
+        person = self.query_text(query, "recipient")
+        explizit = bool(ort and person)
+        threads = cockpit_message_threads()
+        if not explizit and threads:
+            ort, person = threads[0]["location_id"], threads[0]["recipient_name"]
+        nachrichten = get_cockpit_messages(ort, person, mark_read_for="admin") if ort and person else []
+        threads = cockpit_message_threads()
+        liste = []
+        for t in threads:
+            aktiv = t["location_id"] == ort and normalize_text_key(t["recipient_name"]) == normalize_text_key(person)
+            punkt = f'<i class="vw-punkt">{t["unread_admin"]}</i>' if t["unread_admin"] else ""
+            liste.append(
+                f'<a class="vw-faden {"ist-aktiv" if aktiv else ""} {"ist-neu" if t["unread_admin"] else ""}" href="/admin/messages?location={quote_plus(t["location_id"])}&recipient={quote_plus(t["recipient_name"])}">'
+                f'<span class="vw-avatar">{esc((t["recipient_name"] or "?")[:1].upper())}</span>'
+                f'<span class="vw-faden-text"><b>{esc(t["recipient_name"])} <small>· {esc(t["location_name"])}</small></b><small>{esc((t.get("last_message") or "")[:70])}</small></span>'
+                f'<span class="vw-zeit">{esc(freundliches_datum(t["last_created_at"]))}{punkt}</span></a>'
+            )
+        verlauf = "".join(
+            f'<div class="vw-blase {"eigen" if m["sender_role"] == "admin" else ""}"><p>{esc(m["message"])}</p><small>{"Du" if m["sender_role"] == "admin" else esc(m["sender_name"])} · {esc(freundliches_datum(m["created_at"]))}</small></div>'
+            for m in nachrichten
+        )
+        ort_name = next((l["name"] for l in get_locations() if l["id"] == ort), ort)
+        chat = '<p class="vw-leer">Wähle links ein Gespräch aus.</p>'
+        if ort and person:
+            chat = f"""
+            <div class="vw-chat-kopf"><a class="vw-zurueck" href="/admin/messages" aria-label="Zur Liste">‹</a><span class="vw-avatar">{esc(person[:1].upper())}</span><span><b>{esc(person)}</b><small>{esc(ort_name)}</small></span></div>
+            <div class="vw-chat-verlauf">{verlauf or '<p class="vw-leer">Noch keine Nachrichten.</p>'}</div>
+            <form method="post" action="/admin/messages/reply" class="vw-chat-eingabe">
+                <input type="hidden" name="location_id" value="{esc(ort)}"><input type="hidden" name="recipient_name" value="{esc(person)}">
+                <textarea name="message" rows="2" required placeholder="Nachricht an {esc(person)} …" aria-label="Nachricht"></textarea>
+                <button class="primary" type="submit">Senden</button>
+            </form>"""
+        orte = "".join(f'<option value="{esc(l["id"])}">{esc(l["name"])}</option>' for l in get_locations())
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Nachrichten', 'Mit dem Team an den Standorten schreiben.', '<button type="button" class="primary" data-dialog="neueNachricht">+ Neue Nachricht</button>')}
+        <div class="vw-chat {'hat-auswahl' if explizit else ''}">
+            <div class="vw-faeden">{''.join(liste) or '<p class="vw-leer">Noch keine Nachrichten.</p>'}</div>
+            <div class="vw-chat-fenster">{chat}</div>
+        </div>
+        <dialog class="vw-dialog" id="neueNachricht">
+            <div class="vw-dialog-kopf"><h3>Neue Nachricht</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/messages/reply" class="vw-formular">
+                <div class="vw-zwei"><label>Standort<select name="location_id" required>{orte}</select></label>
+                <label>An<select name="recipient_name" required>{option_html(get_time_employee_names(True))}</select></label></div>
+                <label>Nachricht<textarea name="message" rows="4" required></textarea></label>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Senden</button></div>
+            </form>
+        </dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Nachrichten", body)
+
+    # =================================================================
+    #   Einstellungen
+    # =================================================================
+    def show_settings(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        s = load_settings()
+        smtp = smtp_is_configured()
+        push_an = push_is_configured()
+        geraete = push_subscription_count(enabled_only=True)
+        def adresse(key, label, hilfe):
+            wert = s.get(key, "")
+            warnung = '' if not wert or email_sieht_gueltig_aus(wert) else '<small class="vw-notiz">Diese Adresse sieht unvollständig aus.</small>'
+            return f'<label>{label}<input type="email" name="{key}" value="{esc(wert)}">{warnung}<small class="vw-klein-block">{hilfe}</small></label>'
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Einstellungen')}
+        <div class="vw-raster-2">
+            <section class="vw-karte">
+                <h3>E-Mail &amp; WhatsApp</h3>
+                <form method="post" action="/admin/settings" class="vw-formular">
+                    {adresse('order_email_to', 'Bestellungen gehen an', 'Jede neue Bestellung kommt als PDF an diese Adresse.')}
+                    {adresse('time_export_email', 'Zeiten-Export geht an', 'Am Monatsanfang kommt hier die Zeiterfassung des Vormonats an.')}
+                    <label>WhatsApp-Nummer<input name="whatsapp_number" value="{esc(s.get('whatsapp_number', ''))}"><small class="vw-klein-block">Für den WhatsApp-Knopf nach dem Bestellen.</small></label>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+                </form>
+                <div class="vw-status {'ok' if smtp else 'warn'}">{'E-Mail-Versand ist eingerichtet.' if smtp else 'E-Mail-Versand ist auf dem Server nicht eingerichtet – es gehen keine Mails raus. Die Zugangsdaten deines Mail-Postfachs müssen einmalig auf dem Server hinterlegt werden.'}</div>
+                <form method="post" action="/admin/settings/testmail" class="vw-knopfreihe"><button class="button" type="submit" {'disabled' if not smtp else ''}>Test-Mail an „Bestellungen“ senden</button></form>
+            </section>
+            <section class="vw-karte">
+                <h3>Admin-PIN ändern</h3>
+                <form method="post" action="/admin/settings" class="vw-formular">
+                    <input type="hidden" name="change_admin_pin" value="1">
+                    <label>Aktuelle PIN<span class="password-wrap"><input class="password-field" type="password" name="current_admin_pin" autocomplete="current-password" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                    <label>Neue PIN (mind. 4 Zeichen)<span class="password-wrap"><input class="password-field" type="password" name="new_admin_pin" autocomplete="new-password" minlength="4" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                    <label>Neue PIN wiederholen<span class="password-wrap"><input class="password-field" type="password" name="new_admin_pin_confirm" autocomplete="new-password" minlength="4" required><button type="button" class="password-toggle">Anzeigen</button></span></label>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">PIN ändern</button></div>
+                </form>
+            </section>
+            <section class="vw-karte">
+                <h3>Push-Nachrichten</h3>
+                <p class="vw-klein">Damit dein Handy oder Mac kurz meldet, wenn eine Bestellung oder Nachricht reinkommt.</p>
+                <div class="vw-status {'ok' if push_an else 'warn'}">{'Auf dem Server eingerichtet' if push_an else 'Auf dem Server noch nicht eingerichtet'} · {geraete} Gerät(e) angemeldet</div>
+                <div id="pushControl" class="push-control vw-knopfreihe" hidden><span id="pushStatus">Push nicht aktiv</span><button type="button" id="pushToggle" class="button">Auf diesem Gerät aktivieren</button></div>
+                <form method="post" action="/admin/push/test" class="vw-knopfreihe"><button class="button" type="submit" {'disabled' if not push_an else ''}>Test-Push senden</button></form>
+            </section>
+            <section class="vw-karte">
+                <h3>Sicherung</h3>
+                <p class="vw-klein">Lädt alle Daten (Bestellungen, Zeiten, Produkte, Bilder, Einstellungen) als eine Zip-Datei herunter. Am Mac macht das auch dein Sicherungsprogramm auf dem Schreibtisch.</p>
+                <div class="vw-knopfreihe"><a class="button primary" href="/admin/backup">Sicherung herunterladen</a></div>
+                <p class="vw-klein">Datenordner auf dem Server: {esc(os.path.abspath(DATA_DIR))}</p>
+            </section>
+        </div>
+        <div class="vw-knopfreihe"><a class="button" href="/admin/logout">Abmelden</a></div>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
+        """
+        self.admin_seite("Einstellungen", body)
+
+    def handle_test_mail(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        self.read_form()
+        empfaenger = (load_settings().get("order_email_to") or "").strip()
+        if not smtp_is_configured():
+            return self.redirect("/admin/settings?error=" + quote_plus("E-Mail-Versand ist auf dem Server nicht eingerichtet."))
+        if not email_sieht_gueltig_aus(empfaenger):
+            return self.redirect("/admin/settings?error=" + quote_plus("Bitte zuerst eine gültige Adresse für Bestellungen eintragen."))
+        try:
+            msg = EmailMessage()
+            msg["Subject"] = "Test aus dem Bestellsystem Opa Peters"
+            msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", ""))
+            msg["To"] = empfaenger
+            msg.set_content("Wenn du diese Mail liest, funktioniert der E-Mail-Versand des Bestellsystems.")
+            with smtplib.SMTP(os.environ.get("SMTP_HOST"), int(os.environ.get("SMTP_PORT", "587")), timeout=20) as smtp:
+                smtp.starttls()
+                smtp.login(os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD"))
+                smtp.send_message(msg)
+        except Exception as exc:
+            return self.redirect("/admin/settings?error=" + quote_plus(f"Test-Mail ging nicht raus: {exc}"))
+        self.redirect("/admin/settings?msg=" + quote_plus(f"Test-Mail an {empfaenger} verschickt."))
+
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -5496,6 +6364,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bulk_products()
             if path == "/admin/orders/combined-pdf":
                 return self.handle_combined_order_pdf()
+            if path == "/admin/einkauf/pdf":
+                return self.handle_einkauf_pdf()
+            if path == "/admin/einkauf/erledigt":
+                return self.handle_einkauf_erledigt()
             if path == "/admin/orders/status":
                 return self.handle_order_status()
             if path == "/admin/orders/delete":
@@ -5508,6 +6380,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_delete_product()
             if path == "/admin/add-category":
                 return self.handle_add_category()
+            if path == "/admin/rename-category":
+                return self.handle_rename_category()
+            if path == "/admin/import-confirm":
+                return self.handle_import_confirm()
             if path == "/admin/delete-category":
                 return self.handle_delete_category()
             if path == "/admin/import-products":
@@ -5516,6 +6392,12 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_settings()
             if path == "/admin/cockpit-content":
                 return self.handle_admin_cockpit_content()
+            if path == "/admin/aufgaben/neu":
+                return self.handle_aufgaben("neu")
+            if path == "/admin/aufgaben/speichern":
+                return self.handle_aufgaben("speichern")
+            if path == "/admin/aufgaben/loeschen":
+                return self.handle_aufgaben("loeschen")
             if path == "/admin/messages/reply":
                 return self.handle_admin_message_reply()
             if path == "/admin/employees":
@@ -5524,6 +6406,14 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_locations()
             if path == "/admin/visibility":
                 return self.handle_visibility()
+            if path == "/admin/location/speichern":
+                return self.handle_location_speichern()
+            if path == "/admin/location/neu":
+                return self.handle_location_neu()
+            if path == "/admin/location/loeschen":
+                return self.handle_location_loeschen()
+            if path == "/admin/settings/testmail":
+                return self.handle_test_mail()
             if path == "/admin/time/create":
                 return self.handle_create_time_entry()
             if path == "/admin/time/settings":
@@ -5737,7 +6627,7 @@ class App(BaseHTTPRequestHandler):
                 categories = ensure_categories(split_categories(category_value))
                 prepared.append((name, category_text(categories), package_size, source))
             if not prepared:
-                return self.redirect("/admin?error=" + quote_plus("Bitte mindestens eine vollständige Produktzeile ausfüllen."))
+                return self.redirect("/admin/products?error=" + quote_plus("Bitte mindestens eine vollständige Produktzeile ausfüllen."))
             visible_to_text = ALL_LOCATIONS_KEY
             con = db()
             now = datetime.now().isoformat(timespec="seconds")
@@ -5751,7 +6641,7 @@ class App(BaseHTTPRequestHandler):
                 )
             con.commit()
             con.close()
-            return self.redirect("/admin?msg=" + quote_plus(f"{len(prepared)} Produkt(e) angelegt."))
+            return self.redirect("/admin/products?msg=" + quote_plus(f"{len(prepared)} Produkt(e) angelegt."))
         name = self.form_value(form, "name").strip()
         categories = ensure_categories(form_categories(form, "category"))
         category = category_text(categories)
@@ -5766,7 +6656,7 @@ class App(BaseHTTPRequestHandler):
             item = form["image"]
             if item.filename and item.content:
                 if len(item.content) > MAX_IMAGE_BYTES:
-                    return self.redirect("/admin?error=" + quote_plus("Das Produktbild ist zu groß. Bitte maximal 6 MB hochladen."))
+                    return self.redirect("/admin/products?error=" + quote_plus("Das Produktbild ist zu groß. Bitte maximal 6 MB hochladen."))
                 image_filename = slug_filename(item.filename)
                 with open(os.path.join(UPLOAD_DIR, image_filename), "wb") as f:
                     f.write(item.content)
@@ -5781,9 +6671,9 @@ class App(BaseHTTPRequestHandler):
             )
             con.commit()
             con.close()
-            self.redirect("/admin?msg=" + quote_plus("Produkt gespeichert."))
+            self.redirect("/admin/products?msg=" + quote_plus("Produkt gespeichert."))
         else:
-            self.redirect("/admin?error=" + quote_plus("Bitte Produktname, mindestens eine Kategorie, Gebindegröße und Bezugsquelle ausfüllen."))
+            self.redirect("/admin/products?error=" + quote_plus("Bitte Produktname, mindestens eine Kategorie, Gebindegröße und Bezugsquelle ausfüllen."))
 
     def handle_delete_product(self):
         if not self.is_admin():
@@ -5799,9 +6689,9 @@ class App(BaseHTTPRequestHandler):
         changed = con.total_changes
         con.close()
         if changed:
-            self.redirect("/admin?msg=" + quote_plus("Produkt gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+            self.redirect("/admin/products?msg=" + quote_plus("Produkt gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
         else:
-            self.redirect("/admin?error=" + quote_plus("Produkt wurde nicht gefunden oder war bereits gelöscht."))
+            self.redirect("/admin/products?error=" + quote_plus("Produkt wurde nicht gefunden oder war bereits gelöscht."))
 
     def handle_update_product(self):
         if not self.is_admin():
@@ -5810,7 +6700,7 @@ class App(BaseHTTPRequestHandler):
         product_id = self.form_value(form, "id").strip()
         product = get_product(product_id)
         if not product:
-            return self.redirect("/admin?error=" + quote_plus("Produkt wurde nicht gefunden."))
+            return self.redirect("/admin/products?error=" + quote_plus("Produkt wurde nicht gefunden."))
         name = self.form_value(form, "name").strip()
         categories = ensure_categories(form_categories(form, "category", product_categories(product)))
         category = category_text(categories)
@@ -5843,7 +6733,7 @@ class App(BaseHTTPRequestHandler):
         )
         con.commit()
         con.close()
-        self.redirect("/admin?msg=" + quote_plus("Produktänderungen gespeichert."))
+        self.redirect("/admin/products?msg=" + quote_plus("Produktänderungen gespeichert."))
 
     def handle_bulk_products(self):
         if not self.is_admin():
@@ -5852,7 +6742,7 @@ class App(BaseHTTPRequestHandler):
         product_ids = [key.replace("selected_", "", 1) for key, value in form.items() if key.startswith("selected_") and value]
         product_ids = [pid for pid in product_ids if str(pid).isdigit()]
         if not product_ids:
-            return self.redirect("/admin?error=" + quote_plus("Bitte zuerst mindestens ein Produkt auswählen."))
+            return self.redirect("/admin/products?error=" + quote_plus("Bitte zuerst mindestens ein Produkt auswählen."))
 
         placeholders = ",".join("?" for _ in product_ids)
         action = self.form_value(form, "bulk_action", "update")
@@ -5864,7 +6754,7 @@ class App(BaseHTTPRequestHandler):
                     [NO_LOCATIONS_KEY, berlin_now().isoformat(timespec="seconds"), *product_ids],
                 )
                 con.commit()
-                return self.redirect("/admin?msg=" + quote_plus(f"{con.total_changes} Produkt(e) gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
+                return self.redirect("/admin/products?msg=" + quote_plus(f"{con.total_changes} Produkt(e) gelöscht. Bereits gespeicherte Bestellungen behalten ihre Produktdaten."))
 
             updates = []
             params = []
@@ -5889,19 +6779,19 @@ class App(BaseHTTPRequestHandler):
                 visible_to = [location["id"] for location in get_locations() if self.form_value(form, f"bulk_visible_{location['id']}")]
                 if not visible_to:
                     con.close()
-                    return self.redirect("/admin?error=" + quote_plus("Bitte für die neue Sichtbarkeit mindestens einen Standort auswählen."))
+                    return self.redirect("/admin/products?error=" + quote_plus("Bitte für die neue Sichtbarkeit mindestens einen Standort auswählen."))
                 visible_to_text = ALL_LOCATIONS_KEY if set(visible_to) == set(location_ids()) else ",".join(visible_to)
                 updates.append("visible_to=?")
                 params.append(visible_to_text)
 
             if not updates:
                 con.close()
-                return self.redirect("/admin?error=" + quote_plus("Bitte mindestens eine Änderung für die ausgewählten Produkte auswählen."))
+                return self.redirect("/admin/products?error=" + quote_plus("Bitte mindestens eine Änderung für die ausgewählten Produkte auswählen."))
 
             params.extend(product_ids)
             con.execute(f"UPDATE products SET {', '.join(updates)} WHERE id IN ({placeholders}) AND deleted_at IS NULL", params)
             con.commit()
-            return self.redirect("/admin?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) aktualisiert."))
+            return self.redirect("/admin/products?msg=" + quote_plus(f"{len(product_ids)} Produkt(e) aktualisiert."))
         finally:
             con.close()
 
@@ -5971,7 +6861,7 @@ class App(BaseHTTPRequestHandler):
         return_location = self.form_value(form, "return_location").strip()
         return_target = "/admin/orders"
         if return_location:
-            return_target += "?open_location=" + quote_plus(return_location)
+            return_target += "?ansicht=" + quote_plus(return_location) if return_location in ("offen", "erledigt") else "?open_location=" + quote_plus(return_location)
         if return_order.isdigit():
             return_target += "#order-" + return_order
         item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
@@ -5981,6 +6871,7 @@ class App(BaseHTTPRequestHandler):
         changed = set_order_items_completed(item_ids, completed=completed)
         if not changed:
             return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
+        bestellungen_automatisch_erledigen()
         return self.redirect(return_target)
 
     def handle_delete_order_items(self):
@@ -5991,7 +6882,7 @@ class App(BaseHTTPRequestHandler):
         return_location = self.form_value(form, "return_location").strip()
         return_target = "/admin/orders"
         if return_location:
-            return_target += "?open_location=" + quote_plus(return_location)
+            return_target += "?ansicht=" + quote_plus(return_location) if return_location in ("offen", "erledigt") else "?open_location=" + quote_plus(return_location)
         if return_order.isdigit():
             return_target += "#order-" + return_order
         item_ids = [key.replace("item_", "", 1) for key, value in form.items() if key.startswith("item_") and value]
@@ -6001,15 +6892,6 @@ class App(BaseHTTPRequestHandler):
         if not changed:
             return self.redirect("/admin/orders?error=" + quote_plus("Die ausgewählte Position wurde nicht gefunden."))
         return self.redirect(return_target)
-
-    def handle_add_category(self):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        form = self.read_form()
-        name = self.form_value(form, "name").strip()
-        if name:
-            ensure_category(name)
-        self.redirect("/admin/categories?msg=" + quote_plus("Kategorie gespeichert."))
 
     def handle_delete_category(self):
         if not self.is_admin():
@@ -6034,56 +6916,6 @@ class App(BaseHTTPRequestHandler):
                 return self.redirect("/admin/categories?error=" + quote_plus("Kategorie wurde nicht gefunden oder war bereits gelöscht."))
         self.redirect("/admin/categories?msg=" + quote_plus("Kategorie gelöscht."))
 
-    def handle_import_products(self):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        form = self.read_form()
-        uploaded = form.get("import_file")
-        if not isinstance(uploaded, UploadedFile) or not uploaded.content:
-            return self.redirect("/admin/import?error=" + quote_plus("Bitte eine CSV- oder Excel-Datei auswählen."))
-        if len(uploaded.content) > MAX_IMPORT_BYTES:
-            return self.redirect("/admin/import?error=" + quote_plus("Die Importdatei ist zu groß. Bitte maximal 5 MB hochladen."))
-        try:
-            rows = parse_import_file(uploaded)
-        except Exception as exc:
-            return self.redirect("/admin/import?error=" + quote_plus(str(exc)))
-        inserted = 0
-        skipped = 0
-        prepared_rows = []
-        categories_to_ensure = set()
-        for row in rows:
-            name = (row.get("name") or "").strip()
-            package_size = (row.get("package_size") or "").strip()
-            source = (row.get("source") or "").strip()
-            if not (name and package_size and source):
-                skipped += 1
-                continue
-            row_categories = split_categories(row.get("category") or "Allgemein")
-            for category in row_categories:
-                categories_to_ensure.add(category)
-            prepared_rows.append(
-                (name, package_size, category_text(row_categories), source, ALL_LOCATIONS_KEY, None, datetime.now().isoformat(timespec="seconds"))
-            )
-        con = db()
-        category_map = {}
-        for category in sorted(categories_to_ensure, key=lambda x: x.lower()):
-            category_map[category] = ensure_category_in_connection(con, category, active=1)
-        sync_category_metadata(con)
-        for prepared in prepared_rows:
-            prepared = list(prepared)
-            prepared[2] = category_text([category_map.get(category, category) for category in split_categories(prepared[2])])
-            con.execute(
-                """
-                INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(prepared),
-            )
-            inserted += 1
-        con.commit()
-        con.close()
-        self.redirect("/admin/import?msg=" + quote_plus(f"Import abgeschlossen: {inserted} Produkt(e) angelegt, {skipped} Zeile(n) übersprungen."))
-
     def handle_settings(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -6104,7 +6936,7 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/settings?msg=" + quote_plus("Admin-PIN gespeichert. Bitte beim nächsten Login die neue PIN verwenden."))
         settings["order_email_to"] = self.form_value(form, "order_email_to").strip()
         settings["whatsapp_number"] = self.form_value(form, "whatsapp_number").strip()
-        settings["time_export_email"] = self.form_value(form, "time_export_email").strip() or "info@opapeters"
+        settings["time_export_email"] = self.form_value(form, "time_export_email").strip() or "info@opapeters.de"
         save_settings(settings)
         self.redirect("/admin/settings?msg=" + quote_plus("Einstellungen gespeichert."))
 
@@ -6118,14 +6950,15 @@ class App(BaseHTTPRequestHandler):
             count = 0
         employees = []
         for index in range(count):
-            if self.form_value(form, f"employee_remove_{index}"):
+            status = self.form_value(form, f"employee_status_{index}").strip()
+            if self.form_value(form, f"employee_remove_{index}") or status == "loeschen":
                 continue
             name = self.form_value(form, f"employee_name_{index}").strip()
             if not name:
                 continue
             employees.append({
                 "name": name,
-                "active": bool(self.form_value(form, f"employee_active_{index}")),
+                "active": (status == "aktiv") if status else bool(self.form_value(form, f"employee_active_{index}")),
                 "hourly_wage": parse_decimal(self.form_value(form, f"employee_hourly_wage_{index}")),
                 "monthly_hours": parse_decimal(self.form_value(form, f"employee_monthly_hours_{index}")),
             })
@@ -6427,7 +7260,8 @@ class App(BaseHTTPRequestHandler):
             con.execute("UPDATE products SET visible_to=? WHERE id=?", (store_visible_locations(visible), row["id"]))
         con.commit()
         con.close()
-        return self.redirect("/admin/visibility?location=" + quote_plus(location_id) + "&msg=" + quote_plus(f"Sichtbarkeit gespeichert. {updated} Produktzuordnung(en) geändert."))
+        text = f"Sortiment gespeichert. {updated} Änderung(en)."
+        return self.redirect("/admin/location?id=" + quote_plus(location_id) + "&tab=sortiment&msg=" + quote_plus(text))
 
     def handle_time_entry(self):
         buyer_key = self.current_buyer_key()
