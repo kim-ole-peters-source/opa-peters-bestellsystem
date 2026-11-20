@@ -56,9 +56,9 @@ fi
 
 # ---------- aktualisieren ----------
 info "1/5  Lokale Änderungen prüfen"
-if [ -n "$(git status --porcelain -- . ':!__pycache__')" ]; then
+if [ -n "$(git status --porcelain)" ]; then
   rot "Auf dem Server liegen ungesicherte Änderungen:"
-  git status --short -- . ':!__pycache__'
+  git status --short
   rot "Bitte erst klären, sonst gehen sie verloren. Abbruch."
   exit 1
 fi
