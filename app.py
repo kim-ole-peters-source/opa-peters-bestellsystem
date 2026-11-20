@@ -2885,6 +2885,10 @@ class App(BaseHTTPRequestHandler):
             return self.show_cart_draft()
         if path == "/push/config":
             return self.show_push_config()
+        if path == "/admin/backup":
+            if not self.is_admin():
+                return self.redirect("/admin/login")
+            return self.handle_backup()
         if path.startswith("/uploads/"):
             upload_name = os.path.basename(path.replace("/uploads/", "", 1))
             return self.serve_file(os.path.join(UPLOAD_DIR, upload_name), None)
@@ -3009,6 +3013,59 @@ class App(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
+
+    def handle_backup(self):
+        """Vollstaendige Sicherung als ZIP: Datenbank, Einstellungen, Bilder.
+
+        Die Datenbank wird ueber die SQLite-Backup-Schnittstelle kopiert.
+        Dadurch ist die Kopie auch dann in sich stimmig, wenn waehrend der
+        Sicherung jemand bestellt oder Zeiten erfasst.
+        """
+        import tempfile
+        import zipfile
+
+        stempel = datetime.now().strftime("%Y-%m-%d_%H%M")
+        ordner = tempfile.mkdtemp(prefix="sicherung-")
+        kopie = os.path.join(ordner, "bestellsystem.db")
+        try:
+            quelle = sqlite3.connect(DB_PATH, timeout=30)
+            ziel = sqlite3.connect(kopie)
+            with ziel:
+                quelle.backup(ziel)
+            ziel.close()
+            quelle.close()
+
+            puffer = io.BytesIO()
+            with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as paket:
+                paket.write(kopie, "bestellsystem.db")
+                if os.path.exists(SETTINGS_PATH):
+                    paket.write(SETTINGS_PATH, "settings.json")
+                for quellordner, name in ((UPLOAD_DIR, "uploads"), (ORDER_IMAGE_DIR, "order_images")):
+                    if not os.path.isdir(quellordner):
+                        continue
+                    for datei in sorted(os.listdir(quellordner)):
+                        voll = os.path.join(quellordner, datei)
+                        if os.path.isfile(voll):
+                            paket.write(voll, name + "/" + datei)
+            daten = puffer.getvalue()
+        except Exception as fehler:
+            self.send_error(500, "Sicherung fehlgeschlagen: %s" % fehler)
+            return
+        finally:
+            try:
+                if os.path.exists(kopie):
+                    os.remove(kopie)
+                os.rmdir(ordner)
+            except Exception:
+                pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", 'attachment; filename="sicherung_%s.zip"' % stempel)
+        self.send_header("Content-Length", str(len(daten)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(daten)
 
     def serve_file(self, filepath, content_type):
         abs_path = os.path.abspath(filepath)
