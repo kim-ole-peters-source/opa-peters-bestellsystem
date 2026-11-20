@@ -44,7 +44,16 @@ EINZELN = [
     (r"Trinkhalme", "Becher & Verpackung"),
     (r"^ProHaag|^WEPA", "Reinigung"),
     (r"Senf", "Divers"),
-    (r"^TK-", "TK"),
+]
+
+# Tiefgekühltes wird nach Warenart einsortiert, nicht pauschal unter TK.
+# Geprüft wird der Name ohne das vorangestellte "TK-".
+TIEFGEKUEHLT = [
+    (r"brötchen|brownie|cookie|berliner|plunder|teig|kuchen|croissant|puck|backshop|muffin|donut",
+     "Backwaren"),
+    (r"himbeer|erdbeer|kirsch|pflaume|heidelbeer|beere|mango|ananas|melone|pfirsich|frucht|rhabarber",
+     "Früchte & Füllungen"),
+    (r"saft|zitrone", "Backzutaten"),
 ]
 
 # Regeln für die Gruppe "Produktion", der Reihe nach geprüft
@@ -68,8 +77,14 @@ REGELN = [
 
 def neue_gruppe(name, alt):
     alt = (alt or "").replace("Allgemein, ", "").strip()
-    if alt != "Produktion":
+    if alt != "Produktion" and not re.match(r"\s*TK-", name, re.I):
         return ZUSAMMEN.get(alt, alt)
+    if re.match(r"\s*TK-", name, re.I):
+        rest = re.sub(r"^\s*TK-", "", name, flags=re.I).lower()
+        for muster, gruppe in TIEFGEKUEHLT:
+            if re.search(muster, rest):
+                return gruppe
+        return "TK"
     for muster, gruppe in EINZELN:
         if re.search(muster, name, re.I):
             return gruppe
