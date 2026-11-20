@@ -42,6 +42,7 @@ DATA_DIR = os.environ.get("DATA_DIR") or ("/tmp/opa-peters-bestellsystem" if IS_
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "bestellsystem.db")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 ORDER_DIR = os.path.join(DATA_DIR, "orders")
 ORDER_IMAGE_DIR = os.path.join(DATA_DIR, "order_images")
@@ -2878,9 +2879,9 @@ class App(BaseHTTPRequestHandler):
         if path == "/manifest.json":
             return self.serve_manifest()
         if path == "/service-worker.js":
-            return self.serve_file(os.path.join(BASE_DIR, "static", "service-worker.js"), "application/javascript")
+            return self.serve_file(os.path.join(STATIC_DIR, "service-worker.js"), "application/javascript", STATIC_DIR)
         if path.startswith("/static/"):
-            return self.serve_file(os.path.join(BASE_DIR, path.lstrip("/")), None)
+            return self.serve_file(os.path.join(STATIC_DIR, path[len("/static/"):]), None, STATIC_DIR)
         if path == "/cart-draft":
             return self.show_cart_draft()
         if path == "/push/config":
@@ -2891,12 +2892,12 @@ class App(BaseHTTPRequestHandler):
             return self.handle_backup()
         if path.startswith("/uploads/"):
             upload_name = os.path.basename(path.replace("/uploads/", "", 1))
-            return self.serve_file(os.path.join(UPLOAD_DIR, upload_name), None)
+            return self.serve_file(os.path.join(UPLOAD_DIR, upload_name), None, UPLOAD_DIR)
         if path.startswith("/order-images/"):
             if not self.is_admin():
                 return self.redirect("/admin/login")
             image_name = os.path.basename(path.replace("/order-images/", "", 1))
-            return self.serve_file(os.path.join(ORDER_IMAGE_DIR, image_name), None)
+            return self.serve_file(os.path.join(ORDER_IMAGE_DIR, image_name), None, ORDER_IMAGE_DIR)
         if path.startswith("/orders-download/"):
             if not (self.is_admin() or self.current_buyer_key()):
                 return self.redirect("/login")
@@ -3067,12 +3068,19 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(daten)
 
-    def serve_file(self, filepath, content_type):
-        abs_path = os.path.abspath(filepath)
-        allowed_roots = [os.path.abspath(BASE_DIR), os.path.abspath(DATA_DIR)]
-        if not any(abs_path.startswith(root) for root in allowed_roots) or not os.path.exists(abs_path):
+    def serve_file(self, filepath, content_type, root):
+        # Nur Dateien ausliefern, die wirklich im erlaubten Ordner liegen.
+        # realpath löst ".." und Verknüpfungen auf, commonpath prüft die Lage.
+        root_real = os.path.realpath(root)
+        file_real = os.path.realpath(filepath)
+        try:
+            inside = os.path.commonpath([root_real, file_real]) == root_real
+        except ValueError:
+            inside = False
+        if not inside or not os.path.isfile(file_real):
             self.send_error(404)
             return
+        filepath = file_real
         if content_type is None:
             ext = os.path.splitext(filepath)[1].lower()
             content_type = {
@@ -3087,6 +3095,8 @@ class App(BaseHTTPRequestHandler):
                 ".js": "application/javascript",
                 ".json": "application/json",
                 ".css": "text/css",
+                ".woff2": "font/woff2",
+                ".woff": "font/woff",
             }.get(ext, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", content_type)
