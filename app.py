@@ -2145,6 +2145,16 @@ def auto_time_export_attempted(month):
     return bool(row)
 
 
+def smtp_oeffnen(host, port):
+    """Port 465 = SSL von Anfang an (Strato-Empfehlung), sonst STARTTLS (z. B. 587)."""
+    port = int(port or 587)
+    if port == 465:
+        return smtplib.SMTP_SSL(host, port, timeout=30)
+    verbindung = smtplib.SMTP(host, port, timeout=30)
+    verbindung.starttls()
+    return verbindung
+
+
 def send_time_export_email(month, filename, data, content_type):
     settings = load_settings()
     smtp_host = os.environ.get("SMTP_HOST")
@@ -2166,8 +2176,7 @@ def send_time_export_email(month, filename, data, content_type):
         msg.add_attachment(data, maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=filename)
     else:
         msg.add_attachment(data, maintype="text", subtype="csv", filename=filename)
-    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-        smtp.starttls()
+    with smtp_oeffnen(smtp_host, smtp_port) as smtp:
         smtp.login(smtp_user, smtp_password)
         smtp.send_message(msg)
     return recipient
@@ -2422,8 +2431,7 @@ def send_pdf_email_if_configured(order, pdf_filename):
             with open(image_path, "rb") as f:
                 msg.add_attachment(f.read(), maintype="image", subtype=subtype, filename=order["order_image_filename"])
 
-    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-        smtp.starttls()
+    with smtp_oeffnen(smtp_host, smtp_port) as smtp:
         smtp.login(smtp_user, smtp_password)
         smtp.send_message(msg)
     return True
@@ -6316,8 +6324,7 @@ class App(BaseHTTPRequestHandler):
             msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", ""))
             msg["To"] = empfaenger
             msg.set_content("Wenn du diese Mail liest, funktioniert der E-Mail-Versand des Bestellsystems.")
-            with smtplib.SMTP(os.environ.get("SMTP_HOST"), int(os.environ.get("SMTP_PORT", "587")), timeout=20) as smtp:
-                smtp.starttls()
+            with smtp_oeffnen(os.environ.get("SMTP_HOST"), os.environ.get("SMTP_PORT", "587")) as smtp:
                 smtp.login(os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD"))
                 smtp.send_message(msg)
         except Exception as exc:
