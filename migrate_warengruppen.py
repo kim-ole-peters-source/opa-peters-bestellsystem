@@ -21,7 +21,17 @@ import sys
 from collections import Counter
 from datetime import datetime
 
-DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+def datenordner():
+    """Findet den Ordner mit der Datenbank, egal wie das Programm gestartet wird."""
+    if os.environ.get("DATA_DIR"):
+        return os.environ["DATA_DIR"]
+    for kandidat in ("/var/lib/opa-peters", os.path.dirname(os.path.abspath(__file__))):
+        if os.path.exists(os.path.join(kandidat, "bestellsystem.db")):
+            return kandidat
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+DATA_DIR = datenordner()
 DB_PATH = os.path.join(DATA_DIR, "bestellsystem.db")
 
 # Gruppen, die dasselbe meinen, werden zusammengelegt
