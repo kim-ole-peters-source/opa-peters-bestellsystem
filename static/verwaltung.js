@@ -32,6 +32,15 @@
     }
   });
 
+  /* ---------- Fenster, die sich beim Laden öffnen sollen ---------- */
+  $$('dialog[data-auto-oeffnen]').forEach(oeffnen);
+
+  /* ---------- Ganze Tabellenzeile anklickbar ---------- */
+  document.addEventListener('click', function (e) {
+    var zeile = e.target.closest('tr[data-href]');
+    if (zeile && !e.target.closest('a, button, input, select, label')) window.location.href = zeile.getAttribute('data-href');
+  });
+
   /* ---------- Rückfragen vor dem Löschen ---------- */
   document.addEventListener('click', function (e) {
     var knopf = e.target.closest('button[data-vw-confirm]');

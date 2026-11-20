@@ -3037,6 +3037,28 @@ def admin_hinweise():
 ERLEDIGT_MARKE = '<span class="vw-marke gruen">✓ erledigt</span>'
 
 
+WOCHENTAGE_LANG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+
+
+def tag_titel(iso):
+    """'Heute · Freitag, 20.11.' bzw. 'Mittwoch, 18.11.'"""
+    try:
+        tag = datetime.strptime(iso, "%Y-%m-%d").date()
+    except ValueError:
+        return iso
+    text = f"{WOCHENTAGE_LANG[tag.weekday()]}, {tag.strftime('%d.%m.')}"
+    heute = berlin_now().date()
+    if tag == heute:
+        return "Heute · " + text
+    if tag == heute - timedelta(days=1):
+        return "Gestern · " + text
+    return text
+
+
+def stunden_kurz(minutes, mit_vorzeichen=False):
+    return stunden_text(minutes, mit_vorzeichen).replace(" Std.", "")
+
+
 class App(BaseHTTPRequestHandler):
     def is_admin(self):
         c = cookies.SimpleCookie(self.headers.get("Cookie"))
@@ -5543,19 +5565,21 @@ class App(BaseHTTPRequestHandler):
     def team_kopf(self, aktiv, unter="", aktionen=""):
         return admin_kopf("Team", unter, aktionen, TEAM_REITER, aktiv)
 
-    def zeit_eintrag_karte(self, entry, month, mitarbeiter_namen):
+    def zeit_eintrag_karte(self, entry, month, mitarbeiter_namen, zeige_person=False):
         namen = list(mitarbeiter_namen)
         if entry["employee_name"] and entry["employee_name"] not in namen:
             namen.append(entry["employee_name"])
         status = "nachträglich geändert" if entry["edited"] else "so eingetragen"
         notiz = f'<small class="vw-notiz">„{esc(entry["note"])}“</small>' if entry["note"] else ""
+        person = f'<b>{esc(entry["employee_name"])}</b>' if zeige_person else f'<span class="vw-schicht-datum">{esc(freundliches_datum(entry["work_date"], mit_zeit=False))}</span>'
         return f"""
         <details class="vw-schicht">
             <summary>
-                <span class="vw-schicht-datum">{esc(freundliches_datum(entry['work_date'], mit_zeit=False))}</span>
+                <span class="vw-schicht-erst">{person}</span>
                 <span class="vw-schicht-zeit">{esc(entry['start_time'])}–{esc(entry['end_time'])}</span>
                 <span class="vw-schicht-ort">{esc(entry['work_location'])}{notiz}</span>
                 <b class="vw-schicht-dauer">{esc(stunden_text(entry['duration_minutes']))}</b>
+                <span class="vw-schicht-stift" aria-hidden="true">✎</span>
             </summary>
             <form method="post" action="/admin/time/update" class="vw-formular vw-schicht-form">
                 <input type="hidden" name="id" value="{entry['id']}">
@@ -5584,94 +5608,168 @@ class App(BaseHTTPRequestHandler):
         month = self.query_text(query, "month") or current_month()
         if not re.match(r"^\d{4}-\d{2}$", month):
             month = current_month()
+        ansicht = self.query_text(query, "ansicht") or "uebersicht"
+        person_filter = self.query_text(query, "person")
         ort_filter = self.query_text(query, "work_location")
-        entries = get_time_entries(month, self.query_text(query, "employee"), ort_filter)
+        entries = get_time_entries(month, "", ort_filter)
         by_employee, by_location, matrix = summarize_time_entries(entries)
-        personen = get_time_employees(active_only=False)
         settings_by_key = employee_settings_map()
         aktive_namen = get_time_employee_names(active_only=True)
         alle_namen = get_time_employee_names(active_only=False)
-        namen = list(by_employee.keys()) + [n for n in aktive_namen if n not in by_employee]
         locations = get_locations()
-        standort_optionen = "".join(f'<option value="{esc(l["id"])}">{esc(l["name"])}</option>' for l in locations)
-        zeit_optionen = '<option value="">–</option>' + option_html(time_options())
-        karten = []
-        summe_ist = summe_lohn = 0
-        for name in sorted(namen, key=str.lower):
+        jahr, mon = int(month[:4]), int(month[5:])
+        vorher = f"{jahr - (mon == 1)}-{12 if mon == 1 else mon - 1:02d}"
+        nachher = f"{jahr + (mon == 12)}-{1 if mon == 12 else mon + 1:02d}"
+        monatsnamen = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
+        monat_text = f"{monatsnamen[mon - 1]} {jahr}"
+        def link(**extra):
+            werte = {"month": month, "ansicht": ansicht, "work_location": ort_filter, "person": person_filter}
+            werte.update(extra)
+            return "/admin/time?" + urlencode({k: v for k, v in werte.items() if v})
+
+        # ---- Kennzahlen
+        summe_ist = sum(by_employee.values())
+        summe_lohn = 0
+        zeilen = []
+        namen = sorted(set(by_employee) | set(aktive_namen), key=str.lower)
+        max_ist = max([by_employee.get(n, 0) for n in namen] + [1])
+        for name in namen:
             ist = by_employee.get(name, 0)
             einstellungen = settings_by_key.get(normalize_text_key(name), {})
             soll = int(round(parse_decimal(einstellungen.get("monthly_hours", 0)) * 60))
-            stunden, _ueber, lohn = employee_payroll_values(name, ist, settings_by_key)
-            summe_ist += ist
+            _h, _u, lohn = employee_payroll_values(name, ist, settings_by_key)
             summe_lohn += lohn
+            anzahl = sum(1 for e in entries if (e["employee_name"] or "Ohne Namen") == name)
             if soll:
                 diff = ist - soll
-                diff_html = f'<span class="{"plus" if diff > 0 else ("minus" if diff < 0 else "")}">{esc(stunden_text(diff, mit_vorzeichen=True))}</span>'
-                soll_text = stunden_text(soll)
+                diff_html = f'<span class="{"plus" if diff > 0 else ("minus" if diff < 0 else "")}">{esc(stunden_kurz(diff, mit_vorzeichen=True))}</span>'
+                prozent = min(100, round(100 * ist / soll)) if soll else 0
+                balken = f'<span class="vw-balken" title="{prozent} % vom Soll"><span style="width:{prozent}%"></span></span>'
             else:
-                diff_html = '<span class="vw-klein">kein Soll</span>'
-                soll_text = "–"
-            schichten = [e for e in entries if (e["employee_name"] or "Ohne Namen") == name]
-            nachtragen = ""
-            if name in aktive_namen:
-                nachtragen = f"""
-                <form method="post" action="/admin/time/create" class="vw-nachtragen">
-                    <input type="hidden" name="employee_name" value="{esc(name)}">
-                    <input type="hidden" name="shift_count" value="1">
-                    <b>Schicht nachtragen</b>
-                    <label>Standort<select name="location_id" required>{standort_optionen}</select></label>
-                    <label>Datum<input type="date" name="shift_date_0" value="{esc(today_iso())}" required></label>
-                    <label>Anfang<select name="shift_start_0" required>{zeit_optionen}</select></label>
-                    <label>Ende<select name="shift_end_0" required>{zeit_optionen}</select></label>
-                    <label class="vw-wachsen">Hinweis<input name="shift_note_0" placeholder="optional"></label>
-                    <button class="primary" type="submit">Eintragen</button>
-                </form>"""
-            ausgeschieden = '' if name in aktive_namen or name not in alle_namen else ' <span class="vw-marke grau">ausgeschieden</span>'
-            karten.append(f"""
-            <details class="vw-person" id="person-{esc(normalize_text_key(name))}">
-                <summary>
-                    <span class="vw-person-name"><b>{esc(name)}{ausgeschieden}</b><small>{len(schichten)} Schicht(en)</small></span>
-                    <span class="vw-person-zahl"><small>Soll</small>{esc(soll_text)}</span>
-                    <span class="vw-person-zahl"><small>Ist</small><b>{esc(stunden_text(ist))}</b></span>
-                    <span class="vw-person-zahl"><small>Plus / Minus</small>{diff_html}</span>
-                    <span class="vw-person-zahl"><small>Lohn</small>{esc(format_money(lohn)) if lohn else '–'}</span>
-                </summary>
-                <div class="vw-person-inhalt">
-                    {''.join(self.zeit_eintrag_karte(e, month, alle_namen) for e in schichten) or '<p class="vw-leer">In diesem Monat keine Schichten.</p>'}
-                    {nachtragen}
-                </div>
-            </details>""")
-        ort_zeilen = "".join(
-            f'<tr><td>{esc(n)}</td><td class="zahl">{esc(stunden_text(m))}</td></tr>' for n, m in sorted(by_location.items(), key=lambda i: i[0].lower())
-        )
-        matrix_zeilen = "".join(
-            f'<tr><td>{esc(p)}</td><td>{esc(o)}</td><td class="zahl">{esc(stunden_text(m))}</td></tr>'
-            for p, orte in sorted(matrix.items(), key=lambda i: i[0].lower()) for o, m in sorted(orte.items(), key=lambda i: i[0].lower())
-        )
+                diff_html = '<span class="vw-klein">–</span>'
+                balken = f'<span class="vw-balken grau"><span style="width:{round(100 * ist / max_ist)}%"></span></span>'
+            weg = "" if name in aktive_namen or name not in alle_namen else ' <span class="vw-marke grau">ausgeschieden</span>'
+            zeilen.append(f"""
+            <tr class="vw-klickzeile" data-href="{esc(link(ansicht='schichten', person=name))}">
+                <td><a href="{esc(link(ansicht='schichten', person=name))}"><b>{esc(name)}</b></a>{weg}</td>
+                <td class="zahl">{esc(stunden_kurz(soll)) if soll else '–'}</td>
+                <td class="zahl"><b>{esc(stunden_kurz(ist))}</b>{balken}</td>
+                <td class="zahl">{diff_html}</td>
+                <td class="zahl">{esc(format_money(lohn)) if lohn else '–'}</td>
+            </tr>""")
+        personen_tabelle = f"""
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Stunden je Person</h3><span class="vw-klein">Name anklicken = Schichten ansehen</span></div>
+            <div class="vw-tabelle-wrap vw-ohne-rand"><table class="vw-tabelle">
+                <tr><th>Person</th><th class="zahl">Soll (Std.)</th><th class="zahl">Ist (Std.)</th><th class="zahl">+/−</th><th class="zahl">Lohn</th></tr>
+                {''.join(zeilen) or '<tr><td colspan="5">Noch keine Personen angelegt.</td></tr>'}
+                <tr class="summe"><td>Gesamt</td><td></td><td class="zahl">{esc(stunden_kurz(summe_ist))}</td><td></td><td class="zahl">{esc(format_money(summe_lohn))}</td></tr>
+            </table></div>
+        </section>"""
+
+        max_ort = max(list(by_location.values()) + [1])
+        ort_karten = []
+        for ort, minuten in sorted(by_location.items(), key=lambda i: -i[1]):
+            leute = sorted(((p, orte.get(ort, 0)) for p, orte in matrix.items() if orte.get(ort)), key=lambda i: -i[1])
+            leute_html = "".join(f'<li><span>{esc(p)}</span><b>{esc(stunden_text(m))}</b></li>' for p, m in leute)
+            anteil = round(100 * minuten / summe_ist) if summe_ist else 0
+            ort_karten.append(f"""
+            <div class="vw-ort">
+                <div class="vw-ort-kopf"><b>{esc(ort)}</b><span>{esc(stunden_text(minuten))} · {anteil} %</span></div>
+                <span class="vw-balken dick"><span style="width:{round(100 * minuten / max_ort)}%"></span></span>
+                <ul class="vw-ort-leute">{leute_html}</ul>
+            </div>""")
+        orte_karte = f"""
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Stunden je Standort</h3></div>
+            {''.join(ort_karten) or '<p class="vw-leer">In diesem Monat noch keine Schichten.</p>'}
+        </section>"""
+
+        heute_iso = today_iso()
+        heute = [e for e in get_time_entries(current_month()) if e["work_date"] == heute_iso]
+        kennzahlen = f"""
+        <div class="vw-kennzahlen">
+            <div><small>Stunden {esc(monatsnamen[mon - 1])}</small><b>{esc(stunden_text(summe_ist))}</b></div>
+            <div><small>Lohnsumme</small><b>{esc(format_money(summe_lohn))}</b></div>
+            <div><small>Schichten</small><b>{len(entries)}</b></div>
+            <div><small>Heute im Dienst</small><b>{len(heute)}</b><span class="vw-klein">{esc(", ".join(e["employee_name"] for e in heute)) or "noch niemand"}</span></div>
+        </div>"""
+
+        # ---- Ansicht "Schichten": nach Tagen
+        if ansicht == "schichten":
+            liste = [e for e in entries if not person_filter or e["employee_name"] == person_filter]
+            tage = {}
+            for e in liste:
+                tage.setdefault(e["work_date"], []).append(e)
+            bloecke = []
+            for tag in sorted(tage, reverse=True):
+                schichten = sorted(tage[tag], key=lambda e: (e["start_time"] or "", e["employee_name"] or ""))
+                summe = sum(e["duration_minutes"] or 0 for e in schichten)
+                bloecke.append(
+                    f'<div class="vw-tag-kopf"><h3 class="vw-tag">{esc(tag_titel(tag))}</h3><span class="vw-klein">{esc(stunden_text(summe))}</span></div>'
+                    f'<div class="vw-schichtliste">{"".join(self.zeit_eintrag_karte(e, month, alle_namen, zeige_person=True) for e in schichten)}</div>'
+                )
+            personen_chips = f'<a class="vw-chip" aria-pressed="{"false" if person_filter else "true"}" href="{esc(link(person=""))}">Alle</a>' + "".join(
+                f'<a class="vw-chip" aria-pressed="{"true" if n == person_filter else "false"}" href="{esc(link(person=n))}">{esc(n)}</a>'
+                for n in sorted(by_employee, key=str.lower)
+            )
+            person_info = ""
+            if person_filter:
+                ist = by_employee.get(person_filter, 0)
+                soll = int(round(parse_decimal(settings_by_key.get(normalize_text_key(person_filter), {}).get("monthly_hours", 0)) * 60))
+                diff = f" · {stunden_text(ist - soll, mit_vorzeichen=True)}" if soll else ""
+                person_info = f'<p class="vw-person-info"><b>{esc(person_filter)}</b>: {esc(stunden_text(ist))}' + (f" von {esc(stunden_text(soll))} Soll{esc(diff)}" if soll else "") + f' · {len(liste)} Schichten</p>'
+            inhalt = f"""
+            <div class="vw-chips">{personen_chips}</div>
+            {person_info}
+            {''.join(bloecke) or '<p class="vw-leer">Keine Schichten in diesem Monat.</p>'}"""
+        else:
+            inhalt = f'{kennzahlen}<div class="vw-raster-zeiten">{personen_tabelle}{orte_karte}</div>'
+
         settings = load_settings()
         log = latest_time_export_log()
-        log_text = f"{log['created_at']}: {log['status']} ({log['export_month']}) {log['message'] or ''}" if log else "Noch kein automatischer Export gelaufen."
-        ort_optionen = '<option value="">Alle Einsatzorte</option>' + "".join(
+        export_status = settings.get("last_auto_time_export_status") or (f"{log['created_at']}: {log['status']}" if log else "noch nicht gelaufen")
+        ort_optionen = '<option value="">Alle Standorte</option>' + "".join(
             f'<option value="{esc(l["name"])}" {"selected" if l["name"] == ort_filter else ""}>{esc(l["name"])}</option>' for l in locations
         )
-        monat_name = datetime.strptime(month, "%Y-%m").strftime("%m/%Y")
+        zeit_optionen = '<option value="">–</option>' + option_html(time_options())
+        unterreiter = (
+            f'<div class="vw-umschalter"><a href="{esc(link(ansicht="uebersicht", person=""))}" {AKTIV_ATTR if ansicht != "schichten" else ""}>Übersicht</a>'
+            f'<a href="{esc(link(ansicht="schichten"))}" {AKTIV_ATTR if ansicht == "schichten" else ""}>Alle Schichten</a></div>'
+        )
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.team_kopf('zeiten', f'Arbeitszeiten {monat_name} · {stunden_text(summe_ist)} · {len(entries)} Schichten', f'<a class="button primary" href="/admin/time/export?month={esc(month)}">Monat exportieren</a>')}
-        <form method="get" action="/admin/time" class="vw-werkzeug">
-            <input type="month" name="month" value="{esc(month)}" data-auto-submit aria-label="Monat">
-            <select name="work_location" data-auto-submit aria-label="Einsatzort">{ort_optionen}</select>
-        </form>
-        <div class="vw-personenliste">{''.join(karten) or '<p class="vw-leer">Noch keine Personen angelegt. <a href="/admin/employees">Personen anlegen</a></p>'}</div>
-        <p class="vw-summe">Gesamt: <b>{esc(stunden_text(summe_ist))}</b> · Lohnsumme <b>{esc(format_money(summe_lohn))}</b></p>
-        <details class="vw-aufklapp vw-karte">
-            <summary>Stunden nach Standort</summary>
-            <div class="vw-raster-2">
-                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Einsatzort</th><th class="zahl">Stunden</th></tr>{ort_zeilen or '<tr><td colspan="2">Keine Daten.</td></tr>'}</table></div>
-                <div class="vw-tabelle-wrap"><table class="vw-tabelle"><tr><th>Person</th><th>Einsatzort</th><th class="zahl">Stunden</th></tr>{matrix_zeilen or '<tr><td colspan="3">Keine Daten.</td></tr>'}</table></div>
+        {self.team_kopf('zeiten', '', '<button type="button" class="primary" data-dialog="schichtNachtragen">+ Schicht nachtragen</button>' + f'<a class="button" href="/admin/time/export?month={esc(month)}">Monat exportieren</a>')}
+        <div class="vw-werkzeug vw-monatsleiste">
+            <div class="vw-monat">
+                <a class="button vw-rund" href="{esc(link(month=vorher))}" aria-label="Monat davor">‹</a>
+                <b>{esc(monat_text)}</b>
+                <a class="button vw-rund" href="{esc(link(month=nachher))}" aria-label="Monat danach">›</a>
             </div>
-        </details>
-        <p class="vw-klein">Automatischer Monats-Export an <b>{esc(settings.get('time_export_email') or 'niemanden')}</b> · {esc(settings.get('last_auto_time_export_status') or log_text)} · Die späteste Uhrzeit fürs Eintragen stellst du beim jeweiligen <a href="/admin/locations">Standort</a> ein.</p>
+            {unterreiter}
+            <form method="get" action="/admin/time"><input type="hidden" name="month" value="{esc(month)}"><input type="hidden" name="ansicht" value="{esc(ansicht)}"><input type="hidden" name="person" value="{esc(person_filter)}">
+                <select name="work_location" data-auto-submit aria-label="Standort">{ort_optionen}</select></form>
+        </div>
+        {inhalt}
+        <p class="vw-klein vw-fusszeile">Monats-Export geht automatisch an <b>{esc(settings.get('time_export_email') or 'niemanden')}</b> ({esc(export_status)}) · Späteste Uhrzeit zum Eintragen: beim jeweiligen <a href="/admin/locations">Standort</a></p>
+
+        <dialog class="vw-dialog" id="schichtNachtragen">
+            <div class="vw-dialog-kopf"><h3>Schicht nachtragen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/time/create" class="vw-formular">
+                <input type="hidden" name="shift_count" value="1">
+                <div class="vw-zwei">
+                    <label>Person<select name="employee_name" required><option value="">bitte wählen</option>{option_html(aktive_namen, person_filter)}</select></label>
+                    <label>Standort<select name="location_id" required>{''.join(f'<option value="{esc(l["id"])}">{esc(l["name"])}</option>' for l in locations)}</select></label>
+                </div>
+                <div class="vw-drei">
+                    <label>Datum<input type="date" name="shift_date_0" value="{esc(heute_iso)}" required></label>
+                    <label>Anfang<select name="shift_start_0" required>{zeit_optionen}</select></label>
+                    <label>Ende<select name="shift_end_0" required>{zeit_optionen}</select></label>
+                </div>
+                <label>Hinweis (optional)<input name="shift_note_0"></label>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Eintragen</button></div>
+            </form>
+        </dialog>
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
         """
         self.admin_seite("Zeiten", body)
@@ -5770,63 +5868,173 @@ class App(BaseHTTPRequestHandler):
         schluessel = dict((a[0], a[2]) for a in arten)[art]
         standort = self.query_text(query, "standort")
         ziel_orte = produktion if art == "produktion" else locations
-        art_chips = "".join(
-            f'<a class="vw-chip" aria-pressed="{"true" if a[0] == art else "false"}" href="/admin/aufgaben?art={a[0]}&standort={quote_plus(standort)}">{esc(a[1])}</a>' for a in arten
-        )
-        ort_chips = "".join(
-            f'<a class="vw-chip" aria-pressed="{"true" if l["id"] == standort else "false"}" href="/admin/aufgaben?art={art}&standort={quote_plus(l["id"])}">{esc(l["name"])}</a>' for l in ziel_orte
-        )
-        if len(ziel_orte) > 1:
-            ort_chips = f'<a class="vw-chip" aria-pressed="{"false" if standort else "true"}" href="/admin/aufgaben?art={art}">Alle Standorte</a>' + ort_chips
+        zaehler = {a[0]: sum(len(self.aufgaben_liste(l, a[2])) for l in (produktion if a[0] == "produktion" else locations)) for a in arten}
+        art_umschalter = '<div class="vw-umschalter">' + "".join(
+            f'<a href="/admin/aufgaben?art={a[0]}"{AKTIV_ATTR if a[0] == art else ""}>{esc(a[1])} <small>{zaehler[a[0]]}</small></a>' for a in arten
+        ) + "</div>"
 
-        # Formular "Neu anlegen"
+        # Formular "Neu anlegen" im Fenster
         if len(ziel_orte) > 1:
             ort_haken = '<fieldset class="vw-feldgruppe"><legend>Für welche Standorte?</legend><div class="vw-schalter-raster">' + \
                 '<label class="vw-schalter"><input type="checkbox" data-alle-standorte><span>Alle</span></label>' + "".join(
-                    f'<label class="vw-schalter"><input type="checkbox" data-standort name="standort_{esc(l["id"])}" value="1" {"checked" if l["id"] == standort else ""}><span>{esc(l["name"])}</span></label>'
+                    f'<label class="vw-schalter"><input type="checkbox" data-standort name="standort_{esc(l["id"])}" value="1" {"checked" if (l["id"] == standort or art == "tagesaufgaben") else ""}><span>{esc(l["name"])}</span></label>'
                     for l in ziel_orte) + "</div></fieldset>"
         else:
             ort_haken = "".join(f'<input type="hidden" name="standort_{esc(l["id"])}" value="1">' for l in ziel_orte)
-        felder = self.aufgaben_felder(art, {})
         neu_titel = {"tagesaufgaben": "Neue Tagesaufgabe", "auftraege": "Neuer Kundenauftrag", "infos": "Neue Info", "produktion": "Neuer Produktionsauftrag"}[art]
-        neu_form = f"""
-        <details class="vw-karte vw-aufklapp" {'open' if self.query_text(query, 'neu') else ''}>
-            <summary>+ {neu_titel}</summary>
+        neu_dialog = f"""
+        <dialog class="vw-dialog" id="neuEintrag" {'data-auto-oeffnen' if self.query_text(query, 'neu') else ''}>
+            <div class="vw-dialog-kopf"><h3>{neu_titel}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
             <form method="post" action="/admin/aufgaben/neu" enctype="multipart/form-data" class="vw-formular">
                 <input type="hidden" name="art" value="{art}">
-                {felder}
+                {self.aufgaben_felder(art, {})}
                 {ort_haken}
                 <div class="vw-dialog-fuss"><button class="primary" type="submit">Anlegen</button></div>
             </form>
-        </details>"""
-
+        </dialog>"""
         erklaerung = {
-            "tagesaufgaben": "Aktive Tagesaufgaben erscheinen jeden Tag im Cockpit des Standorts und werden dort abgehakt. Über Nacht sind sie wieder offen. „Pausiert“ = gespeichert, aber gerade nicht im Cockpit (früher „Muster“).",
-            "auftraege": "Kundenaufträge erscheinen im Cockpit. Der Standort markiert sie als „bezahlt & abgeholt“ oder „abgeholt – Rechnung schreiben“. Letztere landen unter Bestellungen › Rechnungsstellung.",
+            "tagesaufgaben": "Diese Aufgaben erscheinen jeden Tag im Cockpit der Standorte und werden dort abgehakt. Über Nacht sind sie wieder offen.",
+            "auftraege": "Kundenaufträge erscheinen im Cockpit. Wird ein Auftrag „abgeholt – Rechnung schreiben“ markiert, landet er unter Bestellungen › Rechnungsstellung.",
             "infos": "Infos sind Hinweise, die das Team im Cockpit liest – z. B. neue Preise oder Termine.",
             "produktion": "Produktionsaufträge erscheinen im Wochenplan der Produktion.",
         }[art]
-        bloecke = []
-        for location in (l for l in ziel_orte if not standort or l["id"] == standort):
-            eintraege = self.aufgaben_liste(location, schluessel)
-            states = get_cockpit_state_details(location["id"])
-            zeilen = [self.aufgaben_zeile(art, location, e, states) for e in eintraege]
-            bloecke.append(f"""
-            <section class="vw-aufgaben-ort">
-                <h3>{esc(location['name'])} <span class="vw-zahl">{len(eintraege)}</span></h3>
-                {''.join(zeilen) or '<p class="vw-leer">Hier ist noch nichts angelegt.</p>'}
-            </section>""")
+
+        if art == "tagesaufgaben":
+            inhalt = self.aufgaben_tabelle(locations)
+            filter_chips = ""
+        else:
+            ort_chips = ""
+            if len(ziel_orte) > 1:
+                ort_chips = f'<a class="vw-chip" aria-pressed="{"false" if standort else "true"}" href="/admin/aufgaben?art={art}">Alle Standorte</a>' + "".join(
+                    f'<a class="vw-chip" aria-pressed="{"true" if l["id"] == standort else "false"}" href="/admin/aufgaben?art={art}&standort={quote_plus(l["id"])}">{esc(l["name"])}</a>' for l in ziel_orte
+                )
+            filter_chips = f'<div class="vw-chips">{ort_chips}</div>' if ort_chips else ""
+            bloecke = []
+            for location in (l for l in ziel_orte if not standort or l["id"] == standort):
+                eintraege = self.aufgaben_liste(location, schluessel)
+                states = get_cockpit_state_details(location["id"])
+                zeilen = [self.aufgaben_zeile(art, location, e, states) for e in eintraege]
+                bloecke.append(f"""
+                <section class="vw-aufgaben-ort">
+                    <h3>{esc(location['name'])} <span class="vw-zahl">{len(eintraege)}</span></h3>
+                    {''.join(zeilen) or '<p class="vw-leer">Hier ist noch nichts angelegt.</p>'}
+                </section>""")
+            inhalt = "".join(bloecke)
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.team_kopf('aufgaben', 'Was im Cockpit der Standorte erscheint.')}
-        <div class="vw-chips vw-chips-gross">{art_chips}</div>
-        {f'<div class="vw-chips">{ort_chips}</div>' if ort_chips else ''}
+        {self.team_kopf('aufgaben', '', f'<button type="button" class="primary" data-dialog="neuEintrag">+ {neu_titel}</button>')}
+        {art_umschalter}
         <p class="vw-klein">{esc(erklaerung)}</p>
-        {neu_form}
-        {''.join(bloecke)}
+        {filter_chips}
+        {inhalt}
+        {neu_dialog}
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
         """
         self.admin_seite("Aufgaben & Aufträge", body)
+
+    def aufgaben_gruppen(self, locations):
+        """Tagesaufgaben gleichen Namens über alle Standorte zusammenfassen."""
+        gruppen = {}
+        for location in locations:
+            for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
+                key = normalize_text_key(task["title"])
+                g = gruppen.setdefault(key, {"title": task["title"], "bild": "", "orte": {}})
+                g["orte"][location["id"]] = task
+                if task.get("image_filename") and not g["bild"]:
+                    g["bild"] = task["image_filename"]
+        return gruppen
+
+    def aufgaben_tabelle(self, locations):
+        gruppen = self.aufgaben_gruppen(locations)
+        if not gruppen:
+            return '<p class="vw-leer">Noch keine Tagesaufgaben. Lege oben rechts die erste an.</p>'
+        states = {l["id"]: get_cockpit_state_details(l["id"]) for l in locations}
+        kopf = "".join(f'<th class="mitte">{esc(l["name"])}</th>' for l in locations)
+        zeilen, dialoge = [], []
+        erledigt_heute = {l["id"]: [0, 0] for l in locations}
+        for nr, (key, g) in enumerate(sorted(gruppen.items(), key=lambda i: i[1]["title"].lower())):
+            zellen = []
+            for l in locations:
+                task = g["orte"].get(l["id"])
+                if not task:
+                    zellen.append('<td class="mitte"><span class="vw-strich">–</span></td>')
+                    continue
+                if not task.get("active", True):
+                    zellen.append('<td class="mitte"><span class="vw-marke grau">pausiert</span></td>')
+                    continue
+                erledigt_heute[l["id"]][1] += 1
+                info = states[l["id"]].get(("task", task["id"]), {})
+                if info.get("state") == "done" and cockpit_state_is_from_today(info):
+                    erledigt_heute[l["id"]][0] += 1
+                    wer = esc(info.get("completed_by") or "")
+                    zellen.append(f'<td class="mitte"><span class="vw-marke gruen">✓ {wer} {esc(info["updated_at"][-5:])}</span></td>')
+                else:
+                    zellen.append('<td class="mitte"><span class="vw-marke honig">offen</span></td>')
+            bild = f'<img class="vw-mini-bild" src="/uploads/{esc(g["bild"])}" alt="" onerror="this.remove()">' if g["bild"] else ""
+            zeilen.append(
+                f'<tr><td><button type="button" class="vw-textknopf" data-dialog="gruppe-{nr}">{bild}<b>{esc(g["title"])}</b><span class="vw-stift">✎</span></button></td>{"".join(zellen)}</tr>'
+            )
+            haken = "".join(
+                f'<label class="vw-schalter"><input type="checkbox" name="aktiv_{esc(l["id"])}" value="1" {"checked" if (g["orte"].get(l["id"]) or {}).get("active") else ""}><span>{esc(l["name"])}</span></label>'
+                for l in locations
+            )
+            dialoge.append(f"""
+            <dialog class="vw-dialog" id="gruppe-{nr}">
+                <div class="vw-dialog-kopf"><h3>Tagesaufgabe</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+                <form method="post" action="/admin/aufgaben/gruppe" enctype="multipart/form-data" class="vw-formular">
+                    <input type="hidden" name="schluessel" value="{esc(key)}">
+                    <label>Aufgabe<input name="title" required value="{esc(g['title'])}"></label>
+                    <fieldset class="vw-feldgruppe"><legend>Jeden Tag im Cockpit von</legend><div class="vw-schalter-raster">{haken}</div>
+                    <p class="vw-klein">Abwählen pausiert die Aufgabe dort – sie bleibt gespeichert.</p></fieldset>
+                    <label>Bild (optional){f'<img class="vw-vorschau" src="/uploads/{esc(g["bild"])}" alt="" onerror="this.remove()">' if g["bild"] else ''}<input type="file" name="image" accept="image/*"></label>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+                </form>
+                <form method="post" action="/admin/aufgaben/gruppe-loeschen" class="vw-gefahrzone" data-vw-confirm="„{esc(g['title'])}“ bei allen Standorten löschen?">
+                    <input type="hidden" name="schluessel" value="{esc(key)}"><span>Überall löschen</span><button class="danger" type="submit">Löschen</button>
+                </form>
+            </dialog>""")
+        fuss = "".join(
+            f'<td class="mitte"><b>{e} / {t}</b><span class="vw-balken"><span style="width:{round(100 * e / t) if t else 0}%"></span></span></td>'
+            for e, t in (erledigt_heute[l["id"]] for l in locations)
+        )
+        return f"""
+        <div class="vw-tabelle-wrap"><table class="vw-tabelle vw-matrix">
+            <tr><th>Aufgabe <span class="vw-klein">– zum Ändern anklicken</span></th>{kopf}</tr>
+            {''.join(zeilen)}
+            <tr class="summe"><td>Heute erledigt</td>{fuss}</tr>
+        </table></div>
+        {''.join(dialoge)}"""
+
+    def handle_aufgaben_gruppe(self, loeschen=False):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        key = self.form_value(form, "schluessel").strip()
+        locations = get_locations()
+        if loeschen:
+            for l in locations:
+                l["cockpit_tasks"] = [t for t in normalize_cockpit_tasks(l.get("cockpit_tasks", [])) if normalize_text_key(t["title"]) != key]
+            save_locations(normalize_locations(locations))
+            return self.redirect("/admin/aufgaben?msg=" + quote_plus("Aufgabe bei allen Standorten gelöscht."))
+        titel = self.form_value(form, "title").strip()
+        if not titel:
+            return self.redirect("/admin/aufgaben?error=" + quote_plus("Bitte einen Namen für die Aufgabe eingeben."))
+        bild = self.save_cockpit_image_upload(form, "image", "")
+        for l in locations:
+            tasks = normalize_cockpit_tasks(l.get("cockpit_tasks", []))
+            an = bool(self.form_value(form, f"aktiv_{l['id']}"))
+            treffer = [t for t in tasks if normalize_text_key(t["title"]) == key]
+            if treffer:
+                for t in treffer:
+                    t["title"] = titel
+                    t["active"] = an
+                    if bild:
+                        t["image_filename"] = bild
+            elif an:
+                tasks.append({"id": make_cockpit_item_id("task"), "title": titel, "template": False, "active": True, "image_filename": bild})
+            l["cockpit_tasks"] = tasks
+        save_locations(normalize_locations(locations))
+        self.redirect("/admin/aufgaben?msg=" + quote_plus(f"„{titel}“ gespeichert."))
 
     def aufgaben_liste(self, location, schluessel):
         normalisierer = {
@@ -6401,6 +6609,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_admin_cockpit_content()
             if path == "/admin/aufgaben/neu":
                 return self.handle_aufgaben("neu")
+            if path == "/admin/aufgaben/gruppe":
+                return self.handle_aufgaben_gruppe()
+            if path == "/admin/aufgaben/gruppe-loeschen":
+                return self.handle_aufgaben_gruppe(loeschen=True)
             if path == "/admin/aufgaben/speichern":
                 return self.handle_aufgaben("speichern")
             if path == "/admin/aufgaben/loeschen":
