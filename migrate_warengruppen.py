@@ -42,6 +42,8 @@ ZUSAMMEN = {
     "Soße": "Variegato & Saucen",
     "Milch & Sahne": "Milchprodukte & Eier",
     "Allgemein": "Divers",
+    "Kaffe & Co": "Kaffee & Co",
+    "Kaffeetasse": "Kaffee & Co",
 }
 
 # Einzelentscheidungen, die sich nicht aus einer Regel ergeben
@@ -89,7 +91,8 @@ REGELN = [
 
 # Gruppen, die durch die Umsortierung leer geworden sind und wegkommen
 LEER_GEWORDEN = ["Produktion", "Verpackung", "Soße", "Milch & Sahne", "Milch", "Sahne & Eier",
-                 "Milch, Sahne & Eier", "Allgemein, Verpackung", "Allgemein, TK", "Allgemein, Reinigung"]
+                 "Milch, Sahne & Eier", "Allgemein, Verpackung", "Allgemein, TK", "Allgemein, Reinigung",
+                 "Kaffe & Co", "Kaffeetasse"]
 
 TRENNZEICHEN = re.compile(r"[,;|/\n]")
 
