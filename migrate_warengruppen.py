@@ -36,9 +36,11 @@ DB_PATH = os.path.join(DATA_DIR, "bestellsystem.db")
 
 # Gruppen, die dasselbe meinen, werden zusammengelegt
 ZUSAMMEN = {
+    # Komma im Namen wird vom Bestellsystem als Trennung gelesen -> umbenannt
+    "Milch, Sahne & Eier": "Milchprodukte & Eier",
     "Verpackung": "Becher & Verpackung",
     "Soße": "Variegato & Saucen",
-    "Milch & Sahne": "Milch, Sahne & Eier",
+    "Milch & Sahne": "Milchprodukte & Eier",
     "Allgemein": "Divers",
 }
 
@@ -47,7 +49,7 @@ EINZELN = [
     (r"FAB Superpanna|Pulisano Bourbon-Vanille", "Aromen & Pasten"),
     (r"FAB Deli|FAB Vari|IC Joycream|^M'3 |PREG Salty", "Variegato & Saucen"),
     (r"FAB Topping", "Toppings"),
-    (r"Gastro Joghurt", "Milch, Sahne & Eier"),
+    (r"Gastro Joghurt", "Milchprodukte & Eier"),
     (r"IC Codetta", "Schokolade & Kuvertüre"),
     (r"IC Joyfruit", "Früchte & Füllungen"),
     (r"Haselnüsse", "Nüsse & Marzipan"),
@@ -78,11 +80,18 @@ REGELN = [
     ("Kakao",                  r"kakao|cacao"),
     ("Backmischungen",         r"mischung|meister back|delikat|mürb|backmischung"),
     ("Backzutaten",            r"zucker|mehl|backpulver|honig|essig|salz|stärke|glukose|glucodry|zitronensäure|zimt|gewürz|raps-öl|sahnegrieß"),
-    ("Milch, Sahne & Eier",    r"sahne|milch|eier|frischkäse|mascarpone|quark|butter|oatly|haferdrink"),
+    ("Milchprodukte & Eier",    r"sahne|milch|eier|frischkäse|mascarpone|quark|butter|oatly|haferdrink"),
     ("Getränke",               r"schorle|saft|wasser|gerolsteiner|\bvio\b|rauch|cola|limo"),
     ("Süßwaren",               r"haribo|bueno|plätzchen|amaretti|keks|smarties|oreo|stange hoche"),
     ("Geräte & Zubehör",       r"portionierer|zange|schaufel|behälter|schild|aufsteller"),
 ]
+
+
+# Gruppen, die durch die Umsortierung leer geworden sind und wegkommen
+LEER_GEWORDEN = ["Produktion", "Verpackung", "Soße", "Milch & Sahne", "Milch", "Sahne & Eier",
+                 "Milch, Sahne & Eier", "Allgemein, Verpackung", "Allgemein, TK", "Allgemein, Reinigung"]
+
+TRENNZEICHEN = re.compile(r"[,;|/\n]")
 
 
 def neue_gruppe(name, alt):
@@ -105,6 +114,29 @@ def neue_gruppe(name, alt):
     return None   # konnte nicht zugeordnet werden
 
 
+def gruppen_aufraeumen(con):
+    """Leer gewordene alte Gruppen ausblenden (nur wenn kein Produkt sie mehr nutzt)."""
+    benutzt = set()
+    for (kat,) in con.execute("SELECT category FROM products WHERE deleted_at IS NULL"):
+        for teil in TRENNZEICHEN.split(kat or ""):
+            if teil.strip():
+                benutzt.add(teil.strip().lower())
+    jetzt = datetime.now().isoformat(timespec="seconds")
+    weg = []
+    with con:
+        for name in LEER_GEWORDEN:
+            if name.lower() in benutzt:
+                continue
+            n = con.execute(
+                "UPDATE categories SET active=0, deleted_at=? WHERE lower(name)=lower(?) AND deleted_at IS NULL",
+                (jetzt, name),
+            ).rowcount
+            if n:
+                weg.append(name)
+    if weg:
+        print("Leere alte Gruppen ausgeblendet:", ", ".join(weg))
+
+
 def main():
     anwenden = "--anwenden" in sys.argv
     if not os.path.exists(DB_PATH):
@@ -115,6 +147,10 @@ def main():
     produkte = con.execute(
         "SELECT id, name, category FROM products WHERE deleted_at IS NULL"
     ).fetchall()
+
+    alle_ziele = [g for g, _ in REGELN] + [g for _, g in EINZELN] + [g for _, g in TIEFGEKUEHLT]
+    for gruppe in alle_ziele + list(ZUSAMMEN.values()):
+        assert not TRENNZEICHEN.search(gruppe), f"Gruppenname mit Trennzeichen: {gruppe}"
 
     aenderungen, offen = [], []
     for p in produkte:
@@ -147,7 +183,8 @@ def main():
         return
 
     if not aenderungen:
-        print("\nNichts zu tun.")
+        print("\nKeine Produkte zu ändern.")
+        gruppen_aufraeumen(con)
         return
 
     kopie = os.path.join(
@@ -162,6 +199,7 @@ def main():
             [(neu, pid) for pid, _, _, neu in aenderungen],
         )
     print(f"{len(aenderungen)} Produkte umsortiert.")
+    gruppen_aufraeumen(con)
     print("Bitte den Dienst neu starten, damit die Gruppen angelegt werden:")
     print("  systemctl restart opa-peters")
 
