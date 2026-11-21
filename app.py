@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-21-erkennung"
+ASSET_VERSION = "2026-11-21-tagesmail"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2915,6 +2915,132 @@ def bh_monatserinnerung():
                                 "icon": "/static/icons/icon-192.png", "badge": "/static/icons/icon-192.png"})
     except Exception:
         pass
+
+# ---------------------------------------------------------------- Bestellungen: eine Sammel-Mail am Tag
+TAGESMAIL_STUNDE = 6
+WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+
+
+def bestellungen_vom_tag(tag):
+    """Alle Bestellungen eines Kalendertags (tag = date), älteste zuerst."""
+    con = db()
+    zeilen = con.execute("SELECT id, order_number, location, ordered_by, buyer_group, note, pdf_filename, order_image_filename, created_at FROM orders").fetchall()
+    con.close()
+    treffer = [o for o in zeilen if parse_order_created_at(o["created_at"]).date() == tag]
+    return sorted(treffer, key=lambda o: parse_order_created_at(o["created_at"]))
+
+
+def tageszusammenfassung_bauen(tag):
+    """-> (betreff, text, anhaenge[(name, bytes, maintype, subtype)]) oder None, wenn es keine Bestellungen gab."""
+    orders = bestellungen_vom_tag(tag)
+    if not orders:
+        return None
+    tag_text = f"{WOCHENTAGE[tag.weekday()]}, {tag.strftime('%d.%m.%Y')}"
+    teile = [f"Guten Morgen,\n\nhier sind alle Bestellungen von {tag_text}: {len(orders)} Bestellung(en).\n"]
+    haendler = {}
+    for o in orders:
+        items = get_order_items(o["id"])
+        uhr = parse_order_created_at(o["created_at"]).strftime("%H:%M")
+        teile.append(f"\n— {o['location']} · {uhr} Uhr · {o['ordered_by']} · Nr. {o['order_number']}")
+        if (o["note"] or "").strip():
+            teile.append(f"  Notiz: {o['note'].strip()}")
+        for it in items:
+            teile.append(f"  {it['quantity']} × {it['product_name']} ({it['package_size']})")
+            h = haendler.setdefault(it["source"] or "Ohne Bezugsquelle", {})
+            key = (it["product_name"], it["package_size"])
+            eintrag = h.setdefault(key, {"menge": 0, "orte": {}})
+            eintrag["menge"] += int(it["quantity"] or 0)
+            eintrag["orte"][o["location"]] = eintrag["orte"].get(o["location"], 0) + int(it["quantity"] or 0)
+    teile.append("\n\nZUSAMMEN NACH HÄNDLER")
+    for name in sorted(haendler):
+        teile.append(f"\n{name}")
+        for (produkt, gebinde), e in sorted(haendler[name].items()):
+            orte = ", ".join(f"{ort} {m}" for ort, m in e["orte"].items())
+            teile.append(f"  {e['menge']} × {produkt} ({gebinde}) – {orte}")
+    # Anhänge: alle Bestell-PDFs (+ Fotos), insgesamt höchstens ~18 MB
+    anhaenge, groesse, weggelassen = [], 0, 0
+    for o in orders:
+        daten = None
+        pfad = os.path.join(ORDER_DIR, o["pdf_filename"] or "")
+        if o["pdf_filename"] and os.path.exists(pfad):
+            with open(pfad, "rb") as f:
+                daten = f.read()
+        else:
+            con = db()
+            r = con.execute("SELECT pdf_data FROM orders WHERE id=?", (o["id"],)).fetchone()
+            con.close()
+            daten = r["pdf_data"] if r and r["pdf_data"] else None
+        liste = [(o["pdf_filename"], daten, "application", "pdf")] if daten else []
+        if o["order_image_filename"]:
+            bild = os.path.join(ORDER_IMAGE_DIR, o["order_image_filename"])
+            if os.path.exists(bild):
+                ext = os.path.splitext(bild)[1].lower().lstrip(".") or "jpeg"
+                with open(bild, "rb") as f:
+                    liste.append((o["order_image_filename"], f.read(), "image", "jpeg" if ext in ("jpg", "jpeg") else ext))
+        for a in liste:
+            if groesse + len(a[1]) > 18 * 1024 * 1024:
+                weggelassen += 1
+                continue
+            groesse += len(a[1])
+            anhaenge.append(a)
+    teile.append("\n\nDie einzelnen Bestellungen hängen als PDF an." + (f" ({weggelassen} Anhang/Anhänge waren zu groß und fehlen – sie liegen im Bestellsystem.)" if weggelassen else ""))
+    basis = os.environ.get("PUBLIC_BASE_URL", "https://bestellung.opapeters.de").rstrip("/")
+    teile.append(f"\nAlle Bestellungen im System: {basis}/admin/orders\n\nDein Bestellsystem")
+    betreff = f"Bestellungen {tag_text}: {len(orders)} Bestellung(en)"
+    return betreff, "\n".join(teile), anhaenge
+
+
+def tageszusammenfassung_senden(tag):
+    """-> (ok, text)"""
+    settings = load_settings()
+    an = (settings.get("order_email_to") or os.environ.get("CENTRAL_EMAIL") or "").strip()
+    if not smtp_is_configured():
+        return False, "E-Mail-Versand ist auf dem Server nicht eingerichtet."
+    if not email_sieht_gueltig_aus(an):
+        return False, "Keine gültige Adresse für Bestellungen eingetragen."
+    inhalt = tageszusammenfassung_bauen(tag)
+    if inhalt is None:
+        return True, f"Am {tag.strftime('%d.%m.%Y')} gab es keine Bestellungen – keine Mail nötig."
+    betreff, text, anhaenge = inhalt
+    msg = EmailMessage()
+    msg["Subject"] = betreff
+    msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", ""))
+    msg["To"] = an
+    msg.set_content(text)
+    for name, daten, haupt, unter in anhaenge:
+        msg.add_attachment(daten, maintype=haupt, subtype=unter, filename=name)
+    try:
+        with smtp_oeffnen(os.environ.get("SMTP_HOST"), os.environ.get("SMTP_PORT", "587")) as smtp:
+            smtp.login(os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD"))
+            smtp.send_message(msg)
+    except Exception as fehler:
+        return False, f"Senden fehlgeschlagen: {str(fehler)[:150]}"
+    return True, f"Zusammenfassung an {an} gesendet."
+
+
+def tagesmail_uhr_starten():
+    """Hintergrund-Uhr: täglich ab 6 Uhr (Berlin) einmal die Bestellungen des Vortags verschicken."""
+    import threading
+    import time as _time
+
+    def schleife():
+        while True:
+            try:
+                jetzt_b = berlin_now()
+                gestern = (jetzt_b - timedelta(days=1)).date()
+                settings = load_settings()
+                if jetzt_b.hour >= TAGESMAIL_STUNDE and settings.get("tagesmail_zuletzt") != gestern.isoformat():
+                    ok, text = tageszusammenfassung_senden(gestern)
+                    print(f"Tages-Mail Bestellungen {gestern}: {text}")
+                    if ok:
+                        settings = load_settings()
+                        settings["tagesmail_zuletzt"] = gestern.isoformat()
+                        save_settings(settings)
+            except Exception as fehler:
+                print(f"Tages-Mail Fehler: {fehler}")
+            _time.sleep(300)
+
+    threading.Thread(target=schleife, name="tagesmail", daemon=True).start()
 
 # =====================================================================
 #   VERWALTUNG NEU (November 2026) – gemeinsame Hilfsfunktionen
@@ -6617,13 +6743,15 @@ class App(BaseHTTPRequestHandler):
             <section class="vw-karte">
                 <h3>E-Mail &amp; WhatsApp</h3>
                 <form method="post" action="/admin/settings" class="vw-formular">
-                    {adresse('order_email_to', 'Bestellungen gehen an', 'Jede neue Bestellung kommt als PDF an diese Adresse.')}
+                    {adresse('order_email_to', 'Bestellungen gehen an', 'Jeden Morgen um 6 Uhr kommt eine Mail mit allen Bestellungen vom Vortag (mit den PDFs im Anhang). Gab es keine Bestellungen, kommt keine Mail.')}
                     {adresse('time_export_email', 'Zeiten-Export geht an', 'Am Monatsanfang kommt hier die Zeiterfassung des Vormonats an.')}
                     <label>WhatsApp-Nummer<input name="whatsapp_number" value="{esc(s.get('whatsapp_number', ''))}"><small class="vw-klein-block">Für den WhatsApp-Knopf nach dem Bestellen.</small></label>
                     <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
                 </form>
                 <div class="vw-status {'ok' if smtp else 'warn'}">{'E-Mail-Versand ist eingerichtet.' if smtp else 'E-Mail-Versand ist auf dem Server nicht eingerichtet – es gehen keine Mails raus. Die Zugangsdaten deines Mail-Postfachs müssen einmalig auf dem Server hinterlegt werden.'}</div>
-                <form method="post" action="/admin/settings/testmail" class="vw-knopfreihe"><button class="button" type="submit" {'disabled' if not smtp else ''}>Test-Mail an „Bestellungen“ senden</button></form>
+                <div class="vw-knopfreihe"><form method="post" action="/admin/settings/testmail"><button class="button" type="submit" {'disabled' if not smtp else ''}>Test-Mail an „Bestellungen“ senden</button></form>
+                <form method="post" action="/admin/settings/tagesmail"><button class="button" type="submit" {'disabled' if not smtp else ''}>Zusammenfassung von gestern jetzt senden</button></form></div>
+                <p class="vw-klein">Letzte Tages-Zusammenfassung: {esc(format_iso_date(s.get('tagesmail_zuletzt', '')) or 'noch keine')}</p>
             </section>
             <section class="vw-karte">
                 <h3>Admin-PIN ändern</h3>
@@ -6653,6 +6781,13 @@ class App(BaseHTTPRequestHandler):
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>
         """
         self.admin_seite("Einstellungen", body)
+
+    def handle_tagesmail_jetzt(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        self.read_form()
+        ok, text = tageszusammenfassung_senden((berlin_now() - timedelta(days=1)).date())
+        self.redirect("/admin/settings?" + ("msg=" if ok else "error=") + quote_plus(text))
 
     def handle_test_mail(self):
         if not self.is_admin():
@@ -7901,6 +8036,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_location_loeschen()
             if path == "/admin/settings/testmail":
                 return self.handle_test_mail()
+            if path == "/admin/settings/tagesmail":
+                return self.handle_tagesmail_jetzt()
             if path == "/admin/buchhaltung/abholen":
                 return self.handle_bh_abholen()
             if path == "/admin/buchhaltung/quelle/speichern":
@@ -9059,10 +9196,7 @@ class App(BaseHTTPRequestHandler):
         except Exception as exc:
             print(f"PDF-Erstellung fehlgeschlagen: {exc}")
             return self.show_order_form("Die PDF zur Bestellung konnte nicht erstellt werden. Bitte prüfe die Eingaben und versuche es erneut.")
-        try:
-            send_pdf_email_if_configured(order, pdf_filename)
-        except Exception as exc:
-            print(f"E-Mail-Versand fehlgeschlagen: {exc}")
+        # Keine Mail pro Bestellung mehr – die Bestellungen kommen gesammelt um 6 Uhr am nächsten Morgen (tagesmail_uhr_starten).
         con = db()
         cur = con.cursor()
         cur.execute(
@@ -9120,6 +9254,7 @@ def main():
     init_db()
     bh.init(DATA_DIR)
     bh.nachtlauf_starten(taeglich=bh_monatserinnerung)
+    tagesmail_uhr_starten()
     seed_demo_products()
     print(f"Internes Bestellsystem läuft auf http://localhost:{PORT}")
     print(f"Admin-PIN: {ADMIN_PIN} (vor Onlinebetrieb ändern)")
