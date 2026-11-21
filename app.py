@@ -3062,6 +3062,7 @@ def kasse_init():
         CREATE TABLE IF NOT EXISTS kasse_lightspeed (
             location_id TEXT NOT NULL, datum TEXT NOT NULL,
             umsatz INTEGER, netto INTEGER, bar INTEGER, karte INTEGER, bons INTEGER, storno INTEGER, rabatt INTEGER, trinkgeld INTEGER,
+            kassendiff INTEGER, gezaehlt INTEGER,
             bericht_id INTEGER, erstellt TEXT, PRIMARY KEY (location_id, datum)
         );
         CREATE TABLE IF NOT EXISTS kasse_berichte (
@@ -3070,6 +3071,10 @@ def kasse_init():
         );
         """
     )
+    spalten = {r[1] for r in con.execute("PRAGMA table_info(kasse_lightspeed)")}
+    for spalte in ("kassendiff", "gezaehlt"):
+        if spalte not in spalten:
+            con.execute(f"ALTER TABLE kasse_lightspeed ADD COLUMN {spalte} INTEGER")
     con.commit()
     con.close()
 
@@ -3079,6 +3084,8 @@ def kasse_einstellungen():
     return {
         "aktiv": s.get("aktiv", True),
         "uhrzeit": s.get("uhrzeit") or "22:30",
+        "zeitpunkt": s.get("zeitpunkt") or "morgens",  # morgens = sobald der Lightspeed-Bericht da ist; abends = zur Uhrzeit
+        "team_zaehlt": bool(s.get("team_zaehlt", False)),
         "mail_an": s.get("mail_an", ""),
         "schwelle": int(s.get("schwelle", 500)),  # Cent
         "standorte": s.get("standorte"),  # None = alle
@@ -3128,6 +3135,8 @@ LS_FELDER = [
     ("storno", r"storno|stornierung|cancell?ation|^voids?$|void\s*total"),
     ("rabatt", r"rabatt|discount|nachlass"),
     ("trinkgeld", r"trinkgeld|^tips?$|gratuit"),
+    ("kassendiff", r"kassendifferenz|^differenz|difference|discrepanc|over\s*/\s*short|(?:ü|ue)berschuss\s*/\s*fehlbetrag|fehlbetrag"),
+    ("gezaehlt", r"gez(?:ä|ae)hlt|counted|ist\s*-?\s*bestand|actual\s*cash"),
 ]
 LS_MUSTER = [(f, re.compile(m, re.I)) for f, m in LS_FELDER]
 LS_BETRAG = re.compile(r"-?\(?\s*(?:€|EUR)?\s*-?\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|-?\(?\s*(?:€|EUR)?\s*-?\d+(?:[.,]\d{2})|-?\d+")
@@ -3230,6 +3239,9 @@ def _ls_feld(beschriftung):
     b = re.sub(r"\s+", " ", str(beschriftung or "")).strip(" :")
     if not b or len(b) > 60:
         return None
+    for feld in ("kassendiff", "gezaehlt"):
+        if dict(LS_MUSTER)[feld].search(b):
+            return feld
     for feld, muster in LS_MUSTER:
         if muster.search(b):
             return feld
@@ -3300,7 +3312,7 @@ def lightspeed_lesen(inhalt, dateiname, standard_datum=""):
         for f in ("bar", "karte"):
             if gefunden_zahlung[f]:
                 eintrag[f] = zahlungsarten[f]
-        if any(eintrag.get(f) is not None for f in ("umsatz", "netto", "bar", "karte")):
+        if any(eintrag.get(f) is not None for f in ("umsatz", "netto", "bar", "karte", "kassendiff", "gezaehlt")):
             eintrag["datum"] = _ls_datum(flach[:1500]) or standard_datum
             if eintrag.get("umsatz") is None and eintrag.get("bar") is not None and eintrag.get("karte") is not None:
                 eintrag["umsatz"] = eintrag["bar"] + eintrag["karte"]
@@ -3350,15 +3362,16 @@ def kassenbericht_importieren(inhalt, dateiname, herkunft, standard_datum=""):
             ohne_standort += 1
             continue
         con.execute(
-            """INSERT INTO kasse_lightspeed (location_id, datum, umsatz, netto, bar, karte, bons, storno, rabatt, trinkgeld, bericht_id, erstellt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO kasse_lightspeed (location_id, datum, umsatz, netto, bar, karte, bons, storno, rabatt, trinkgeld, kassendiff, gezaehlt, bericht_id, erstellt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(location_id, datum) DO UPDATE SET
                  umsatz=COALESCE(excluded.umsatz, umsatz), netto=COALESCE(excluded.netto, netto), bar=COALESCE(excluded.bar, bar),
                  karte=COALESCE(excluded.karte, karte), bons=COALESCE(excluded.bons, bons), storno=COALESCE(excluded.storno, storno),
                  rabatt=COALESCE(excluded.rabatt, rabatt), trinkgeld=COALESCE(excluded.trinkgeld, trinkgeld),
+                 kassendiff=COALESCE(excluded.kassendiff, kassendiff), gezaehlt=COALESCE(excluded.gezaehlt, gezaehlt),
                  bericht_id=excluded.bericht_id, erstellt=excluded.erstellt""",
             (loc, tag["datum"], tag.get("umsatz"), tag.get("netto"), tag.get("bar"), tag.get("karte"), tag.get("bons"),
-             tag.get("storno"), tag.get("rabatt"), tag.get("trinkgeld"), bericht_id, jetzt_t))
+             tag.get("storno"), tag.get("rabatt"), tag.get("trinkgeld"), tag.get("kassendiff"), tag.get("gezaehlt"), bericht_id, jetzt_t))
         gespeichert.append((loc, tag["datum"]))
     if not meldung:
         if gespeichert:
@@ -3393,10 +3406,20 @@ def kasse_mail_haken(mail, anhaenge, text):
         alle += gespeichert
     if alle:
         try:
-            kasse_abgleich_melden(sorted({d for _, d in alle}))
+            kasse_nach_import(sorted({d for _, d in alle}))
         except Exception as fehler:
-            print(f"Kassenabgleich-Meldung fehlgeschlagen: {fehler}")
+            print(f"Tagesabschluss nach Import fehlgeschlagen: {fehler}")
     return True
+
+
+def kasse_nach_import(daten_liste):
+    einst = kasse_einstellungen()
+    gestern = (berlin_now().date() - timedelta(days=1)).isoformat()
+    if einst["aktiv"] and einst["zeitpunkt"] == "morgens" and gestern in daten_liste and einst["zuletzt"] != gestern:
+        kasse_einstellungen_speichern({"zuletzt": gestern})
+        tagesabschluss_senden(gestern)
+    elif einst["team_zaehlt"]:
+        kasse_abgleich_melden(daten_liste)
 
 
 # ---------------------------------------------------------- Tageszahlen zusammenstellen
@@ -3429,6 +3452,8 @@ def kasse_vergleich(location_id, datum):
 
 def kasse_differenz(location_id, ls, ab):
     """Bargeld gezählt + Entnahmen − Wechselgeld − Barumsatz. None, wenn nicht genug Angaben."""
+    if ls and ls.get("kassendiff") is not None:
+        return ls["kassendiff"]  # Kassenzählung direkt in Lightspeed (Cash drawer report)
     if not ab or ab.get("gezaehlt") is None:
         return None
     bar = ls["bar"] if ls and ls.get("bar") is not None else ab.get("bar")
@@ -3482,7 +3507,7 @@ def tagesabschluss_daten(datum):
         if diff is not None and abs(diff) >= einst["schwelle"]:
             hinweise.append(("rot", f"{name}: Kassendifferenz {euro_text(diff, True)}"))
         if umsatz is None and not ab:
-            hinweise.append(("grau", f"{name}: kein Kassenabschluss eingetragen"))
+            hinweise.append(("grau", f"{name}: kein Kassenabschluss eingetragen" if einst["team_zaehlt"] else f"{name}: noch keine Kassenzahlen von Lightspeed"))
         if umsatz is not None and schnitt:
             abw = umsatz / schnitt - 1
             if abw <= -0.3:
@@ -3578,9 +3603,18 @@ def tagesabschluss_uhr_starten():
                 einst = kasse_einstellungen()
                 jetzt_b = berlin_now()
                 heute = jetzt_b.date().isoformat()
-                if einst["aktiv"] and jetzt_b.strftime("%H:%M") >= einst["uhrzeit"] and einst["zuletzt"] != heute:
+                gestern = (jetzt_b.date() - timedelta(days=1)).isoformat()
+                if einst["aktiv"] and einst["zeitpunkt"] == "abends" and jetzt_b.strftime("%H:%M") >= einst["uhrzeit"] and einst["zuletzt"] != heute:
                     kasse_einstellungen_speichern({"zuletzt": heute})
                     tagesabschluss_senden(heute)
+                # morgens: kommt normalerweise direkt nach dem Lightspeed-Bericht; spätestens um 9 Uhr auch ohne
+                if einst["aktiv"] and einst["zeitpunkt"] == "morgens" and jetzt_b.hour >= 9 and einst["zuletzt"] < gestern:
+                    kasse_einstellungen_speichern({"zuletzt": gestern})
+                    con = db()
+                    schon_mal_bericht = con.execute("SELECT 1 FROM kasse_berichte LIMIT 1").fetchone()
+                    con.close()
+                    if schon_mal_bericht or einst["team_zaehlt"]:  # erst melden, wenn Lightspeed überhaupt eingerichtet ist
+                        tagesabschluss_senden(gestern)
             except Exception as fehler:
                 print(f"Tagesabschluss Fehler: {fehler}")
             _time.sleep(60)
@@ -4480,7 +4514,7 @@ class App(BaseHTTPRequestHandler):
         if location_can_time(location):
             quick_actions.append('<a class="button primary" href="/time">Zeiterfassung öffnen</a>')
         quick_actions.append('<a class="button" href="/beleg">📷 Beleg fotografieren</a>')
-        if location["id"] in [l["id"] for l in kasse_standorte()]:
+        if kasse_einstellungen()["team_zaehlt"] and location["id"] in [l["id"] for l in kasse_standorte()]:
             quick_actions.append('<a class="button" href="/kasse">🧾 Kassenabschluss</a>')
         info_cards = []
         for info_item in cockpit_infos:
@@ -8505,8 +8539,8 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/login")
         query = query or {}
         location = find_location(buyer)
-        if not location:
-            return self.redirect("/")
+        if not location or not kasse_einstellungen()["team_zaehlt"]:
+            return self.redirect("/cockpit")
         heute = berlin_now().date().isoformat()
         _ls, ab = kasse_tag(location["id"], heute)
         ab = ab or {}
@@ -8637,8 +8671,11 @@ class App(BaseHTTPRequestHandler):
             if s["rabatt"]:
                 zahlen.append(("Rabatte", euro_text(abs(s["rabatt"]))))
             zahlen_html = "".join(f'<div class="ta-zahl"><small>{esc(k)}</small><b>{esc(v)}</b></div>' for k, v in zahlen)
-            kasse_html = '<p class="vw-klein">Kein Kassenabschluss eingetragen.</p>'
-            if ab:
+            kasse_html = '<p class="vw-klein">Kein Kassenabschluss eingetragen.</p>' if einst["team_zaehlt"] else ""
+            if ls and (ls.get("kassendiff") is not None or ls.get("gezaehlt") is not None):
+                kasse_html = (f'<p class="vw-klein">Kassenzählung in Lightspeed: gezählt <b>{esc(euro_text(ls.get("gezaehlt")))}</b>'
+                              + (f' · Differenz <b class="{"minus" if abs(ls["kassendiff"]) >= einst["schwelle"] else ""}">{esc(euro_text(ls["kassendiff"], True))}</b>' if ls.get("kassendiff") is not None else "") + "</p>")
+            elif ab:
                 diff = s["diff"]
                 kasse_html = (
                     f'<p class="vw-klein">Gezählt: <b>{esc(euro_text(ab.get("gezaehlt")))}</b>'
@@ -8666,7 +8703,7 @@ class App(BaseHTTPRequestHandler):
             <section class="vw-karte ta-standort">
                 <div class="vw-karte-kopf"><h3>{esc(loc['name'])}</h3>{f'<span class="vw-marke grau">{quelle}</span>' if quelle else ''}</div>
                 <div class="ta-zahlen">{zahlen_html}</div>
-                <h4 class="vw-zwischentitel">Kassenabschluss</h4>{kasse_html}
+                {f'<h4 class="vw-zwischentitel">Kassenabschluss</h4>{kasse_html}' if kasse_html else ''}
                 <h4 class="vw-zwischentitel">{team_kopf}</h4><div class="vw-liste">{team_html}</div>
                 {aufgaben_html}
             </section>""")
@@ -8685,7 +8722,7 @@ class App(BaseHTTPRequestHandler):
             for l in alle_orte)
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {admin_kopf('Tagesabschluss', 'Kasse, Team und Auffälligkeiten des Tages – kommt abends automatisch aufs Handy.',
+        {admin_kopf('Tagesabschluss', ('Kasse, Team und Auffälligkeiten – kommt morgens aufs Handy, sobald der Lightspeed-Bericht da ist.' if einst['zeitpunkt'] == 'morgens' else f"Kasse, Team und Auffälligkeiten – kommt um {einst['uhrzeit']} Uhr aufs Handy."),
                     '<button type="button" class="button" data-dialog="taEinst">Einstellungen</button>')}
         {leiste}
         <section class="vw-karte ta-gesamt">
@@ -8703,8 +8740,12 @@ class App(BaseHTTPRequestHandler):
         <dialog class="vw-dialog" id="taEinst">
             <div class="vw-dialog-kopf"><h3>Tagesabschluss einstellen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
             <form method="post" action="/admin/tagesabschluss/einstellungen" class="vw-formular">
-                <div class="vw-zwei"><label class="vw-schalter bh-schalter"><input type="checkbox" name="aktiv" value="1" {'checked' if einst['aktiv'] else ''}><span>Abends aufs Handy schicken</span></label>
-                    <label>Uhrzeit<input type="time" name="uhrzeit" value="{esc(einst['uhrzeit'])}"></label></div>
+                <label class="vw-schalter bh-schalter"><input type="checkbox" name="aktiv" value="1" {'checked' if einst['aktiv'] else ''}><span>Tagesabschluss aufs Handy schicken</span></label>
+                <div class="vw-zwei"><label>Wann?<select name="zeitpunkt">
+                    <option value="morgens" {'selected' if einst['zeitpunkt'] == 'morgens' else ''}>Morgens, sobald der Lightspeed-Bericht von gestern da ist</option>
+                    <option value="abends" {'selected' if einst['zeitpunkt'] == 'abends' else ''}>Abends zur Uhrzeit (braucht Lightspeed-Schnittstelle oder Team-Zählung)</option></select></label>
+                    <label>Uhrzeit (nur abends)<input type="time" name="uhrzeit" value="{esc(einst['uhrzeit'])}"></label></div>
+                <label class="vw-schalter bh-schalter"><input type="checkbox" name="team_zaehlt" value="1" {'checked' if einst['team_zaehlt'] else ''}><span>Team trägt abends einen Kassenabschluss im Bestellsystem ein (sonst nur Lightspeed)</span></label>
                 <div class="vw-zwei"><label>Zusätzlich per Mail an (optional)<input type="email" name="mail_an" value="{esc(einst['mail_an'])}"></label>
                     <label>Kassendifferenz melden ab (€)<input name="schwelle" inputmode="decimal" value="{esc(f"{einst['schwelle'] / 100:.2f}".replace('.', ','))}"></label></div>
                 <label>Absender der Lightspeed-Mails (optional)<input name="absender" value="{esc(einst['absender'])}" placeholder="wird automatisch erkannt, wenn „lightspeed“ im Absender steht"></label>
@@ -8724,6 +8765,8 @@ class App(BaseHTTPRequestHandler):
         if aktion == "einstellungen":
             neu = {
                 "aktiv": bool(self.form_value(form, "aktiv")),
+                "zeitpunkt": "abends" if self.form_value(form, "zeitpunkt") == "abends" else "morgens",
+                "team_zaehlt": bool(self.form_value(form, "team_zaehlt")),
                 "uhrzeit": self.form_value(form, "uhrzeit") if re.match(r"^\d{2}:\d{2}$", self.form_value(form, "uhrzeit")) else "22:30",
                 "mail_an": self.form_value(form, "mail_an").strip() if email_sieht_gueltig_aus(self.form_value(form, "mail_an")) else "",
                 "schwelle": abs(bh.cent(self.form_value(form, "schwelle")) or 500),
