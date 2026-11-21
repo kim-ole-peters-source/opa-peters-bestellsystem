@@ -3095,3 +3095,23 @@ a.vw-standort-karte:hover { border-color: var(--op-braun); transform: translateY
 .bh-frage small{color:#6b5d52}
 .bh-grund{display:block;font-size:.78rem;color:#7a6c61;font-weight:400;flex-basis:100%}
 .vw-gefahrzone .bh-schalter{margin-top:6px;font-size:.85rem}
+
+/* Tagesabschluss */
+.ta-gesamt{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:18px;align-items:start}
+.ta-gesamt>div:first-child small{display:block;color:#7a6c61;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
+.ta-gesamt>div:first-child b{display:block;font-family:"Barlow Condensed",sans-serif;font-size:2.4rem;line-height:1.1;color:#2A1F18}
+.ta-vergleich{display:inline-block;margin-top:4px;font-weight:700;font-size:.9rem}
+.ta-vergleich.plus{color:#1F5F33}.ta-vergleich.minus,.ta-standort .minus,.bh-importe .minus{color:#C44D49}
+.ta-hinweise{display:grid;gap:6px}
+.ta-hinweis{padding:8px 12px;border-radius:10px;background:#F4F1EC;font-size:.92rem}
+.ta-hinweis.rot{background:#FBE9E8;color:#8E2F2C;font-weight:600}
+.ta-hinweis.honig{background:#FCEFD6;color:#7A5414}
+.ta-hinweis.gruen{background:#E3F1E6;color:#1F5F33}
+.ta-zahlen{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px;margin:6px 0 4px}
+.ta-zahl{background:#FCF7F1;border:1px solid #E8E2D9;border-radius:10px;padding:8px 10px}
+.ta-zahl small{display:block;font-size:.72rem;color:#7a6c61;text-transform:uppercase;letter-spacing:.03em}
+.ta-zahl b{font-size:1.02rem;white-space:nowrap}
+.ta-notiz{margin:2px 0 8px;padding:6px 10px;border-left:3px solid #F0C072;background:#FDF8EE;font-size:.9rem;font-style:italic}
+.ta-offen{font-size:.9rem;color:#6b5d52;padding:2px 0}
+.ta-ort-einst{border:1px solid #E8E2D9;border-radius:10px;padding:10px 12px;margin-bottom:8px}
+@media (max-width:700px){.ta-gesamt{grid-template-columns:minmax(0,1fr)}}

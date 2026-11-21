@@ -748,6 +748,11 @@ def _portal_link(html, text):
     return m.group(0) if m else ""
 
 
+# Andere Programmteile können sich Mails ansehen, bevor daraus Belege werden (z. B. Lightspeed-Tagesberichte).
+# haken(mail, anhaenge, text) -> True = erledigt, kein Beleg daraus machen.
+MAIL_HAKEN = []
+
+
 def mail_verarbeiten(con, quelle, nachricht):
     """Eine Mail -> 0..n Belege. Gibt Anzahl neuer Belege zurück."""
     betreff = _dekodiere(nachricht.get("Subject", ""))
@@ -764,6 +769,12 @@ def mail_verarbeiten(con, quelle, nachricht):
         "an": _dekodiere(nachricht.get("To", "")),
     }
     anhaenge, html, text = _mail_teile(nachricht)
+    for haken in MAIL_HAKEN:
+        try:
+            if haken(mail, anhaenge, text):
+                return 0  # z. B. Kassenbericht – wurde woanders verarbeitet, ist kein Beleg
+        except Exception:
+            traceback.print_exc()
     pdfs = [a for a in anhaenge if a[0].lower().endswith(".pdf") or a[1] == "application/pdf"]
     xmls = [a for a in anhaenge if a[0].lower().endswith(".xml") or a[1] in ("application/xml", "text/xml")]
     bilder = [a for a in anhaenge if a[1].startswith("image/") and len(a[2]) > 30000] if quelle["alles_ist_beleg"] else []
@@ -894,6 +905,20 @@ def nachtlauf_starten(taeglich=None):
                     con.commit()
                     con.close()
                     alle_abholen()
+                # Morgens noch einmal: Kassenberichte (z. B. Lightspeed) kommen gegen 5 Uhr
+                con = db()
+                morgen = einstellung(con, "letzter_morgenlauf")
+                con.close()
+                if (t.hour > 5 or (t.hour == 5 and t.minute >= 20)) and t.hour < 12 and morgen[:10] != t.date().isoformat():
+                    con = db()
+                    setze_einstellung(con, "letzter_morgenlauf", jetzt_text())
+                    con.commit()
+                    con.close()
+                    if alle_abholen() is False:  # läuft gerade schon etwas -> in 10 Minuten nochmal
+                        con = db()
+                        setze_einstellung(con, "letzter_morgenlauf", "")
+                        con.commit()
+                        con.close()
                 if taeglich and t.hour >= 8:
                     con = db()
                     zuletzt = einstellung(con, "letzter_tageslauf")

@@ -3,3 +3,4 @@ openpyxl
 pywebpush
 pypdf
 cryptography
+xlrd
