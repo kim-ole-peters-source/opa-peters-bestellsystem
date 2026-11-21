@@ -3025,3 +3025,58 @@ a.vw-standort-karte:hover { border-color: var(--op-braun); transform: translateY
 @media (max-width: 1000px) { .vw-raster-zeiten { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 760px) { .vw-karte-kopf { flex-wrap: wrap; } .vw-ohne-rand { margin: 0 -20px -18px; overflow-x: auto; } }
 @media (max-width: 560px) { .vw-ohne-rand .vw-tabelle th:nth-child(2), .vw-ohne-rand .vw-tabelle td:nth-child(2) { display: none; } }
+
+/* Buchhaltung */
+.bh-ampel.gruen b { color: #1F5F33; }
+.bh-ampel.honig b { color: #7A5414; }
+.bh-ampel.rot b { color: var(--op-rot); }
+.bh-ampel.gruen .vw-balken span { background: #5BA36E; }
+.bh-ampel.rot .vw-balken span { background: var(--op-rot); }
+.bh-belegliste { background: #fff; border: 1px solid var(--op-sand); border-radius: 18px; overflow: hidden; }
+.bh-beleg { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--op-sand); padding-right: 16px; }
+.bh-beleg:last-child { border-bottom: 0; }
+.bh-beleg-knopf { all: unset; box-sizing: border-box; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px 0 12px 14px; }
+.bh-beleg-knopf:hover .bh-beleg-text b { text-decoration: underline; text-decoration-color: var(--op-honig); text-underline-offset: 3px; }
+.bh-beleg-knopf:focus-visible { outline: 2px solid var(--op-braun); outline-offset: -2px; }
+.bh-art { flex: none; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; font-weight: 700; font-size: 12.5px; background: var(--blue-bg); color: var(--op-blau); }
+.bh-art.AR { background: #E3F1E6; color: #1F5F33; }
+.bh-art.GS { background: #FCEFD6; color: #7A5414; }
+.bh-beleg-text { flex: 1; min-width: 0; }
+.bh-beleg-text b { display: block; font-size: 14.5px; }
+.bh-beleg-text small { display: block; color: var(--op-grau); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bh-marken { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.bh-rechts { flex: none; text-align: right; }
+.bh-betrag { font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 640px) { .bh-marken { display: none; } }
+.bh-panel { width: min(760px, 100vw); }
+.bh-vorschau-wrap { margin-bottom: 12px; }
+.bh-vorschau { width: 100%; height: 52vh; border: 1px solid var(--op-sand); border-radius: 12px; background: #fff; }
+.bh-vorschau-bild { max-width: 100%; max-height: 52vh; border-radius: 12px; border: 1px solid var(--op-sand); display: block; margin: 0 auto; }
+.bh-schalter { align-self: end; }
+.bh-schalter span { white-space: normal; text-align: left; }
+.bh-buchungen td { vertical-align: top; }
+.bh-buchungen .bh-info { min-width: 220px; }
+.bh-buchungen .bh-info form { display: inline-flex; margin-left: 6px; }
+.bh-klein { min-height: 30px; padding: 4px 10px; font-size: 12.5px; }
+.bh-unten { margin-top: 16px; }
+.bh-regeln, .bh-importe, .bh-zugeordnet { list-style: none; margin: 0 0 10px; padding: 0; font-size: 13.5px; }
+.bh-regeln li, .bh-zugeordnet li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--op-sand); }
+.bh-importe li { padding: 4px 0; color: var(--op-grau); }
+.bh-buchung-info { background: #fff; border: 1px solid var(--op-sand); border-radius: 14px; padding: 10px 14px; }
+.bh-buchung-info p { margin: 4px 0; }
+.bh-kandidaten { display: flex; flex-direction: column; gap: 6px; }
+.bh-kandidat { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin: 0; background: #fff; border: 1px solid var(--op-sand); border-radius: 12px; font-weight: 500; cursor: pointer; }
+.bh-kandidat:has(input:checked) { border-color: var(--op-braun); background: #FBF3E3; }
+.bh-kandidat input { width: 20px; height: 20px; min-height: 0; margin: 0; accent-color: var(--op-braun); }
+.bh-kandidat span:nth-of-type(1) { flex: 1; }
+.bh-kandidat small { display: block; color: var(--op-grau); font-size: 12px; }
+.bh-suche { margin-bottom: 8px; }
+.bh-export tr.ist-aktiv td { background: #FBF7F1; }
+.bh-export-knoepfe { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.bh-export-knoepfe form { margin: 0; }
+.bh-paket { margin-top: 16px; }
+.bh-baum { background: var(--surface-2); border-radius: 12px; padding: 12px 14px; font-size: 12.5px; overflow-x: auto; }
+.bh-quelle .vw-knopfreihe form { margin: 0; }
+.bh-foto { margin-top: 20px; }
+.bh-foto-knopf { display: flex; flex-direction: column; gap: 8px; padding: 18px; border: 2px dashed var(--line-strong); border-radius: 18px; text-align: center; font-size: 16px; font-weight: 700; background: #fff; }
+.vw-formular [hidden], .vw-dialog [hidden], .bh-host[hidden] { display: none !important; }

@@ -175,6 +175,79 @@
     zielBestellung.scrollIntoView({ block: 'start' });
   }
 
+
+  /* =========================================================
+     Buchhaltung
+     ========================================================= */
+  function panelLaden(dialogId, inhaltId, url) {
+    var dialog = document.getElementById(dialogId), inhalt = document.getElementById(inhaltId);
+    if (!dialog || !inhalt) { window.location.href = url.replace('embed=1', ''); return; }
+    inhalt.innerHTML = '<p class="vw-leer">Wird geladen …</p>';
+    oeffnen(dialog);
+    fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.text(); })
+      .then(function (html) { inhalt.innerHTML = html; })
+      .catch(function () { window.location.href = url.replace('embed=1', ''); });
+  }
+  document.addEventListener('click', function (e) {
+    var beleg = e.target.closest('[data-bh-beleg]');
+    if (beleg) { panelLaden('bhBelegPanel', 'bhBelegPanelInhalt', '/admin/buchhaltung/beleg?embed=1&id=' + beleg.getAttribute('data-bh-beleg')); return; }
+    var buchung = e.target.closest('tr[data-bh-buchung]');
+    if (buchung && !e.target.closest('a, button, input, form')) { panelLaden('bhBuchungPanel', 'bhBuchungPanelInhalt', '/admin/buchhaltung/buchung?embed=1&id=' + buchung.getAttribute('data-bh-buchung')); return; }
+    var fuer = e.target.closest('[data-bh-fuer-buchung]');
+    if (fuer) {
+      var feld = document.querySelector('#belegHochladen input[name="buchung_id"]');
+      if (feld) feld.value = fuer.getAttribute('data-bh-fuer-buchung');
+    }
+  });
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (form.matches && form.matches('[data-bh-suche]')) {
+      e.preventDefault();
+      var url = form.action + '?' + new URLSearchParams(new FormData(form)).toString();
+      var inhalt = form.closest('#bhBuchungPanelInhalt');
+      if (!inhalt) { window.location.href = url.replace('embed=1', ''); return; }
+      fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.text(); }).then(function (html) { inhalt.innerHTML = html; });
+    }
+    if (form.matches && form.matches('[data-bh-upload]') && window.FormData && window.fetch) {
+      var dateien = [];
+      $$('input[type="file"]', form).forEach(function (f) { Array.prototype.forEach.call(f.files || [], function (d) { dateien.push(d); }); });
+      if (dateien.length < 2) return;
+      e.preventDefault();
+      var status = $('[data-bh-upload-status]', form), knopf = $('button[type="submit"]', form), fertig = 0, fehler = 0;
+      if (knopf) knopf.disabled = true;
+      var weiter = function (i) {
+        if (i >= dateien.length) { window.location.href = '/admin/buchhaltung/belege?filter=neu&msg=' + encodeURIComponent(fertig + ' Beleg(e) hochgeladen' + (fehler ? ', ' + fehler + ' nicht erkannt' : '') + '.'); return; }
+        if (status) status.textContent = 'Lade ' + (i + 1) + ' von ' + dateien.length + ' hoch …';
+        var daten = new FormData();
+        $$('input:not([type="file"]), select', form).forEach(function (f) { if (f.name && (f.type !== 'checkbox' || f.checked)) daten.append(f.name, f.value); });
+        daten.append('datei', dateien[i], dateien[i].name);
+        fetch(form.action, { method: 'POST', body: daten, credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch' } })
+          .then(function (r) { if (r.ok) fertig++; else fehler++; }).catch(function () { fehler++; }).then(function () { weiter(i + 1); });
+      };
+      weiter(0);
+    }
+  });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.matches('[data-bh-anbieter]')) {
+      var form = t.closest('form'), opt = t.options[t.selectedIndex];
+      var host = $('.bh-host', form); if (host) host.hidden = t.value !== 'andere';
+      var feldHost = $('input[name="host"]', form), feldPort = $('input[name="port"]', form);
+      if (t.value !== 'andere') { if (feldHost) feldHost.value = opt.getAttribute('data-host') || ''; if (feldPort) feldPort.value = opt.getAttribute('data-port') || '993'; }
+    }
+    if (t.matches('[data-bh-dauer]')) { var m = $('.bh-dauer-muster', t.closest('form')); if (m) m.hidden = !t.checked; }
+    if (t.matches('[data-bh-immer]')) { var r = $('.bh-regel-muster', t.closest('form')); if (r) r.hidden = !t.checked; }
+  });
+  if ($('[data-bh-lauf]')) {
+    var pruefen = function () {
+      fetch('/admin/buchhaltung/status', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.laeuft) setTimeout(pruefen, 4000);
+        else window.location.href = window.location.pathname + '?msg=' + encodeURIComponent('Abholen ' + (d.meldung || 'fertig') + '.');
+      }).catch(function () { setTimeout(pruefen, 8000); });
+    };
+    setTimeout(pruefen, 3000);
+  }
+
   /* ---------- Einkaufsliste: Händler auf- und zuklappen merken ---------- */
   $$('details[data-merken]').forEach(function (d) {
     var key = 'vw-' + d.getAttribute('data-merken');

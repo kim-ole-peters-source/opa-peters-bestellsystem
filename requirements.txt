@@ -1,3 +1,5 @@
 reportlab
 openpyxl
 pywebpush
+pypdf
+cryptography
