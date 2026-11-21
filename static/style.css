@@ -3080,3 +3080,12 @@ a.vw-standort-karte:hover { border-color: var(--op-braun); transform: translateY
 .bh-foto { margin-top: 20px; }
 .bh-foto-knopf { display: flex; flex-direction: column; gap: 8px; padding: 18px; border: 2px dashed var(--line-strong); border-radius: 18px; text-align: center; font-size: 16px; font-weight: 700; background: #fff; }
 .vw-formular [hidden], .vw-dialog [hidden], .bh-host[hidden] { display: none !important; }
+
+/* Buchhaltung: Einkauf prüfen */
+.bh-pruef-box{margin:14px 0;border:1px solid #E8E2D9;border-radius:12px;padding:10px 12px;background:#fff}
+.bh-pruef-box>summary,.bh-pruef-karte>summary{cursor:pointer;font-weight:700;display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center}
+.bh-pruef-karte{margin-bottom:10px}
+.bh-pruef td small.minus,.vw-tabelle td.minus{color:#C44D49}
+.bh-pruef td small.plus{color:#3c7a4a}
+.bh-pruef tr.bh-extra td{background:#fdf1ef}
+.vw-marke.honig{background:#F0C072;color:#2A1F18}

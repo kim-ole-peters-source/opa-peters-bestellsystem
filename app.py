@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse, quote, quote_plus, urlencode
 import buchhaltung as bh
 from email.parser import BytesParser
 from email.policy import default as email_policy
+from email.utils import parseaddr
 from http.server import HTTPServer, BaseHTTPRequestHandler
 try:
     from zoneinfo import ZoneInfo
@@ -126,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-21-buchhaltung"
+ASSET_VERSION = "2026-11-21-buchhaltung2"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2825,6 +2826,93 @@ def _altes_admin_menu():
 
 
 
+# ---------------------------------------------------------------- Buchhaltung: Mail + Monatserinnerung
+def mail_senden(an, betreff, text):
+    """Einfache Text-Mail über den eingerichteten SMTP-Zugang. -> (ok, fehlertext)"""
+    host, user, passwort = os.environ.get("SMTP_HOST"), os.environ.get("SMTP_USER"), os.environ.get("SMTP_PASSWORD")
+    if not (host and user and passwort):
+        return False, "E-Mail-Versand ist auf dem Server nicht eingerichtet."
+    msg = EmailMessage()
+    msg["Subject"] = betreff
+    msg["From"] = os.environ.get("SMTP_FROM", user)
+    msg["To"] = an
+    msg.set_content(text)
+    try:
+        with smtp_oeffnen(host, os.environ.get("SMTP_PORT", "587")) as smtp:
+            smtp.login(user, passwort)
+            smtp.send_message(msg)
+        return True, ""
+    except Exception as fehler:
+        return False, str(fehler)[:200]
+
+
+MONATSNAMEN = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
+
+
+def bh_erinnerung_text(monat):
+    """Kurzer Stand eines Monats für die Erinnerung -> (betreff, zeilen, alles_gut)"""
+    z = dict(bh.monats_zahlen(monat))
+    con = bh.db()
+    z["belege_neu"] = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status='neu'", (monat,)).fetchone()[0]
+    z["portal"] = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status='portal'", (monat,)).fetchone()[0]
+    con.close()
+    name = f"{MONATSNAMEN[int(monat[5:]) - 1]} {monat[:4]}"
+    zeilen = []
+    if not z.get("gesamt"):
+        zeilen.append("• Der Kontoauszug fehlt noch – bitte hochladen (Buchhaltung → Kontoauszüge).")
+    if z.get("offen"):
+        zeilen.append(f"• {z['offen']} Zahlung(en) ohne Beleg.")
+    if z.get("vorschlag"):
+        zeilen.append(f"• {z['vorschlag']} Vorschlag/Vorschläge warten auf ein kurzes OK.")
+    if z.get("belege_neu"):
+        zeilen.append(f"• {z['belege_neu']} neue Belege noch nicht geprüft.")
+    if z.get("portal"):
+        zeilen.append(f"• {z['portal']} Rechnung(en) liegen nur im Kundenportal und müssen heruntergeladen werden.")
+    alles_gut = not zeilen
+    betreff = f"Buchhaltung {name}: " + ("alles bereit für den Export ✓" if alles_gut else f"{len(zeilen)} Punkt(e) offen")
+    return betreff, zeilen, alles_gut
+
+
+def bh_monatserinnerung():
+    """Läuft einmal am Tag. Ab dem 3. des Monats einmalig Mail + Push für den Vormonat."""
+    heute = bh.jetzt()
+    if heute.day < 3:
+        return
+    vormonat = (heute.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    con = bh.db()
+    schon = bh.einstellung(con, f"erinnerung_{vormonat}")
+    abgeschlossen = con.execute("SELECT 1 FROM monate WHERE monat=? AND abgeschlossen_am IS NOT NULL AND abgeschlossen_am != ''", (vormonat,)).fetchone()
+    hat_daten = con.execute("SELECT 1 FROM belege WHERE substr(datum,1,7)=? UNION SELECT 1 FROM buchungen WHERE substr(datum,1,7)=? LIMIT 1", (vormonat, vormonat)).fetchone()
+    if schon or abgeschlossen or not hat_daten:
+        con.close()
+        return
+    bh.setze_einstellung(con, f"erinnerung_{vormonat}", bh.jetzt_text())
+    con.commit()
+    con.close()
+    betreff, zeilen, alles_gut = bh_erinnerung_text(vormonat)
+    basis = os.environ.get("PUBLIC_BASE_URL", "https://bestellung.opapeters.de").rstrip("/")
+    link = f"{basis}/admin/buchhaltung/export?monat={vormonat}" if alles_gut else f"{basis}/admin/buchhaltung?monat={vormonat}"
+    text = ("Hallo,\n\n" + ("alle Zahlungen haben einen Beleg. Der Monat kann exportiert werden."
+                          if alles_gut else "für den letzten Monat ist noch Folgendes offen:\n\n" + "\n".join(zeilen))
+            + f"\n\nDirekt hier weitermachen:\n{link}\n\nDein Bestellsystem")
+    con = bh.db()
+    an = (bh.einstellung(con, "erinnerung_an") or load_settings().get("time_export_email") or "").strip()
+    con.close()
+    if an and email_sieht_gueltig_aus(an):
+        ok, fehler = mail_senden(an, betreff, text)
+        con = bh.db()
+        bh.protokolliere(con, "erinnerung", f"{vormonat}: Mail an {an} " + ("gesendet" if ok else f"fehlgeschlagen ({fehler})"))
+        if not ok:
+            bh.setze_einstellung(con, f"erinnerung_{vormonat}", "")  # morgen nochmal versuchen
+        con.commit()
+        con.close()
+    try:
+        send_push_notification({"title": betreff, "body": " ".join(z.lstrip("• ") for z in zeilen)[:180] or "Bereit für den Export.",
+                                "url": link.replace(basis, ""), "tag": f"buchhaltung-{vormonat}",
+                                "icon": "/static/icons/icon-192.png", "badge": "/static/icons/icon-192.png"})
+    except Exception:
+        pass
+
 # =====================================================================
 #   VERWALTUNG NEU (November 2026) – gemeinsame Hilfsfunktionen
 # =====================================================================
@@ -3340,6 +3428,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_export(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/export.zip":
             return self.show_bh_export_zip(query=parse_qs(parsed.query))
+        if path == "/admin/buchhaltung/einkauf":
+            return self.show_bh_einkauf(query=parse_qs(parsed.query))
         if path == "/beleg":
             return self.show_beleg_foto(query=parse_qs(parsed.query))
         if path == "/admin/products":
@@ -6594,6 +6684,7 @@ class App(BaseHTTPRequestHandler):
             ("quellen", "Quellen", "/admin/buchhaltung/quellen"),
             ("belege", "Belege", "/admin/buchhaltung/belege"),
             ("konten", "Kontoauszüge", "/admin/buchhaltung/konten"),
+            ("einkauf", "Einkauf prüfen", "/admin/buchhaltung/einkauf"),
             ("export", "Monatsexport", "/admin/buchhaltung/export"),
         ]
         return admin_kopf("Buchhaltung", unter, aktionen, reiter, aktiv)
@@ -6743,6 +6834,8 @@ class App(BaseHTTPRequestHandler):
         quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
         namen = bh.einstellung(con, "eigene_namen")
         domains = bh.einstellung(con, "eigene_domains")
+        belege_adresse = bh.einstellung(con, "belege_adresse")
+        erinnerung_an = bh.einstellung(con, "erinnerung_an")
         con.close()
         karten, dialoge = [], []
         for q in quellen:
@@ -6776,11 +6869,14 @@ class App(BaseHTTPRequestHandler):
         <p class="vw-klein">Die Postfächer werden nur gelesen – es wird nichts gelöscht, verschoben oder als gelesen markiert. Passwörter werden verschlüsselt gespeichert. Abgeholt wird jede Nacht automatisch und jederzeit über den Knopf.</p>
         <div class="vw-raster-2">{''.join(karten) or '<section class="vw-karte"><p class="vw-leer">Noch keine Quelle. Tipp: Lege zuerst ein eigenes Postfach belege@opapeters.de bei Strato an und verbinde es hier mit „Jeder Anhang ist ein Beleg“.</p></section>'}</div>
         <details class="vw-karte vw-aufklapp">
-            <summary>Eigene Firma (für die Erkennung von Ausgangsrechnungen)</summary>
+            <summary>Einstellungen: eigene Firma, Belege-Adresse, Monatserinnerung</summary>
             <form method="post" action="/admin/buchhaltung/einstellungen" class="vw-formular">
                 <label>Firmennamen, mit Komma getrennt<input name="eigene_namen" value="{esc(namen)}"></label>
                 <label>Eigene E-Mail-Domains, mit Komma getrennt<input name="eigene_domains" value="{esc(domains)}"></label>
                 <p class="vw-klein">Rechnungen, in denen deine Firma als Verkäufer steht oder die von deinen eigenen Adressen verschickt wurden, gelten als Ausgangsrechnung.</p>
+                <label>Adresse, an die Lieferanten Rechnungen schicken sollen<input type="email" name="belege_adresse" value="{esc(belege_adresse)}" placeholder="belege@opapeters.de"></label>
+                <label>Monatserinnerung am 3. an<input type="email" name="erinnerung_an" value="{esc(erinnerung_an)}" placeholder="info@opapeters.de"></label>
+                <p class="vw-klein">Am 3. jedes Monats kommt eine Mail (und eine Push-Nachricht aufs Handy), was für den Vormonat noch fehlt. Leer lassen = Adresse aus den Einstellungen für die Zeiterfassung.</p>
                 <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
             </form>
         </details>
@@ -6863,6 +6959,9 @@ class App(BaseHTTPRequestHandler):
         con = bh.db()
         bh.setze_einstellung(con, "eigene_namen", self.form_value(form, "eigene_namen").strip())
         bh.setze_einstellung(con, "eigene_domains", self.form_value(form, "eigene_domains").strip().replace("@", ""))
+        for feld in ("belege_adresse", "erinnerung_an"):
+            wert = self.form_value(form, feld).strip()
+            bh.setze_einstellung(con, feld, wert if email_sieht_gueltig_aus(wert) else "")
         con.commit()
         con.close()
         self.redirect("/admin/buchhaltung/quellen?msg=" + quote_plus("Gespeichert."))
@@ -6976,9 +7075,11 @@ class App(BaseHTTPRequestHandler):
         if b["status"] == "portal":
             portal_upload = f"""<form method="post" action="/admin/buchhaltung/beleg/upload" enctype="multipart/form-data" class="vw-knopfreihe">
                 <input type="hidden" name="ersetzt" value="{b['id']}"><input type="file" name="datei" accept=".pdf,.xml,image/*" required><button class="primary" type="submit">PDF hochladen</button></form>"""
+        pruefung = self.bh_einkauf_pruefen(b)
+        pruef_html = (f'<details class="bh-pruef-box" {"open" if pruefung and (pruefung["abweichungen"] or pruefung["erhoehungen"]) else ""}><summary>Mit Bestellung vergleichen {self.bh_pruef_marke(pruefung)}</summary>{self.bh_pruef_tabelle(b, pruefung)}</details>' if pruefung else "")
         html_text = f"""
         <div class="vw-dialog-kopf"><h3>{esc(b['lieferant'] or 'Beleg')}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-        <div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>
+        <div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>{pruef_html}
         <form method="post" action="/admin/buchhaltung/beleg/speichern" class="vw-formular">
             <input type="hidden" name="id" value="{b['id']}">
             <div class="vw-zwei"><label>Art<select name="art">{arten}</select></label><label>Lieferant / Kunde<input name="lieferant" value="{esc(b['lieferant'])}"></label></div>
@@ -7227,7 +7328,7 @@ class App(BaseHTTPRequestHandler):
             <label class="vw-schalter bh-schalter"><input type="checkbox" name="immer" value="1" data-bh-immer><span>Immer bei diesem Empfänger (Regel anlegen)</span></label>
             <label class="bh-regel-muster" hidden>Erkennen an<input name="muster" value="{esc(vorschlag_muster)}"></label>
             <div class="vw-knopfreihe"><button class="button" type="submit">Kein Beleg nötig</button></div>
-        </form>"""
+        </form>{self.bh_anfordern_html(bu)}"""
         if self.query_text(query, "embed"):
             return self.send_html(html_text.encode("utf-8"))
         body = f'{self.bh_kopf("konten")}<section class="vw-karte vw-schmal">{html_text}</section>{self.bh_upload_dialog(bu["id"])}<script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>'
@@ -7403,6 +7504,239 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/beleg?error=" + quote_plus("Das Foto konnte nicht gespeichert werden. Bitte noch einmal versuchen."))
         self.redirect("/beleg?msg=" + quote_plus("Danke! Der Beleg ist angekommen."))
 
+    # =================================================================
+    #   BUCHHALTUNG: Anfordern · Einkauf prüfen
+    # =================================================================
+    def bh_adresse_raten(self, buchung):
+        """Mail-Adresse des Lieferanten aus früheren Rechnungs-Mails ableiten."""
+        con = bh.db()
+        try:
+            woerter = bh._woerter(buchung["gegenpartei"] + " " + buchung["zweck"])
+            for b in con.execute("SELECT lieferant, mail_von FROM belege WHERE mail_von != '' ORDER BY id DESC").fetchall():
+                if woerter & bh._woerter(b["lieferant"] + " " + b["mail_von"]):
+                    adresse = parseaddr(b["mail_von"])[1]
+                    if adresse and not re.search(r"no-?reply|donotreply|nicht-antworten", adresse, re.I):
+                        return adresse
+            for r in con.execute("SELECT * FROM lieferanten WHERE muster LIKE '%@%'").fetchall():
+                if woerter & bh._woerter(r["name"]):
+                    return r["muster"]
+        finally:
+            con.close()
+        return ""
+
+    def bh_anfordern_text(self, buchung):
+        con = bh.db()
+        belege_adresse = bh.einstellung(con, "belege_adresse") or ""
+        firma = (bh.einstellung(con, "eigene_namen") or "Opa Peters").split(",")[0].strip()
+        con.close()
+        betreff = f"Rechnung fehlt: Zahlung über {bh.betrag_text(abs(buchung['betrag']))} vom {bh.datum_de(buchung['datum'])}"
+        hinweis = (f"Bitte senden Sie uns die Rechnung an {belege_adresse} – gern auch künftig alle Rechnungen direkt an diese Adresse."
+                   if belege_adresse else "Bitte senden Sie uns die Rechnung als PDF per E-Mail.")
+        text = (f"Guten Tag,\n\nfür die folgende Zahlung liegt uns leider noch keine Rechnung vor:\n\n"
+                f"Datum: {bh.datum_de(buchung['datum'])}\nBetrag: {bh.betrag_text(abs(buchung['betrag']))}\n"
+                f"Verwendungszweck: {buchung['zweck'] or '–'}\n\n{hinweis}\n\nVielen Dank und freundliche Grüße\n{firma}")
+        return betreff, text
+
+    def bh_anfordern_html(self, bu):
+        if bu["betrag"] >= 0 or bu["status"] not in ("offen", "vorschlag"):
+            return ""
+        con = bh.db()
+        bisher = con.execute("SELECT * FROM anforderungen WHERE buchung_id=? ORDER BY id DESC", (bu["id"],)).fetchall()
+        con.close()
+        an = self.bh_adresse_raten(bu)
+        betreff, text = self.bh_anfordern_text(bu)
+        mailto = f"mailto:{quote(an)}?subject={quote(betreff)}&body={quote(text)}"
+        verlauf = "".join(f'<li>{esc(a["zeit"][:16])} an {esc(a["an"])} ({esc(a["weg"])})</li>' for a in bisher)
+        return f"""
+        <h4 class="vw-zwischentitel">Rechnung beim Lieferanten anfordern</h4>
+        {f'<ul class="bh-importe">{verlauf}</ul>' if verlauf else ''}
+        <form method="post" action="/admin/buchhaltung/buchung/anfordern" class="vw-formular">
+            <input type="hidden" name="buchung_id" value="{bu['id']}"><input type="hidden" name="monat" value="{esc((bu['datum'] or '')[:7])}">
+            <label>An<input type="email" name="an" value="{esc(an)}" placeholder="rechnung@lieferant.de" required></label>
+            <label>Betreff<input name="betreff" value="{esc(betreff)}"></label>
+            <label>Text<textarea name="text" rows="9">{esc(text)}</textarea></label>
+            <div class="vw-knopfreihe">
+                <button class="primary" type="submit" {'disabled title="E-Mail-Versand ist auf dem Server nicht eingerichtet"' if not smtp_is_configured() else ''}>Anfordern</button>
+                <a class="button" href="{esc(mailto)}" data-bh-mailto>Im eigenen Mail-Programm öffnen</a>
+            </div>
+        </form>"""
+
+    def handle_bh_anfordern(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        bid = self.form_value(form, "buchung_id").strip()
+        monat = self.form_value(form, "monat").strip()
+        zurueck = f"/admin/buchhaltung/konten?monat={quote_plus(monat)}"
+        an = self.form_value(form, "an").strip()
+        if not bid.isdigit() or not email_sieht_gueltig_aus(an):
+            return self.redirect(zurueck + "&error=" + quote_plus("Bitte eine gültige E-Mail-Adresse eintragen."))
+        ok, fehler = mail_senden(an, self.form_value(form, "betreff").strip()[:200], self.form_value(form, "text")[:5000])
+        if not ok:
+            return self.redirect(zurueck + "&error=" + quote_plus(f"Mail ging nicht raus: {fehler}"))
+        con = bh.db()
+        con.execute("INSERT INTO anforderungen (buchung_id, an, zeit, weg) VALUES (?, ?, ?, 'Mail')", (int(bid), an, bh.jetzt_text()))
+        bh.protokolliere(con, "anforderung", f"Buchung {bid}: Rechnung angefordert bei {an}")
+        con.commit()
+        con.close()
+        self.redirect(zurueck + "&msg=" + quote_plus(f"Rechnung bei {an} angefordert."))
+
+    # ---------------------------------------------------------- Einkauf prüfen
+    def bh_einkauf_pruefen(self, beleg):
+        """Vergleicht eine Eingangsrechnung mit den Bestellungen beim selben Lieferanten."""
+        if beleg["art"] != "ER" or not beleg["lieferant"] or not beleg["datum"]:
+            return None
+        con = db()
+        quellen = [r[0] for r in con.execute("SELECT DISTINCT source FROM order_items WHERE deleted_at IS NULL AND source != ''")]
+        con.close()
+        passend = [q for q in quellen if bh.gleicher_lieferant(q, beleg["lieferant"])]
+        if not passend:
+            return None
+        try:
+            rechnungstag = datetime.strptime(beleg["datum"], "%Y-%m-%d")
+        except ValueError:
+            return None
+        von, bis = rechnungstag - timedelta(days=21), rechnungstag + timedelta(days=3)
+        con = db()
+        alle = con.execute("SELECT id, location, created_at FROM orders").fetchall()
+        con.close()
+        orders = [o for o in alle if von <= parse_order_created_at(o["created_at"]) <= bis]
+        bestellt = {}
+        for item in bestell_positionen([o["id"] for o in orders], nur_offene=False):
+            if item["source"] not in passend:
+                continue
+            key = (item["product_name"] or "", item["package_size"] or "")
+            e = bestellt.setdefault(key, {"name": key[0], "gebinde": key[1], "menge": 0, "orte": {}})
+            e["menge"] += int(item["quantity"] or 0)
+            ort = next((o["location"] for o in orders if o["id"] == item["order_id"]), "")
+            e["orte"][ort] = e["orte"].get(ort, 0) + int(item["quantity"] or 0)
+        posten, herkunft = bh.positionen(beleg["id"])
+        preise = {(bh.schluessel_text(a["artikel"])): a for a in bh.preisentwicklung(beleg["lieferant"]) if a["beleg_id"] == beleg["id"]}
+        # bestes Paar je Bestellposition suchen (gierig nach Ähnlichkeit)
+        paare = sorted(((bh.namens_aehnlichkeit(b["name"] + " " + b["gebinde"], p["name"]), bi, pi)
+                        for bi, b in enumerate(bestellt.values()) for pi, p in enumerate(posten)), reverse=True)
+        b_frei, p_frei, zuordnung = set(range(len(bestellt))), set(range(len(posten))), {}
+        for wert, bi, pi in paare:
+            if wert < 0.5:
+                break
+            if bi in b_frei and pi in p_frei:
+                zuordnung[bi] = pi
+                b_frei.discard(bi)
+                p_frei.discard(pi)
+        zeilen = []
+        liste_b = list(bestellt.values())
+        for bi, b in enumerate(liste_b):
+            p = posten[zuordnung[bi]] if bi in zuordnung else None
+            if p is None:
+                status = "fehlt" if posten else "unbekannt"
+            elif abs((p["menge"] or 0) - b["menge"]) < 0.01:
+                status = "ok"
+            else:
+                status = "menge"
+            preis = preise.get(bh.schluessel_text(p["name"])) if p else None
+            zeilen.append({"bestellt": b, "position": p, "status": status, "preis": preis})
+        extra = [posten[pi] for pi in sorted(p_frei)]
+        abweichungen = sum(1 for z in zeilen if z["status"] in ("fehlt", "menge")) + len(extra)
+        erhoehungen = [a for a in preise.values() if a["prozent"] > 0]
+        return {"quelle": passend[0], "orders": orders, "zeilen": zeilen, "extra": extra, "herkunft": herkunft,
+                "posten": posten, "abweichungen": abweichungen, "erhoehungen": erhoehungen, "bestellt": bool(bestellt)}
+
+    def bh_pruef_marke(self, ergebnis):
+        if ergebnis is None:
+            return ""
+        if not ergebnis["posten"]:
+            return '<span class="vw-marke grau">Positionen nicht lesbar</span>'
+        if not ergebnis["bestellt"]:
+            return '<span class="vw-marke grau">keine Bestellung gefunden</span>'
+        teile = []
+        if ergebnis["abweichungen"]:
+            teile.append(f'<span class="vw-marke rot">⚠ {ergebnis["abweichungen"]} Abweichung(en)</span>')
+        else:
+            teile.append('<span class="vw-marke gruen">✓ passt zur Bestellung</span>')
+        if ergebnis["erhoehungen"]:
+            teile.append(f'<span class="vw-marke honig">↑ {len(ergebnis["erhoehungen"])} Preis(e) gestiegen</span>')
+        return " ".join(teile)
+
+    def bh_pruef_tabelle(self, beleg, ergebnis):
+        if ergebnis is None:
+            return ""
+        if not ergebnis["bestellt"]:
+            return f'<p class="vw-klein">Im Bestellsystem gibt es rund um den {esc(bh.datum_de(beleg["datum"]))} keine Bestellungen bei {esc(ergebnis["quelle"])}.</p>'
+        zeilen = []
+        for z in ergebnis["zeilen"]:
+            b, p = z["bestellt"], z["position"]
+            marke = {"ok": '<span class="vw-marke gruen">✓</span>', "menge": '<span class="vw-marke rot">Menge anders</span>',
+                     "fehlt": '<span class="vw-marke rot">nicht berechnet</span>', "unbekannt": '<span class="vw-marke grau">?</span>'}[z["status"]]
+            preis = ""
+            if z["preis"]:
+                a = z["preis"]
+                preis = f'<small class="vw-klein-block {"minus" if a["prozent"] > 0 else "plus"}">{"↑" if a["prozent"] > 0 else "↓"} {str(a["prozent"]).replace(".", ",")} % (vorher {esc(bh.betrag_text(a["alt"]))})</small>'
+            orte = ", ".join(f"{o} {m}" for o, m in b["orte"].items())
+            zeilen.append(
+                f'<tr><td><b>{esc(b["name"])}</b><small class="vw-klein-block">{esc(b["gebinde"])} · {esc(orte)}</small></td>'
+                f'<td class="zahl">{b["menge"]}</td>'
+                f'<td>{esc(p["name"]) if p else "–"}</td>'
+                f'<td class="zahl">{(("%g" % p["menge"]) + " " + esc(p["einheit"] or "")) if p else "–"}</td>'
+                f'<td class="zahl">{esc(bh.betrag_text(p["einzelpreis"])) if p and p["einzelpreis"] is not None else "–"}{preis}</td>'
+                f'<td>{marke}</td></tr>'
+            )
+        for p in ergebnis["extra"]:
+            zeilen.append(
+                f'<tr class="bh-extra"><td>–</td><td class="zahl">–</td><td><b>{esc(p["name"])}</b></td>'
+                f'<td class="zahl">{"%g" % (p["menge"] or 0)} {esc(p["einheit"] or "")}</td><td class="zahl">{esc(bh.betrag_text(p["einzelpreis"]))}</td>'
+                f'<td><span class="vw-marke rot">nicht bestellt</span></td></tr>'
+            )
+        hinweis = ""
+        if ergebnis["posten"] and ergebnis["herkunft"] == "PDF-Text":
+            hinweis = '<p class="vw-klein">Positionen aus dem PDF-Text gelesen – bei ungewöhnlichem Rechnungslayout kann eine Zeile fehlen. E-Rechnungen (ZUGFeRD/XRechnung) werden genau gelesen.</p>'
+        elif not ergebnis["posten"]:
+            hinweis = '<p class="vw-klein">Die Positionen dieser Rechnung konnten nicht gelesen werden (z. B. Scan oder ungewöhnliches Layout). Die Bestellung steht trotzdem zum Vergleich da.</p>'
+        return f"""
+        <p class="vw-klein">Verglichen mit Bestellungen bei <b>{esc(ergebnis['quelle'])}</b> vom {esc(bh.datum_de((datetime.strptime(beleg['datum'], '%Y-%m-%d') - timedelta(days=21)).date().isoformat()))} bis zum Rechnungsdatum.</p>
+        <div class="vw-tabelle-wrap"><table class="vw-tabelle bh-pruef">
+            <tr><th>Bestellt</th><th class="zahl">Menge</th><th>Auf der Rechnung</th><th class="zahl">Menge</th><th class="zahl">Einzelpreis</th><th></th></tr>
+            {''.join(zeilen)}
+        </table></div>{hinweis}"""
+
+    def show_bh_einkauf(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        tage = 120
+        grenze = (bh.jetzt() - timedelta(days=tage)).date().isoformat()
+        con = bh.db()
+        belege = con.execute("SELECT * FROM belege WHERE art='ER' AND status NOT IN ('ignoriert','doppelt','portal') AND datum >= ? ORDER BY datum DESC", (grenze,)).fetchall()
+        con.close()
+        karten = []
+        for b in belege:
+            ergebnis = self.bh_einkauf_pruefen(b)
+            if ergebnis is None:
+                continue
+            karten.append(f"""
+            <details class="vw-karte bh-pruef-karte" id="e-{b['id']}" {'open' if ergebnis['abweichungen'] or ergebnis['erhoehungen'] else ''}>
+                <summary><span><b>{esc(b['lieferant'])}</b> · {esc(bh.datum_de(b['datum']))} · {esc(b['rechnungsnr'] or 'ohne Nr.')} · {esc(bh.betrag_text(b['betrag']))}</span><span>{self.bh_pruef_marke(ergebnis)}</span></summary>
+                {self.bh_pruef_tabelle(b, ergebnis)}
+                <p class="vw-klein"><a href="/admin/buchhaltung/datei?id={b['id']}" target="_blank" rel="noopener">Rechnung ansehen</a></p>
+            </details>""")
+        erhoehungen = [a for a in bh.preisentwicklung() if a["prozent"] > 0][:30]
+        preis_zeilen = "".join(
+            f'<tr><td>{esc(bh.datum_de(a["datum_neu"]))}</td><td>{esc(a["lieferant"])}</td><td><b>{esc(a["artikel"])}</b></td>'
+            f'<td class="zahl">{esc(bh.betrag_text(a["alt"]))}</td><td class="zahl"><b>{esc(bh.betrag_text(a["neu"]))}</b></td><td class="zahl minus">+{str(a["prozent"]).replace(".", ",")} %</td></tr>'
+            for a in erhoehungen
+        )
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_kopf('einkauf', 'Stimmt die Rechnung mit dem überein, was bestellt wurde? Und sind Preise gestiegen?')}
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Preiserhöhungen</h3><span class="vw-zahl {'rot' if erhoehungen else ''}">{len(erhoehungen)}</span></div>
+            {f'<div class="vw-tabelle-wrap vw-ohne-rand"><table class="vw-tabelle"><tr><th>Seit</th><th>Lieferant</th><th>Artikel</th><th class="zahl">vorher</th><th class="zahl">jetzt</th><th class="zahl">Plus</th></tr>{preis_zeilen}</table></div>' if erhoehungen else '<p class="vw-leer">Keine Preiserhöhungen gefunden. Preise werden erkannt, sobald von einem Lieferanten mindestens zwei Rechnungen mit lesbaren Positionen da sind.</p>'}
+        </section>
+        <h3 class="vw-tag">Rechnungen der letzten {tage} Tage von Lieferanten aus dem Bestellsystem</h3>
+        {''.join(karten) or '<p class="vw-leer">Noch keine Rechnungen von Lieferanten, bei denen über das Bestellsystem bestellt wird. Der Abgleich klappt, wenn der Lieferantenname auf der Rechnung zur „Bezugsquelle“ im Sortiment passt.</p>'}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Einkauf prüfen", body)
+
+
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -7523,6 +7857,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_buchung("kein-beleg")
             if path == "/admin/buchhaltung/regel/neu":
                 return self.handle_bh_buchung("regel-neu")
+            if path == "/admin/buchhaltung/buchung/anfordern":
+                return self.handle_bh_anfordern()
             if path == "/admin/buchhaltung/regel/loeschen":
                 return self.handle_bh_buchung("regel-loeschen")
             if path == "/admin/buchhaltung/monat/abschliessen":
@@ -8707,7 +9043,7 @@ class App(BaseHTTPRequestHandler):
 def main():
     init_db()
     bh.init(DATA_DIR)
-    bh.nachtlauf_starten()
+    bh.nachtlauf_starten(taeglich=bh_monatserinnerung)
     seed_demo_products()
     print(f"Internes Bestellsystem läuft auf http://localhost:{PORT}")
     print(f"Admin-PIN: {ADMIN_PIN} (vor Onlinebetrieb ändern)")

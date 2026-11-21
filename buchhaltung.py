@@ -190,6 +190,15 @@ def init(data_dir):
         CREATE TABLE IF NOT EXISTS protokoll (
             id INTEGER PRIMARY KEY AUTOINCREMENT, zeit TEXT, art TEXT, text TEXT
         );
+        CREATE TABLE IF NOT EXISTS positionen (
+            beleg_id INTEGER, nr INTEGER, name TEXT, menge REAL, einheit TEXT DEFAULT '',
+            einzelpreis INTEGER, summe INTEGER, herkunft TEXT DEFAULT '',
+            PRIMARY KEY (beleg_id, nr)
+        );
+        CREATE TABLE IF NOT EXISTS positionen_gelesen (beleg_id INTEGER PRIMARY KEY, anzahl INTEGER, herkunft TEXT);
+        CREATE TABLE IF NOT EXISTS anforderungen (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, buchung_id INTEGER, an TEXT, zeit TEXT, weg TEXT
+        );
         CREATE TABLE IF NOT EXISTS einstellungen (
             schluessel TEXT PRIMARY KEY, wert TEXT
         );
@@ -841,8 +850,9 @@ def alle_abholen(nur_quelle=None):
     return True
 
 
-def nachtlauf_starten():
-    """Hintergrund-Uhr: holt jede Nacht zwischen 2 und 5 Uhr einmal alle Quellen ab."""
+def nachtlauf_starten(taeglich=None):
+    """Hintergrund-Uhr: holt jede Nacht zwischen 2 und 5 Uhr einmal alle Quellen ab.
+    taeglich(): wird einmal am Tag ab 8 Uhr aufgerufen (z. B. für die Monatserinnerung)."""
     def schleife():
         import time
         while True:
@@ -857,8 +867,18 @@ def nachtlauf_starten():
                     con.commit()
                     con.close()
                     alle_abholen()
+                if taeglich and t.hour >= 8:
+                    con = db()
+                    zuletzt = einstellung(con, "letzter_tageslauf")
+                    if zuletzt[:10] != t.date().isoformat():
+                        setze_einstellung(con, "letzter_tageslauf", jetzt_text())
+                        con.commit()
+                        con.close()
+                        taeglich()
+                    else:
+                        con.close()
             except Exception:
-                pass
+                traceback.print_exc()
             time.sleep(600)
     threading.Thread(target=schleife, daemon=True).start()
 
@@ -1347,3 +1367,156 @@ def monat_wieder_oeffnen(monat):
     protokolliere(con, "monat", f"Monat {monat} wieder geöffnet")
     con.commit()
     con.close()
+
+
+# ---------------------------------------------------------------- Rechnungspositionen
+
+MENGE = r"(\d{1,5}(?:[.,]\d{1,3})?)"
+PREIS = r"(\d{1,3}(?:\.\d{3})*,\d{2,3}|\d+,\d{2,3}|\d+\.\d{2})"
+EINHEIT = r"(?:x|Stk\.?|St\.?|Stück|Krt\.?|Kart(?:on)?s?|KT|Pck\.?|Pak(?:et)?|Btl\.?|VE|kg|g|l|Ltr\.?|Fl\.?|Dose|Ds\.?|Eimer|Pal\.?)"
+ZEILE_MUSTER = [
+    # Name  Menge [Einheit]  Einzelpreis  Gesamt
+    re.compile(rf"^(?:\d{{1,4}}\s+)?(?:(?=\S*\d)[A-Z0-9][\w\-./]{{2,14}}\s+)?(?P<name>[A-Za-zÄÖÜäöüß].{{2,70}}?)\s+(?P<menge>{MENGE})\s*(?P<einheit>{EINHEIT})?\.?\s+(?:à\s*|je\s*)?(?P<preis>{PREIS})\s*(?:€|EUR)?\s+(?P<summe>{PREIS})\s*(?:€|EUR)?(?:\s+[A-Z0-9%]{{1,4}})?$", re.I),
+    # Menge [Einheit] x Name  Einzelpreis  Gesamt
+    re.compile(rf"^(?P<menge>{MENGE})\s*(?P<einheit>{EINHEIT})?\s*x?\s+(?P<name>[A-Za-zÄÖÜäöüß].{{2,70}}?)\s+(?P<preis>{PREIS})\s*(?:€|EUR)?\s+(?P<summe>{PREIS})\s*(?:€|EUR)?$", re.I),
+]
+
+
+def _zahl(text):
+    text = (text or "").strip()
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def positionen_aus_xml(xml_bytes):
+    try:
+        wurzel = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
+    zeilen = []
+    if _lokal(wurzel.tag) == "CrossIndustryInvoice":
+        for e in wurzel.iter():
+            if _lokal(e.tag) != "IncludedSupplyChainTradeLineItem":
+                continue
+            menge_e = _finde(e, "BilledQuantity")
+            preis = _text(e, "NetPriceProductTradePrice", "ChargeAmount") or _text(e, "GrossPriceProductTradePrice", "ChargeAmount")
+            zeilen.append({"name": _text(e, "SpecifiedTradeProduct", "Name"), "menge": _zahl(menge_e.text if menge_e is not None else ""),
+                           "einheit": (menge_e.get("unitCode") if menge_e is not None else "") or "",
+                           "einzelpreis": cent(preis.replace(",", ".")) if preis else None,
+                           "summe": cent(_text(e, "LineTotalAmount").replace(",", ".")) if _text(e, "LineTotalAmount") else None})
+    elif _lokal(wurzel.tag) in ("Invoice", "CreditNote"):
+        for e in wurzel:
+            if _lokal(e.tag) not in ("InvoiceLine", "CreditNoteLine"):
+                continue
+            menge_e = next((k for k in e if _lokal(k.tag) in ("InvoicedQuantity", "CreditedQuantity")), None)
+            summe = next((((k.text or "").strip()) for k in e if _lokal(k.tag) == "LineExtensionAmount"), "")
+            zeilen.append({"name": _text(e, "Item", "Name"), "menge": _zahl(menge_e.text if menge_e is not None else ""),
+                           "einheit": (menge_e.get("unitCode") if menge_e is not None else "") or "",
+                           "einzelpreis": cent(_text(e, "Price", "PriceAmount")) if _text(e, "Price", "PriceAmount") else None,
+                           "summe": cent(summe) if summe else None})
+    return [z for z in zeilen if z["name"]]
+
+
+def positionen_aus_text(text):
+    zeilen = []
+    for roh in (text or "").splitlines():
+        zeile = re.sub(r"\s{2,}", "  ", roh.strip())
+        if len(zeile) < 8 or re.search(r"summe|gesamt|netto|brutto|mwst|ust\b|steuer|zwischensumme|rabatt|versand|übertrag|seite", zeile, re.I):
+            continue
+        for muster in ZEILE_MUSTER:
+            m = muster.match(zeile)
+            if not m:
+                continue
+            menge, preis, summe = _zahl(m.group("menge")), cent(m.group("preis")), cent(m.group("summe"))
+            if menge is None or preis is None or summe is None or menge <= 0:
+                continue
+            # Plausibel? Menge × Einzelpreis ≈ Gesamt (Rabatte bis 30 % erlaubt)
+            if summe and not (0.69 * menge * preis <= summe <= 1.01 * menge * preis + 2):
+                continue
+            zeilen.append({"name": re.sub(r"^x\s+", "", m.group("name").strip(" .-:")), "menge": menge, "einheit": (m.group("einheit") or "").strip("."),
+                           "einzelpreis": preis, "summe": summe})
+            break
+    return zeilen
+
+
+def positionen(beleg_id):
+    """Positionen eines Belegs (einmal auslesen, dann gespeichert) -> (liste, herkunft)"""
+    con = db()
+    try:
+        gelesen = con.execute("SELECT * FROM positionen_gelesen WHERE beleg_id=?", (beleg_id,)).fetchone()
+        if gelesen:
+            zeilen = [dict(r) for r in con.execute("SELECT * FROM positionen WHERE beleg_id=? ORDER BY nr", (beleg_id,))]
+            return zeilen, gelesen["herkunft"]
+        b = con.execute("SELECT * FROM belege WHERE id=?", (beleg_id,)).fetchone()
+        if not b:
+            return [], ""
+        liste, herkunft = [], ""
+        xml_pfad = beleg_pfad(b, xml=True) or (beleg_pfad(b) if (b["datei"] or "").endswith(".xml") else "")
+        if xml_pfad and os.path.exists(xml_pfad):
+            with open(xml_pfad, "rb") as f:
+                liste = positionen_aus_xml(f.read())
+            herkunft = "E-Rechnung" if liste else ""
+        if not liste and (b["datei"] or "").endswith(".pdf"):
+            pfad = beleg_pfad(b)
+            if pfad and os.path.exists(pfad):
+                with open(pfad, "rb") as f:
+                    text, _ = pdf_lesen(f.read())
+                liste = positionen_aus_text(text)
+                herkunft = "PDF-Text" if liste else ""
+        for nr, z in enumerate(liste, 1):
+            con.execute("INSERT OR REPLACE INTO positionen VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (beleg_id, nr, z["name"][:120], z["menge"], z["einheit"][:12], z["einzelpreis"], z["summe"], herkunft))
+        con.execute("INSERT OR REPLACE INTO positionen_gelesen VALUES (?, ?, ?)", (beleg_id, len(liste), herkunft))
+        con.commit()
+        return [dict(r) for r in con.execute("SELECT * FROM positionen WHERE beleg_id=? ORDER BY nr", (beleg_id,))], herkunft
+    finally:
+        con.close()
+
+
+def namens_aehnlichkeit(a, b):
+    """0..1 – wie gut passen zwei Produktnamen zusammen (Wortüberlappung, robust gegen Abkürzungen)."""
+    def vorbereiten(t):
+        t = re.sub(r"(\d)\s+(ml|cl|l|g|kg|cm|mm|st|stk)\b", r"\1\2", schluessel_text(t))
+        return [w for w in t.split() if len(w) >= 2]
+    wa, wb = vorbereiten(a), vorbereiten(b)
+    if not wa or not wb:
+        return 0.0
+    treffer = 0
+    for w in wa:
+        if any(w == x or (len(w) >= 4 and len(x) >= 4 and (w.startswith(x[:4]) or x.startswith(w[:4]))) for x in wb):
+            treffer += 1
+    return treffer / max(1, min(len(wa), len(wb))) * (0.6 + 0.4 * treffer / max(len(wa), len(wb)))
+
+
+def gleicher_lieferant(a, b):
+    return bool(_woerter(a) & _woerter(b)) or (schluessel_text(a) and schluessel_text(a) == schluessel_text(b))
+
+
+def preisentwicklung(lieferant=None, schwelle=0.03):
+    """Preisänderungen je Artikel und Lieferant aus allen gelesenen Positionen."""
+    con = db()
+    zeilen = con.execute(
+        """SELECT p.*, b.lieferant, b.datum, b.id AS bid FROM positionen p JOIN belege b ON b.id=p.beleg_id
+           WHERE b.status NOT IN ('ignoriert','doppelt') AND b.art='ER' AND p.einzelpreis IS NOT NULL ORDER BY b.datum, b.id"""
+    ).fetchall()
+    con.close()
+    verlauf = {}
+    for z in zeilen:
+        if lieferant and not gleicher_lieferant(lieferant, z["lieferant"]):
+            continue
+        key = (schluessel_text(z["lieferant"]), schluessel_text(z["name"]))
+        verlauf.setdefault(key, []).append(z)
+    aenderungen = []
+    for (_l, _n), liste in verlauf.items():
+        for alt, neu in zip(liste, liste[1:]):
+            if alt["einzelpreis"] and neu["einzelpreis"] != alt["einzelpreis"]:
+                faktor = neu["einzelpreis"] / alt["einzelpreis"] - 1
+                if abs(faktor) >= schwelle:
+                    aenderungen.append({"lieferant": neu["lieferant"], "artikel": neu["name"], "alt": alt["einzelpreis"], "neu": neu["einzelpreis"],
+                                        "prozent": round(faktor * 100, 1), "datum_alt": alt["datum"], "datum_neu": neu["datum"], "beleg_id": neu["bid"]})
+    aenderungen.sort(key=lambda a: a["datum_neu"] or "", reverse=True)
+    return aenderungen
