@@ -3428,8 +3428,6 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_export(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/export.zip":
             return self.show_bh_export_zip(query=parse_qs(parsed.query))
-        if path == "/admin/buchhaltung/einkauf":
-            return self.show_bh_einkauf(query=parse_qs(parsed.query))
         if path == "/beleg":
             return self.show_beleg_foto(query=parse_qs(parsed.query))
         if path == "/admin/products":
@@ -6684,7 +6682,6 @@ class App(BaseHTTPRequestHandler):
             ("quellen", "Quellen", "/admin/buchhaltung/quellen"),
             ("belege", "Belege", "/admin/buchhaltung/belege"),
             ("konten", "Kontoauszüge", "/admin/buchhaltung/konten"),
-            ("einkauf", "Einkauf prüfen", "/admin/buchhaltung/einkauf"),
             ("export", "Monatsexport", "/admin/buchhaltung/export"),
         ]
         return admin_kopf("Buchhaltung", unter, aktionen, reiter, aktiv)
@@ -7075,11 +7072,9 @@ class App(BaseHTTPRequestHandler):
         if b["status"] == "portal":
             portal_upload = f"""<form method="post" action="/admin/buchhaltung/beleg/upload" enctype="multipart/form-data" class="vw-knopfreihe">
                 <input type="hidden" name="ersetzt" value="{b['id']}"><input type="file" name="datei" accept=".pdf,.xml,image/*" required><button class="primary" type="submit">PDF hochladen</button></form>"""
-        pruefung = self.bh_einkauf_pruefen(b)
-        pruef_html = (f'<details class="bh-pruef-box" {"open" if pruefung and (pruefung["abweichungen"] or pruefung["erhoehungen"]) else ""}><summary>Mit Bestellung vergleichen {self.bh_pruef_marke(pruefung)}</summary>{self.bh_pruef_tabelle(b, pruefung)}</details>' if pruefung else "")
         html_text = f"""
         <div class="vw-dialog-kopf"><h3>{esc(b['lieferant'] or 'Beleg')}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-        <div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>{pruef_html}
+        <div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>
         <form method="post" action="/admin/buchhaltung/beleg/speichern" class="vw-formular">
             <input type="hidden" name="id" value="{b['id']}">
             <div class="vw-zwei"><label>Art<select name="art">{arten}</select></label><label>Lieferant / Kunde<input name="lieferant" value="{esc(b['lieferant'])}"></label></div>
