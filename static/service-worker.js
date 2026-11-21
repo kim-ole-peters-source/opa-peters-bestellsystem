@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v60-einkauf';
+const CACHE_NAME = 'opa-peters-bestellung-v61-erkennung';
 const STATIC_ASSETS = [
   '/',
   '/login',

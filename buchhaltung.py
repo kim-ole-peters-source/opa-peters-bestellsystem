@@ -45,7 +45,7 @@ _lauf_lock = threading.Lock()
 LAUF = {"laeuft": False, "start": "", "ende": "", "meldung": "", "neu": 0}
 
 ARTEN = {"ER": "Eingangsrechnung", "AR": "Ausgangsrechnung", "GS": "Gutschrift"}
-STATUS_TEXT = {"neu": "zu prüfen", "geprueft": "geprüft", "portal": "im Portal holen", "ignoriert": "kein Beleg", "doppelt": "doppelt"}
+STATUS_TEXT = {"unsicher": "Rechnung?", "neu": "zu prüfen", "geprueft": "geprüft", "portal": "im Portal holen", "ignoriert": "kein Beleg", "doppelt": "doppelt"}
 
 # Bekannte Anbieter für Postfächer (Host, Port) – "Andere" = selbst eintragen
 ANBIETER = {
@@ -199,6 +199,10 @@ def init(data_dir):
         CREATE TABLE IF NOT EXISTS anforderungen (
             id INTEGER PRIMARY KEY AUTOINCREMENT, buchung_id INTEGER, an TEXT, zeit TEXT, weg TEXT
         );
+        CREATE TABLE IF NOT EXISTS gelernt (
+            absender TEXT, titel TEXT, urteil TEXT, beispiel TEXT DEFAULT '', erstellt TEXT,
+            PRIMARY KEY (absender, titel)
+        );
         CREATE TABLE IF NOT EXISTS einstellungen (
             schluessel TEXT PRIMARY KEY, wert TEXT
         );
@@ -210,6 +214,21 @@ def init(data_dir):
         setze_einstellung(con, "eigene_domains", "opapeters.de")
     con.commit()
     con.close()
+    if not einstellung_lesen("aufgeraeumt_v1"):
+        ergebnis = belege_neu_pruefen()
+        con = db()
+        setze_einstellung(con, "aufgeraeumt_v1", jetzt_text())
+        protokolliere(con, "aufraeumen", f"Neue Rechnungserkennung: {ergebnis['aussortiert']} aussortiert, {ergebnis['unsicher']} zum Ansehen markiert")
+        con.commit()
+        con.close()
+
+
+def einstellung_lesen(key, standard=""):
+    con = db()
+    try:
+        return einstellung(con, key, standard)
+    finally:
+        con.close()
 
 
 def db():
@@ -530,11 +549,19 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
             daten = text_auslesen(text)
             daten["verkaeufer"] = ""
             daten["kaeufer"] = ""
-        if not alles_ist_beleg and not daten.get("sicher") and not xml:
-            # Inhalt und Dateiname entscheiden; der Betreff zählt nur bei Scans ohne Text
-            pruef_text = " ".join([text[:2500], dateiname or ""] + ([] if text.strip() else [mail.get("betreff", "")]))
-            if not RECHNUNGS_WORTE.search(pruef_text):
-                return None, False, "keine Rechnung"
+        status_neu, pruef_notiz = "neu", ""
+        if vorgaben.get("ohne_pruefung"):
+            pass
+        elif xml and daten.get("betrag") is not None:
+            pass  # echte E-Rechnung
+        elif endung in (".pdf", ".xml") or (endung != ".bin" and not alles_ist_beleg):
+            urteil, grund = rechnung_bewerten(con, text, dateiname, mail, daten, nur_sperren=alles_ist_beleg)
+            if urteil == "nein":
+                protokolliere(con, "uebersprungen", f"{dateiname} ({mail.get('von_adresse') or quelle}): {grund}")
+                con.commit()
+                return None, False, grund
+            if urteil == "unsicher":
+                status_neu, pruef_notiz = "unsicher", grund
         # Richtung: Eingang oder Ausgang?
         art = "ER"
         if richtung == "ausgang":
@@ -562,12 +589,12 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
         cur = con.execute(
             """INSERT INTO belege (sha256, art, lieferant, rechnungsnr, datum, betrag, waehrung, original_name, mime, quelle, quelle_id,
                mail_id, mail_betreff, mail_von, mail_datum, status, sicher, bar, notiz, text_auszug, erstellt, geaendert)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'neu', ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (sha, vorgaben.get("art") or art, vorgaben.get("lieferant") or lieferant[:80], daten.get("rechnungsnr", "")[:60],
              vorgaben.get("datum") or daten.get("datum") or (mail.get("datum") or "")[:10] or (jetzt_t[:10] if vorgaben.get("bar") else ""), vorgaben.get("betrag") if vorgaben.get("betrag") is not None else daten.get("betrag"),
              daten.get("waehrung") or "EUR", (dateiname or "")[:200], mime, quelle[:80], quelle_id, mail.get("id", "")[:300],
-             mail.get("betreff", "")[:300], mail.get("von", "")[:300], mail.get("datum", ""), 1 if daten.get("sicher") else 0,
-             1 if vorgaben.get("bar") else 0, vorgaben.get("notiz", ""), (text or "")[:4000], jetzt_t, jetzt_t),
+             mail.get("betreff", "")[:300], mail.get("von", "")[:300], mail.get("datum", ""), status_neu, 1 if daten.get("sicher") else 0,
+             1 if vorgaben.get("bar") else 0, vorgaben.get("notiz", "") or pruef_notiz, (text or "")[:4000], jetzt_t, jetzt_t),
         )
         beleg_id = cur.lastrowid
         monat = (datetime.strptime(jetzt_t[:10], "%Y-%m-%d")).strftime("%Y/%m")
@@ -588,7 +615,7 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
         b = con.execute("SELECT * FROM belege WHERE id=?", (beleg_id,)).fetchone()
         if b["rechnungsnr"] and b["betrag"] is not None:
             zwilling = con.execute(
-                "SELECT id FROM belege WHERE id != ? AND rechnungsnr = ? AND betrag = ? AND status NOT IN ('doppelt', 'ignoriert')",
+                "SELECT id FROM belege WHERE id != ? AND rechnungsnr = ? AND betrag = ? AND status NOT IN ('doppelt', 'ignoriert', 'unsicher')",
                 (beleg_id, b["rechnungsnr"], b["betrag"]),
             ).fetchone()
             if zwilling:
@@ -1080,7 +1107,7 @@ def _passende_art(buchung, beleg):
 def kandidaten(con, buchung, limit=8, suche=""):
     belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
     liste = []
-    zeilen = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal') AND dauer=0").fetchall()
+    zeilen = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal', 'unsicher') AND dauer=0").fetchall()
     for b in zeilen:
         if suche:
             if schluessel_text(suche) not in schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], betrag_text(b["betrag"]), b["original_name"]])):
@@ -1110,7 +1137,7 @@ def abgleichen():
     """Ordnet offene Buchungen zu: Regeln, Dauerbelege, eindeutige Treffer automatisch, sonst Vorschlag."""
     con = db()
     belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
-    belege = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal')").fetchall()
+    belege = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal', 'unsicher')").fetchall()
     dauer = [b for b in belege if b["dauer"] and b["dauer_muster"]]
     normal = [b for b in belege if not b["dauer"]]
     zugeordnet = 0
@@ -1248,12 +1275,12 @@ def monatsexport(monat):
     zuord = {}
     for r in con.execute("SELECT z.buchung_id, b.* FROM zuordnung z JOIN belege b ON b.id=z.beleg_id"):
         zuord.setdefault(r["buchung_id"], []).append(r)
-    bar = con.execute("SELECT * FROM belege WHERE bar=1 AND substr(datum,1,7)=? AND status NOT IN ('ignoriert','doppelt','portal')", (monat,)).fetchall()
+    bar = con.execute("SELECT * FROM belege WHERE bar=1 AND substr(datum,1,7)=? AND status NOT IN ('ignoriert','doppelt','portal','unsicher')", (monat,)).fetchall()
     abschluss = con.execute("SELECT * FROM monate WHERE monat=?", (monat,)).fetchone()
     schon = set(json.loads(abschluss["belege"])) if abschluss and abschluss["belege"] else set()
     belegt_ids = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
     offene_rechnungen = con.execute(
-        "SELECT * FROM belege WHERE substr(datum,1,7)=? AND bar=0 AND dauer=0 AND status NOT IN ('ignoriert','doppelt','portal')", (monat,)).fetchall()
+        "SELECT * FROM belege WHERE substr(datum,1,7)=? AND bar=0 AND dauer=0 AND status NOT IN ('ignoriert','doppelt','portal','unsicher')", (monat,)).fetchall()
     offene_rechnungen = [b for b in offene_rechnungen if b["id"] not in belegt_ids]
     portal = con.execute("SELECT * FROM belege WHERE status='portal'").fetchall()
     con.close()
@@ -1520,3 +1547,168 @@ def preisentwicklung(lieferant=None, schwelle=0.03):
                                         "prozent": round(faktor * 100, 1), "datum_alt": alt["datum"], "datum_neu": neu["datum"], "beleg_id": neu["bid"]})
     aenderungen.sort(key=lambda a: a["datum_neu"] or "", reverse=True)
     return aenderungen
+
+
+# ---------------------------------------------------------------- Ist das überhaupt eine Rechnung?
+
+# Steht so etwas oben im Dokument (oder im Dateinamen), ist es keine Rechnung.
+SPERR_WORTE = [
+    ("BWA", r"\bBWA\b|betriebswirtschaftliche\s+auswertung"),
+    ("Umsatzbericht", r"umsatz\s*-?\s*(?:bericht|übersicht|uebersicht|statistik|auswertung|liste|report)|sales\s+report"),
+    ("Auswertung", r"\bauswertung\b|\breport\b|\bstatistik\b|tagesabschluss|z\s*-?\s*bon|kassenbericht|x\s*-?\s*bericht"),
+    ("Summen- und Saldenliste", r"summen\s*-?\s*(?:und|&)\s*saldenliste|susa\b|offene[\s-]+posten|op\s*-?\s*liste|kontenblatt"),
+    ("Kontoauszug", r"konto\s*auszug|kontoauszug|account\s+statement|umsatzanzeige|kreditkarten\s*abrechnung|monatsabrechnung\s+kreditkarte"),
+    ("Mahnung", r"\bmahnung\b|zahlungserinnerung|payment\s+reminder|letzte\s+erinnerung"),
+    ("Angebot", r"\bangebot\b|kostenvoranschlag|\bquote\b|\bquotation\b|\bofferte\b"),
+    ("Lieferschein", r"lieferschein|delivery\s+note|packliste|packing\s+slip"),
+    ("Auftragsbestätigung", r"auftrags\s*-?\s*best(?:ä|ae)tigung|bestell\s*-?\s*best(?:ä|ae)tigung|order\s+confirmation|bestell(?:ü|ue)bersicht"),
+    ("AGB / Datenschutz", r"allgemeine\s+gesch(?:ä|ae)ftsbedingungen|\bAGB\b|datenschutz|widerrufs|privacy\s+policy|terms\s+(?:and|&)\s+conditions"),
+    ("Newsletter / Werbung", r"newsletter|preisliste|katalog|prospekt|aktionsangebot|sonderangebot"),
+    ("Lohn / Steuer", r"lohn\s*-?\s*abrechnung|gehalts\s*-?\s*abrechnung|entgelt\s*-?\s*abrechnung|lohnjournal|steuerbescheid|umsatzsteuer\s*-?\s*voranmeldung|jahresabschluss|bilanz\b|gewinn\s*-?\s*und\s*-?\s*verlust"),
+    ("Vertrag", r"\bvertrag\b(?!s?\s*-?\s*nr)|vertragsbest(?:ä|ae)tigung|k(?:ü|ue)ndigungsbest(?:ä|ae)tigung"),
+]
+SPERR_MUSTER = [(name, re.compile(m, re.I)) for name, m in SPERR_WORTE]
+TITEL_RECHNUNG = re.compile(r"\b(?:rechnung|invoice|gutschrift|quittung|kassenbeleg|kassenbon|bewirtungsbeleg|credit\s+note|rechnungskorrektur|stornorechnung|faktura)\b", re.I)
+MWST_MUSTER = re.compile(r"(?:mwst|ust\.?|umsatzsteuer|mehrwertsteuer|vat|tax)\b[^\n]{0,40}?\d{1,2}(?:[.,]\d+)?\s*%|\d{1,2}(?:[.,]\d+)?\s*%\s*(?:mwst|ust|umsatzsteuer|mehrwertsteuer|vat)", re.I)
+STEUERNR_MUSTER = re.compile(r"(?:ust\.?\s*-?\s*id(?:\.?\s*-?\s*nr)?|umsatzsteuer\s*-?\s*id|vat\s*(?:id|no|number|reg)|steuer\s*-?\s*nr|steuernummer|tax\s+id)\b|\bDE\s?\d{9}\b", re.I)
+ZAHLUNG_MUSTER = re.compile(r"zahlbar|f(?:ä|ae)llig|zahlungsziel|bitte\s+(?:überweisen|ueberweisen)|bankverbindung|\bIBAN\b|bezahlt\s+(?:am|per|mit)|zahlungsart|payment\s+(?:method|terms|due)|lastschrift|abgebucht", re.I)
+
+
+def dokument_titel(text, dateiname=""):
+    """Kurzer, zahlenfreier 'Titel' eines Dokuments – zum Wiedererkennen ähnlicher Dokumente."""
+    zeilen = [z.strip() for z in (text or "").splitlines() if z.strip()][:25]
+    kandidat = ""
+    for z in zeilen:
+        if TITEL_RECHNUNG.search(z) or any(m.search(z) for _, m in SPERR_MUSTER):
+            kandidat = z
+            break
+    if not kandidat:
+        kandidat = os.path.splitext(os.path.basename(dateiname or ""))[0] or (zeilen[0] if zeilen else "")
+    kandidat = re.sub(r"\d+", " ", schluessel_text(kandidat))
+    return " ".join(w for w in kandidat.split() if len(w) > 1)[:60]
+
+
+def gelerntes_urteil(con, absender, titel):
+    absender = (absender or "").lower()
+    domain = absender.split("@")[-1] if "@" in absender else ""
+    for a, t in ((absender, titel), (absender, "*"), ("@" + domain if domain else None, "*"), ("*", titel)):
+        if a is None or not t:
+            continue
+        r = con.execute("SELECT urteil FROM gelernt WHERE absender=? AND titel=?", (a, t)).fetchone()
+        if r:
+            return r["urteil"], ("immer von diesem Absender" if t == "*" else "so gelernt")
+    return None, ""
+
+
+def lernen(beleg_id, urteil, ganzer_absender=False):
+    """urteil: 'ja' oder 'nein'. Merkt sich Absender + Dokumentart für die Zukunft."""
+    con = db()
+    try:
+        b = con.execute("SELECT * FROM belege WHERE id=?", (beleg_id,)).fetchone()
+        if not b:
+            return
+        absender = parseaddr(b["mail_von"] or "")[1].lower()
+        titel = dokument_titel(b["text_auszug"], b["original_name"])
+        if ganzer_absender and absender:
+            schluessel = (absender, "*")
+        elif absender:
+            schluessel = (absender, titel or "*")
+        elif titel and urteil == "nein":
+            schluessel = ("*", titel)
+        else:
+            return
+        con.execute("INSERT INTO gelernt (absender, titel, urteil, beispiel, erstellt) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(absender, titel) DO UPDATE SET urteil=excluded.urteil, beispiel=excluded.beispiel",
+                    (*schluessel, urteil, (b["original_name"] or b["lieferant"] or "")[:120], jetzt_text()))
+        # Gegenteilige Regel für denselben Absender/Titel entfernen
+        if urteil == "ja":
+            con.execute("DELETE FROM gelernt WHERE urteil='nein' AND absender IN (?, '*') AND titel IN (?, '*')", (absender or "-", titel or "-"))
+            con.execute("INSERT OR REPLACE INTO gelernt (absender, titel, urteil, beispiel, erstellt) VALUES (?, ?, 'ja', ?, ?)",
+                        (*schluessel, (b["original_name"] or "")[:120], jetzt_text()))
+        protokolliere(con, "gelernt", f"{schluessel[0]} / {schluessel[1]}: {urteil}")
+        con.commit()
+    finally:
+        con.close()
+
+
+def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperren=False):
+    """-> ('ja' | 'unsicher' | 'nein', Begründung). nur_sperren: eigenes Belege-Postfach (alles ist Beleg, außer klar keiner)."""
+    mail = mail or {}
+    daten = daten if daten is not None else text_auslesen(text)
+    titel = dokument_titel(text, dateiname)
+    gelernt, wie = gelerntes_urteil(con, mail.get("von_adresse", ""), titel)
+    if gelernt == "nein":
+        return "nein", f"keine Rechnung ({wie})"
+    if gelernt == "ja":
+        return "ja", f"Rechnung ({wie})"
+    if not (text or "").strip():
+        # Scan ohne Text: Betreff/Dateiname entscheiden, im Zweifel ansehen lassen
+        hinweis = " ".join([dateiname or "", mail.get("betreff", "")])
+        if any(m.search(hinweis) for _, m in SPERR_MUSTER):
+            return "nein", "keine Rechnung (laut Dateiname/Betreff)"
+        return ("ja" if nur_sperren or TITEL_RECHNUNG.search(hinweis) else "unsicher"), "Scan ohne lesbaren Text"
+    kopf = "\n".join([z for z in text.splitlines() if z.strip()][:18])[:900]
+    rechnung_im_kopf = TITEL_RECHNUNG.search(kopf)
+    for name, muster in SPERR_MUSTER:
+        treffer = muster.search(kopf) or muster.search(os.path.basename(dateiname or ""))
+        if not treffer:
+            continue
+        # "Rechnung" steht weiter oben als das Sperrwort -> ist trotzdem eine Rechnung (z. B. "Rechnung ... Vertrag Nr.")
+        if rechnung_im_kopf and rechnung_im_kopf.start() < (treffer.start() if muster.search(kopf) else 10 ** 6) and name not in ("Mahnung", "BWA", "Kontoauszug", "Summen- und Saldenliste", "Lohn / Steuer"):
+            continue
+        return "nein", f"keine Rechnung: {name}"
+    if nur_sperren:
+        return "ja", ""
+    punkte, merkmale = 0, []
+    if rechnung_im_kopf:
+        punkte += 3; merkmale.append("Titel")
+    elif TITEL_RECHNUNG.search(text):
+        punkte += 1
+    if daten.get("rechnungsnr"):
+        punkte += 2; merkmale.append("Rechnungsnummer")
+    if DATUM_MUSTER.search(text):
+        punkte += 1; merkmale.append("Datum")
+    if SUMME_MUSTER.search(text) or re.search(r"\b(?:summe|total|betrag)\b[^\n]{0,25}\d+,\d{2}", text, re.I):
+        punkte += 2; merkmale.append("Endbetrag")
+    if MWST_MUSTER.search(text):
+        punkte += 2; merkmale.append("MwSt")
+    if STEUERNR_MUSTER.search(text):
+        punkte += 1; merkmale.append("Steuernummer")
+    if ZAHLUNG_MUSTER.search(text):
+        punkte += 1; merkmale.append("Zahlungshinweis")
+    if punkte >= 7 and rechnung_im_kopf or punkte >= 8:
+        return "ja", ""
+    if punkte >= 4:
+        fehlt = [m for m in ("Titel", "Rechnungsnummer", "Endbetrag", "MwSt") if m not in merkmale]
+        return "unsicher", "Nicht sicher, ob Rechnung – es fehlt: " + ", ".join(fehlt)
+    return "nein", "keine Rechnungsmerkmale gefunden"
+
+
+def belege_neu_pruefen():
+    """Prüft alle noch nicht bestätigten Belege mit der aktuellen Erkennung (nichts wird gelöscht)."""
+    con = db()
+    ergebnis = {"aussortiert": 0, "unsicher": 0, "geprueft": 0}
+    try:
+        belegt = {r[0] for r in con.execute("SELECT beleg_id FROM zuordnung")}
+        quellen = {r["id"]: r for r in con.execute("SELECT id, alles_ist_beleg FROM quellen")}
+        for b in con.execute("SELECT * FROM belege WHERE status IN ('neu', 'unsicher')").fetchall():
+            if b["id"] in belegt or b["xml_datei"] or (b["datei"] or "").endswith(".xml") or b["bar"] or b["dauer"]:
+                continue
+            if not (b["datei"] or "").lower().endswith(".pdf") or b["quelle_id"] is None:
+                continue  # Fotos und eigene Uploads bleiben, wie sie sind
+            ergebnis["geprueft"] += 1
+            mail = {"von_adresse": parseaddr(b["mail_von"] or "")[1].lower(), "betreff": b["mail_betreff"]}
+            q = quellen.get(b["quelle_id"])
+            urteil, grund = rechnung_bewerten(con, b["text_auszug"], b["original_name"], mail, nur_sperren=bool(q and q["alles_ist_beleg"]))
+            if urteil == "nein":
+                con.execute("UPDATE belege SET status='ignoriert', notiz=?, geaendert=? WHERE id=?", (f"Automatisch aussortiert – {grund}"[:300], jetzt_text(), b["id"]))
+                ergebnis["aussortiert"] += 1
+            elif urteil == "unsicher" and b["status"] != "unsicher":
+                con.execute("UPDATE belege SET status='unsicher', notiz=?, geaendert=? WHERE id=?", (grund[:300], jetzt_text(), b["id"]))
+                ergebnis["unsicher"] += 1
+            elif urteil == "ja" and b["status"] == "unsicher":
+                con.execute("UPDATE belege SET status='neu', geaendert=? WHERE id=?", (jetzt_text(), b["id"]))
+        con.commit()
+    finally:
+        con.close()
+    return ergebnis

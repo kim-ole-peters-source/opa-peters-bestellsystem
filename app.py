@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-21-buchhaltung2"
+ASSET_VERSION = "2026-11-21-erkennung"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2854,6 +2854,7 @@ def bh_erinnerung_text(monat):
     z = dict(bh.monats_zahlen(monat))
     con = bh.db()
     z["belege_neu"] = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status='neu'", (monat,)).fetchone()[0]
+    z["unsicher"] = con.execute("SELECT COUNT(*) FROM belege WHERE status='unsicher'").fetchone()[0]
     z["portal"] = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status='portal'", (monat,)).fetchone()[0]
     con.close()
     name = f"{MONATSNAMEN[int(monat[5:]) - 1]} {monat[:4]}"
@@ -2866,6 +2867,8 @@ def bh_erinnerung_text(monat):
         zeilen.append(f"• {z['vorschlag']} Vorschlag/Vorschläge warten auf ein kurzes OK.")
     if z.get("belege_neu"):
         zeilen.append(f"• {z['belege_neu']} neue Belege noch nicht geprüft.")
+    if z.get("unsicher"):
+        zeilen.append(f"• Bei {z['unsicher']} Dokument(en) ist unklar, ob es eine Rechnung ist – bitte kurz ansehen.")
     if z.get("portal"):
         zeilen.append(f"• {z['portal']} Rechnung(en) liegen nur im Kundenportal und müssen heruntergeladen werden.")
     alles_gut = not zeilen
@@ -6728,6 +6731,7 @@ class App(BaseHTTPRequestHandler):
         z = bh.monats_zahlen(monat)
         con = bh.db()
         zu_pruefen = con.execute("SELECT COUNT(*) FROM belege WHERE status='neu'").fetchone()[0]
+        unsicher = con.execute("SELECT COUNT(*) FROM belege WHERE status='unsicher'").fetchone()[0]
         portal = con.execute("SELECT COUNT(*) FROM belege WHERE status='portal'").fetchone()[0]
         quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
         letzter = bh.einstellung(con, "letzter_lauf")
@@ -6750,6 +6754,8 @@ class App(BaseHTTPRequestHandler):
             todo.append((f"{z['vorschlag']} Vorschläge bestätigen", f"/admin/buchhaltung/konten?monat={monat}&filter=vorschlag", "Prüfen"))
         if zu_pruefen:
             todo.append((f"{zu_pruefen} neue Belege kurz prüfen", "/admin/buchhaltung/belege?filter=neu", "Prüfen"))
+        if unsicher:
+            todo.insert(0, (f"{unsicher} Dokument(e): Ist das eine Rechnung?", "/admin/buchhaltung/belege?filter=unsicher", "Ansehen"))
         if portal:
             todo.append((f"{portal} Rechnungen liegen nur im Kundenportal", "/admin/buchhaltung/belege?filter=portal", "Ansehen"))
         if not z["gesamt"]:
@@ -6833,6 +6839,7 @@ class App(BaseHTTPRequestHandler):
         domains = bh.einstellung(con, "eigene_domains")
         belege_adresse = bh.einstellung(con, "belege_adresse")
         erinnerung_an = bh.einstellung(con, "erinnerung_an")
+        gelernt = con.execute("SELECT * FROM gelernt ORDER BY erstellt DESC").fetchall()
         con.close()
         karten, dialoge = [], []
         for q in quellen:
@@ -6876,6 +6883,17 @@ class App(BaseHTTPRequestHandler):
                 <p class="vw-klein">Am 3. jedes Monats kommt eine Mail (und eine Push-Nachricht aufs Handy), was für den Vormonat noch fehlt. Leer lassen = Adresse aus den Einstellungen für die Zeiterfassung.</p>
                 <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
             </form>
+        </details>
+        <details class="vw-karte vw-aufklapp" id="gelernt">
+            <summary>Rechnungserkennung: was das System gelernt hat ({len(gelernt)})</summary>
+            <p class="vw-klein">Ein PDF wird nur übernommen, wenn es wie eine Rechnung aussieht (Rechnungsnummer, Datum, Endbetrag, MwSt …). BWA, Umsatzberichte, Mahnungen, Angebote, Lieferscheine, AGB usw. werden übersprungen. Unklare Fälle landen unter Belege → „Rechnung?“. Was du dort entscheidest, merkt sich das System hier.</p>
+            {('<div class="vw-tabelle-wrap vw-ohne-rand"><table class="vw-tabelle"><tr><th>Absender</th><th>Dokumentart</th><th>Entscheidung</th><th></th></tr>' + ''.join(
+                f"""<tr><td>{esc(r['absender'] if r['absender'] != '*' else 'jeder Absender')}</td><td>{esc(r['titel'] if r['titel'] != '*' else 'alles')}<small class="vw-klein-block">{esc(r['beispiel'])}</small></td>
+                <td>{'<span class="vw-marke gruen">Rechnung</span>' if r['urteil'] == 'ja' else '<span class="vw-marke grau">überspringen</span>'}</td>
+                <td><form method="post" action="/admin/buchhaltung/erkennung/regel-loeschen"><input type="hidden" name="absender" value="{esc(r['absender'])}"><input type="hidden" name="titel" value="{esc(r['titel'])}"><button class="vw-leise" type="submit">Vergessen</button></form></td></tr>"""
+                for r in gelernt) + '</table></div>') if gelernt else '<p class="vw-leer">Noch nichts gelernt.</p>'}
+            <form method="post" action="/admin/buchhaltung/erkennung/neu-pruefen" class="vw-knopfreihe" data-vw-confirm="Alle noch nicht bestätigten Belege aus Postfächern mit der aktuellen Erkennung neu prüfen? Nichts wird gelöscht.">
+                <button class="button" type="submit">Alle Belege neu prüfen</button></form>
         </details>
         <p class="vw-klein">Weitere Quellenarten (z. B. PayPal, Kassensystem, Online-Shops) lassen sich hier ergänzen – sag Bescheid, welche du brauchst.</p>
         <dialog class="vw-dialog" id="neueQuelle">
@@ -6968,14 +6986,15 @@ class App(BaseHTTPRequestHandler):
         if not self.is_admin():
             return self.redirect("/admin/login")
         query = query or {}
-        filt = self.query_text(query, "filter") or "neu"
+        filt = self.query_text(query, "filter")
         suche = self.query_text(query, "q")
         con = bh.db()
         zahlen = {r["status"]: r["n"] for r in con.execute("SELECT status, COUNT(*) n FROM belege GROUP BY status")}
+        filt = filt or ("unsicher" if zahlen.get("unsicher") else "neu")
         belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
         bedingung = {
-            "neu": "status='neu'", "portal": "status='portal'", "eingang": "art IN ('ER','GS') AND status NOT IN ('portal','doppelt','ignoriert')",
-            "ausgang": "art='AR' AND status NOT IN ('portal','doppelt','ignoriert')", "alle": "1=1", "ignoriert": "status IN ('ignoriert','doppelt')",
+            "neu": "status='neu'", "unsicher": "status='unsicher'", "portal": "status='portal'", "eingang": "art IN ('ER','GS') AND status NOT IN ('portal','doppelt','ignoriert','unsicher')",
+            "ausgang": "art='AR' AND status NOT IN ('portal','doppelt','ignoriert','unsicher')", "alle": "1=1", "ignoriert": "status IN ('ignoriert','doppelt')",
         }.get(filt, "status='neu'")
         zeilen = con.execute(f"SELECT * FROM belege WHERE {bedingung} ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC LIMIT 600").fetchall()
         con.close()
@@ -6984,7 +7003,7 @@ class App(BaseHTTPRequestHandler):
             zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
         if filt == "offen":
             zeilen = [b for b in zeilen if b["id"] not in belegt]
-        chips = [("neu", f"Zu prüfen ({zahlen.get('neu', 0)})"), ("eingang", "Eingang"), ("ausgang", "Ausgang"), ("portal", f"Im Portal holen ({zahlen.get('portal', 0)})"),
+        chips = ([("unsicher", f"Rechnung? ({zahlen['unsicher']})")] if zahlen.get("unsicher") else []) + [("neu", f"Zu prüfen ({zahlen.get('neu', 0)})"), ("eingang", "Eingang"), ("ausgang", "Ausgang"), ("portal", f"Im Portal holen ({zahlen.get('portal', 0)})"),
                  ("alle", "Alle"), ("ignoriert", "Aussortiert")]
         chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/belege?filter={k}">{esc(t)}</a>' for k, t in chips)
         liste = []
@@ -7002,8 +7021,12 @@ class App(BaseHTTPRequestHandler):
                 marken.append('<span class="vw-marke blau">bar</span>')
             if b["dauer"]:
                 marken.append('<span class="vw-marke blau">Dauerbeleg</span>')
+            if b["status"] == "unsicher":
+                marken.append('<span class="vw-marke honig">Rechnung?</span>')
             if b["status"] in ("doppelt", "ignoriert"):
                 marken.append(f'<span class="vw-marke grau">{esc(bh.STATUS_TEXT.get(b["status"], b["status"]))}</span>')
+            if b["status"] in ("unsicher", "ignoriert") and b["notiz"]:
+                marken.append(f'<small class="bh-grund">{esc(b["notiz"][:90])}</small>')
             liste.append(f"""
             <div class="bh-beleg" id="b-{b['id']}">
                 <button type="button" class="bh-beleg-knopf" data-bh-beleg="{b['id']}">
@@ -7020,6 +7043,8 @@ class App(BaseHTTPRequestHandler):
         <form method="get" action="/admin/buchhaltung/belege" class="vw-werkzeug"><input type="hidden" name="filter" value="{esc(filt)}">
             <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Rechnungsnummer oder Betrag …"></label></form>
         <div class="vw-chips">{chips_html}</div>
+        {'<p class="vw-klein">Diese Dokumente sehen nicht eindeutig nach Rechnung aus. Klick drauf und entscheide – das System merkt sich deine Antwort für ähnliche Dokumente.</p>' if filt == 'unsicher' else ''}
+        {'<p class="vw-klein">Hier landet alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
         <div class="bh-belegliste">{''.join(liste) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
         {self.bh_upload_dialog()}
         <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
@@ -7064,6 +7089,17 @@ class App(BaseHTTPRequestHandler):
             vorschau += f'<p class="vw-klein"><a href="/admin/buchhaltung/datei?id={b["id"]}" target="_blank" rel="noopener">In neuem Fenster öffnen</a>{" · <a href=/admin/buchhaltung/datei?id=" + str(b["id"]) + "&xml=1>E-Rechnung (XML)</a>" if b["xml_datei"] else ""} · Dateiname im Export: <code>{esc(bh.beleg_dateiname(b))}</code></p>'
         else:
             vorschau = f'<div class="vw-status warn">Diese Rechnung liegt nur im Kundenportal. <a href="{esc(b["portal_link"])}" target="_blank" rel="noopener">Portal öffnen</a>, PDF herunterladen und hier hochladen – dann ersetzt es diesen Hinweis.</div>'
+        absender = parseaddr(b["mail_von"] or "")[1]
+        frage = ""
+        if b["status"] == "unsicher":
+            frage = f"""
+        <form method="post" action="/admin/buchhaltung/beleg/urteil" class="bh-frage">
+            <input type="hidden" name="id" value="{b['id']}">
+            <b>Ist das eine Rechnung?</b><small>{esc(b['notiz'] or '')}</small>
+            {f'<label class="vw-schalter bh-schalter"><input type="checkbox" name="ganzer_absender" value="1"><span>Gilt für alles von {esc(absender)}</span></label>' if absender else ''}
+            <div class="vw-knopfreihe"><button class="primary" type="submit" name="urteil" value="ja">Ja, Rechnung</button>
+                <button class="button" type="submit" name="urteil" value="nein">Keine Rechnung</button></div>
+        </form>"""
         herkunft = f'{esc(b["quelle"])}' + (f' · Mail von {esc(b["mail_von"])} „{esc(b["mail_betreff"])}“ ({esc(b["mail_datum"])})' if b["mail_von"] else "")
         arten = "".join(f'<option value="{k}" {"selected" if b["art"] == k else ""}>{v}</option>' for k, v in bh.ARTEN.items())
         zuord = "".join(f'<li>{esc(bh.datum_de(bu["datum"]))} · {esc(bh.betrag_text(bu["betrag"]))} · {esc(bu["gegenpartei"])}</li>' for bu in buchungen)
@@ -7074,7 +7110,7 @@ class App(BaseHTTPRequestHandler):
                 <input type="hidden" name="ersetzt" value="{b['id']}"><input type="file" name="datei" accept=".pdf,.xml,image/*" required><button class="primary" type="submit">PDF hochladen</button></form>"""
         html_text = f"""
         <div class="vw-dialog-kopf"><h3>{esc(b['lieferant'] or 'Beleg')}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-        <div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>
+        {frage}<div class="bh-vorschau-wrap">{vorschau}{portal_upload}</div>
         <form method="post" action="/admin/buchhaltung/beleg/speichern" class="vw-formular">
             <input type="hidden" name="id" value="{b['id']}">
             <div class="vw-zwei"><label>Art<select name="art">{arten}</select></label><label>Lieferant / Kunde<input name="lieferant" value="{esc(b['lieferant'])}"></label></div>
@@ -7090,7 +7126,8 @@ class App(BaseHTTPRequestHandler):
         </form>
         <form method="post" action="/admin/buchhaltung/beleg/speichern" class="vw-gefahrzone">
             <input type="hidden" name="id" value="{b['id']}">
-            <span>{'Kein Beleg (z. B. Werbung, AGB)' if b['status'] not in ('ignoriert', 'doppelt') else 'Aussortiert – wieder aufnehmen?'}</span>
+            <span>{'Keine Rechnung (z. B. BWA, Werbung, AGB)' if b['status'] not in ('ignoriert', 'doppelt') else 'Aussortiert – wieder aufnehmen?'}
+                {f'<label class="vw-schalter bh-schalter"><input type="checkbox" name="ganzer_absender" value="1"><span>Alles von {esc(absender)} künftig überspringen</span></label>' if absender and b['status'] not in ('ignoriert', 'doppelt') else ''}</span>
             <button class="{'danger' if b['status'] not in ('ignoriert', 'doppelt') else 'button'}" type="submit" name="status" value="{'ignoriert' if b['status'] not in ('ignoriert', 'doppelt') else 'neu'}">{'Aussortieren' if b['status'] not in ('ignoriert', 'doppelt') else 'Wieder aufnehmen'}</button>
         </form>"""
         if self.query_text(query, "embed"):
@@ -7129,7 +7166,7 @@ class App(BaseHTTPRequestHandler):
             mime = {".pdf": "application/pdf", ".xml": "application/xml", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".heic": "image/heic", ".webp": "image/webp"}.get(endung, "")
             if not mime:
                 continue
-            beleg_id, neu, _ = bh.beleg_anlegen(datei.content, name, mime, quelle, None, None, "auto", True, vorgaben=vorgaben or {})
+            beleg_id, neu, _ = bh.beleg_anlegen(datei.content, name, mime, quelle, None, None, "auto", True, vorgaben={**(vorgaben or {}), "ohne_pruefung": True})
             if beleg_id:
                 ids.append((beleg_id, neu))
         return ids
@@ -7187,10 +7224,48 @@ class App(BaseHTTPRequestHandler):
                 "dauer_muster": self.form_value(form, "dauer_muster").strip()[:120],
                 "notiz": self.form_value(form, "notiz").strip()[:300],
             })
+        con = bh.db()
+        vorher = con.execute("SELECT status FROM belege WHERE id=?", (int(bid),)).fetchone()
+        con.close()
         bh.beleg_aendern(int(bid), felder)
+        ganz = bool(self.form_value(form, "ganzer_absender"))
+        if felder["status"] == "ignoriert":
+            bh.lernen(int(bid), "nein", ganz)
+        elif vorher and vorher["status"] in ("ignoriert", "unsicher"):
+            bh.lernen(int(bid), "ja")
         bh.abgleichen()
-        text = "Aussortiert." if felder["status"] == "ignoriert" else "Gespeichert."
+        text = ("Aussortiert. Ähnliche Dokumente werden künftig übersprungen." if felder["status"] == "ignoriert" else "Gespeichert.")
         self.redirect("/admin/buchhaltung/belege?filter=neu&msg=" + quote_plus(text))
+
+    def handle_bh_beleg_urteil(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        bid = self.form_value(form, "id").strip()
+        urteil = self.form_value(form, "urteil")
+        if not bid.isdigit() or urteil not in ("ja", "nein"):
+            return self.redirect("/admin/buchhaltung/belege")
+        bh.beleg_aendern(int(bid), {"status": "neu" if urteil == "ja" else "ignoriert", "notiz": "" if urteil == "ja" else "Keine Rechnung (von dir aussortiert)"})
+        bh.lernen(int(bid), urteil, bool(self.form_value(form, "ganzer_absender")))
+        bh.abgleichen()
+        text = "Als Rechnung übernommen." if urteil == "ja" else "Aussortiert."
+        self.redirect("/admin/buchhaltung/belege?msg=" + quote_plus(text + " Gemerkt für ähnliche Dokumente."))
+
+    def handle_bh_erkennung(self, aktion):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        if aktion == "neu-pruefen":
+            e = bh.belege_neu_pruefen()
+            return self.redirect("/admin/buchhaltung/belege?msg=" + quote_plus(
+                f"{e['geprueft']} Belege neu geprüft: {e['aussortiert']} aussortiert, {e['unsicher']} zum Ansehen markiert."))
+        if aktion == "regel-loeschen":
+            con = bh.db()
+            con.execute("DELETE FROM gelernt WHERE absender=? AND titel=?", (self.form_value(form, "absender"), self.form_value(form, "titel")))
+            con.commit()
+            con.close()
+            return self.redirect("/admin/buchhaltung/quellen?msg=" + quote_plus("Gelernte Regel entfernt.") + "#gelernt")
+        self.redirect("/admin/buchhaltung/quellen")
 
     # ---------------------------------------------------------- Kontoauszüge & Abgleich
     def show_bh_konten(self, query=None):
@@ -7842,6 +7917,12 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_beleg_upload()
             if path == "/admin/buchhaltung/beleg/speichern":
                 return self.handle_bh_beleg_speichern()
+            if path == "/admin/buchhaltung/beleg/urteil":
+                return self.handle_bh_beleg_urteil()
+            if path == "/admin/buchhaltung/erkennung/neu-pruefen":
+                return self.handle_bh_erkennung("neu-pruefen")
+            if path == "/admin/buchhaltung/erkennung/regel-loeschen":
+                return self.handle_bh_erkennung("regel-loeschen")
             if path == "/admin/buchhaltung/konto/upload":
                 return self.handle_bh_konto_upload()
             if path == "/admin/buchhaltung/buchung/zuordnen":

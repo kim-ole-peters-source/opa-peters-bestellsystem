@@ -3089,3 +3089,9 @@ a.vw-standort-karte:hover { border-color: var(--op-braun); transform: translateY
 .bh-pruef td small.plus{color:#3c7a4a}
 .bh-pruef tr.bh-extra td{background:#fdf1ef}
 .vw-marke.honig{background:#F0C072;color:#2A1F18}
+
+/* Buchhaltung: Ist das eine Rechnung? */
+.bh-frage{display:grid;gap:8px;background:#FDF3DF;border:1px solid #F0C072;border-radius:12px;padding:12px 14px;margin-bottom:12px}
+.bh-frage small{color:#6b5d52}
+.bh-grund{display:block;font-size:.78rem;color:#7a6c61;font-weight:400;flex-basis:100%}
+.vw-gefahrzone .bh-schalter{margin-top:6px;font-size:.85rem}
