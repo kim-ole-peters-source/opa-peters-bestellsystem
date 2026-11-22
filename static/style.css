@@ -3208,3 +3208,10 @@ tr.ist-gewaehlt td{background:#FDF3DF}
 .bh-sammelleiste{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;width:min(1100px,calc(100% - 32px));box-sizing:border-box;margin:0}
 @media (max-width:760px){.bh-sammelleiste{bottom:84px}}
 @media (max-width:760px){.bh-sammelleiste{gap:8px;padding:10px 12px}.bh-sammelleiste>b{flex:1 0 auto}.bh-sammelleiste .bh-sammel-immer{flex:1 0 100%;font-size:13px}.bh-sammelleiste>button{flex:1 1 40%;padding:9px 10px;font-size:13px;min-height:0}.bh-sammelleiste [data-sammel-aufheben]{flex:0 0 auto;order:-1}}
+.bh-kachel-bild{height:150px;padding:0;overflow:hidden;background:#fff;align-items:stretch;justify-content:flex-start}
+.bh-kachel-bild img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}
+.bh-kachel-ersatz{margin:auto;text-align:center;font-size:13px;font-weight:600;color:var(--op-grau);line-height:1.4}
+.bh-kachel-name{line-height:1.25}
+.bh-art-text{align-self:flex-start;font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;background:#E8EEF6;color:#3F5A7A}
+.bh-art-text.AR{background:#E3F1E6;color:#1F5F33}
+.bh-art-text.GS{background:#FCEFD6;color:#7A5414}

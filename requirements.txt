@@ -4,3 +4,4 @@ pywebpush
 pypdf
 cryptography
 xlrd
+pypdfium2

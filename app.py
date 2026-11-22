@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-sammel"
+ASSET_VERSION = "2026-11-22-vorschau"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -4122,6 +4122,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_status(query=parse_qs(parsed.query))
         if path in ("/admin/buchhaltung/quellen", "/admin/buchhaltung/einstellungen"):
             return self.show_bh_einstellungen(query=parse_qs(parsed.query))
+        if path == "/admin/buchhaltung/vorschau":
+            return self.show_bh_vorschau(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/lieferanten":
             return self.show_bh_lieferanten(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/belege":
@@ -8802,10 +8804,15 @@ class App(BaseHTTPRequestHandler):
             else:
                 status = '<span class="bh-status frage">Zahlung offen</span>'
             endung = os.path.splitext(b["datei"] or "")[1].lower().lstrip(".") or "pdf"
+            if endung == "xml":
+                bild = '<span class="bh-kachel-ersatz">E-Rechnung<br>(XML)</span>'
+            else:
+                bild = f'<img src="/admin/buchhaltung/vorschau?id={b["id"]}" alt="" loading="lazy">'
             kacheln.append(f"""
             <button type="button" class="bh-kachel" data-bh-beleg="{b['id']}">
-                <span class="bh-kachel-bild"><span class="bh-art {b['art']}">{esc(bh.ARTEN.get(b['art'], b['art']))}</span><small>{esc(endung.upper())}{' · Foto' if b['bar'] else ''}</small></span>
-                <b>{esc(b['lieferant'] or 'Unbekannt')}</b>
+                <span class="bh-kachel-bild">{bild}</span>
+                <b class="bh-kachel-name">{esc(b['lieferant'] or 'Unbekannt')}</b>
+                <span class="bh-art-text {b['art']}">{esc(bh.ARTEN.get(b['art'], b['art']))}{' · Foto' if endung in ('jpg', 'jpeg', 'png', 'webp', 'heic') else ''}</span>
                 <small>{esc(bh.datum_de(b['datum']))} · {esc(b['rechnungsnr'] or 'ohne Nr.')}</small>
                 <span class="bh-kachel-fuss"><b>{esc(bh.betrag_text(b['betrag'], b['waehrung']))}</b>{status}</span>
             </button>""")
@@ -9161,6 +9168,28 @@ class App(BaseHTTPRequestHandler):
         if neue_regeln:
             text += f" Regeln angelegt für: {', '.join(neue_regeln[:5])}{' …' if len(neue_regeln) > 5 else ''}."
         self.redirect(zurueck + "msg=" + quote_plus(text))
+
+    def show_bh_vorschau(self, query=None):
+        if not self.is_admin():
+            return self.send_html(b"", 403)
+        bid = self.query_text(query or {}, "id")
+        daten = bh.vorschau(int(bid)) if bid.isdigit() else None
+        if not daten:
+            ersatz = ('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="240" viewBox="0 0 360 240"><rect width="360" height="240" fill="#F4F1EC"/>'
+                      '<text x="180" y="128" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#6B5D52">Keine Vorschau</text></svg>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(ersatz)))
+            self.send_header("Cache-Control", "private, max-age=600")
+            self.end_headers()
+            self.wfile.write(ersatz)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(daten)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(daten)
 
 
     def do_POST(self):

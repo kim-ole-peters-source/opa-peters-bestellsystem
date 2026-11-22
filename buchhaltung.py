@@ -448,9 +448,13 @@ def text_auslesen(text):
     if not text:
         return daten
     kopf = text[:3000]
-    m = NR_MUSTER.search(text)
-    if m:
-        daten["rechnungsnr"] = m.group(1).strip(".")
+    for m in NR_MUSTER.finditer(text):
+        kandidat = m.group(1).strip(".")
+        # keine Datumsangaben, keine Beschriftungen ("Kundennr", "Rechnungsdatum") als Nummer übernehmen
+        if not re.search(r"\d", kandidat) or re.match(r"^\d{1,2}[./]\d{1,2}[./]\d{2,4}", kandidat) or re.search(r"datum|kunden|nummer|date", kandidat, re.I):
+            continue
+        daten["rechnungsnr"] = kandidat
+        break
     m = DATUM_MUSTER.search(text)
     if m:
         daten["datum"] = datum_iso(m.group(1).replace(" ", ""))
@@ -1782,6 +1786,8 @@ def alles_leeren(grund="Buchhaltung geleert"):
     con.commit()
     con.execute("VACUUM")
     con.close()
+    import shutil
+    shutil.rmtree(os.path.join(BASIS, "vorschau"), ignore_errors=True)
     for wurzel, ordner, dateien in os.walk(ARCHIV, topdown=False):
         for name in dateien:
             try:
@@ -1795,3 +1801,50 @@ def alles_leeren(grund="Buchhaltung geleert"):
             except OSError:
                 pass
     return ziel
+
+
+# ---------------------------------------------------------------- Vorschaubilder
+
+def vorschau(beleg_id, breite=360):
+    """Kleines PNG der ersten Seite (PDF) bzw. des Fotos. Wird einmal erzeugt und dann gespeichert. -> Bytes oder None"""
+    ordner = os.path.join(BASIS, "vorschau")
+    ziel = os.path.join(ordner, f"{int(beleg_id)}_{breite}.png")
+    if os.path.exists(ziel):
+        with open(ziel, "rb") as f:
+            return f.read()
+    con = db()
+    b = con.execute("SELECT * FROM belege WHERE id=?", (beleg_id,)).fetchone()
+    con.close()
+    if not b:
+        return None
+    pfad = beleg_pfad(b)
+    if not pfad or not os.path.exists(pfad):
+        return None
+    endung = os.path.splitext(pfad)[1].lower()
+    try:
+        from PIL import Image, ImageOps
+        if endung == ".pdf":
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(pfad)
+            try:
+                seite = pdf[0]
+                skala = breite / max(1.0, seite.get_width())
+                bild = seite.render(scale=skala * 2).to_pil()
+            finally:
+                pdf.close()
+        elif endung in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"):
+            bild = ImageOps.exif_transpose(Image.open(pfad))
+        else:
+            return None
+        bild = bild.convert("RGB")
+        bild.thumbnail((breite * 2, breite * 3))
+        os.makedirs(ordner, exist_ok=True)
+        puffer = io.BytesIO()
+        bild.save(puffer, "PNG", optimize=True)
+        daten = puffer.getvalue()
+        with open(ziel, "wb") as f:
+            f.write(daten)
+        return daten
+    except Exception:
+        traceback.print_exc()
+        return None
