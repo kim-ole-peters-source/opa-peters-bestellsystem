@@ -15,6 +15,7 @@ Grundsätze:
 
 import csv
 import email
+import email.message
 import hashlib
 import imaplib
 import io
@@ -62,6 +63,12 @@ ANBIETER = {
 # Quellenarten. Neue Arten (z. B. PayPal, Kasse) werden hier ergänzt.
 QUELLEN_ARTEN = {
     "imap": "E-Mail-Postfach",
+    "backring": "Backring-Nord-Kundenportal",
+}
+
+# Lieferanten-Portale, aus denen Rechnungen direkt abgeholt werden (Anmeldung mit Kundennummer + Passwort)
+PORTALE = {
+    "backring": {"name": "Backring Nord", "basis": "https://portal.backring.de/portal/", "lieferant": "Backring Nord"},
 }
 
 RECHNUNGS_WORTE = re.compile(r"rechn|invoice|beleg|gutschrift|faktur|receipt|quittung|abrechnung|bill\b|zahlungsbest", re.I)
@@ -659,7 +666,7 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
             """INSERT INTO belege (sha256, art, lieferant, rechnungsnr, datum, betrag, waehrung, original_name, mime, quelle, quelle_id,
                mail_id, mail_betreff, mail_von, mail_datum, status, sicher, bar, notiz, text_auszug, erstellt, geaendert)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (sha, vorgaben.get("art") or art, vorgaben.get("lieferant") or lieferant[:80], daten.get("rechnungsnr", "")[:60],
+            (sha, vorgaben.get("art") or art, vorgaben.get("lieferant") or lieferant[:80], (vorgaben.get("rechnungsnr") or daten.get("rechnungsnr", ""))[:60],
              vorgaben.get("datum") or daten.get("datum") or (mail.get("datum") or "")[:10] or (jetzt_t[:10] if vorgaben.get("bar") else ""), vorgaben.get("betrag") if vorgaben.get("betrag") is not None else daten.get("betrag"),
              daten.get("waehrung") or "EUR", (dateiname or "")[:200], mime, quelle[:80], quelle_id, mail.get("id", "")[:300],
              mail.get("betreff", "")[:300], mail.get("von", "")[:300], mail.get("datum", ""), status_neu, 1 if daten.get("sicher") else 0,
@@ -814,6 +821,8 @@ def quelle_testen(quelle_id):
     con.close()
     if not quelle:
         return False, "Quelle nicht gefunden."
+    if quelle["art"] in PORTALE:
+        return portal_testen(quelle)
     try:
         v = imap_verbinden(quelle)
         ordner = ordner_fuer_quelle(v, quelle["ordner"])
@@ -955,11 +964,223 @@ def mail_verarbeiten(con, quelle, nachricht, bericht=None):
     return neu
 
 
+# ---------------------------------------------------------------- Lieferanten-Portale (Backring Nord)
+
+class PortalFehler(Exception):
+    pass
+
+
+def _portal_oeffner():
+    import http.cookiejar
+    import urllib.request
+    oeffner = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    oeffner.addheaders = [("User-Agent", "Mozilla/5.0 (OP Bestellung Belegabruf)"), ("Accept-Language", "de-DE,de;q=0.9")]
+    return oeffner
+
+
+def _portal_holen(oeffner, url, daten=None, zeit=40):
+    import urllib.parse
+    koerper = urllib.parse.urlencode(daten).encode() if daten is not None else None
+    with oeffner.open(url, data=koerper, timeout=zeit) as antwort:
+        return antwort.read(), antwort.headers.get("Content-Type", ""), antwort.geturl()
+
+
+def _login_formular(html):
+    """Sucht im Anmelde-HTML das Formular mit dem Passwortfeld -> (action, {name: wert}, submit_name, submit_wert)"""
+    from html.parser import HTMLParser
+
+    class Leser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.formulare, self.aktuell = [], None
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "form":
+                self.aktuell = {"action": a.get("action") or "", "felder": {}, "submit": None, "passwort": False}
+                self.formulare.append(self.aktuell)
+            elif self.aktuell is not None and tag in ("input", "button") and a.get("name"):
+                typ = (a.get("type") or ("submit" if tag == "button" else "text")).lower()
+                if typ == "submit":
+                    if self.aktuell["submit"] is None:
+                        self.aktuell["submit"] = (a["name"], a.get("value") or "")
+                elif typ not in ("button", "checkbox", "radio"):
+                    self.aktuell["felder"][a["name"]] = a.get("value") or ""
+                    if typ == "password":
+                        self.aktuell["passwort"] = True
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.aktuell = None
+
+    leser = Leser()
+    leser.feed(html)
+    for f in leser.formulare:
+        if f["passwort"] and "customer_password" in f["felder"]:
+            return f
+    raise PortalFehler("Anmeldeseite hat sich verändert – Anmeldeformular nicht gefunden.")
+
+
+def portal_anmelden(quelle):
+    """Meldet sich im Backring-Kundenportal an. -> urllib-Öffner mit Sitzung"""
+    import urllib.parse
+    portal = PORTALE.get(quelle["art"]) or PORTALE["backring"]
+    basis = portal["basis"]
+    oeffner = _portal_oeffner()
+    html, _, _ = _portal_holen(oeffner, basis + "index.html")
+    form = _login_formular(html.decode("utf-8", "replace"))
+    daten = dict(form["felder"])
+    daten["customer_id"] = (quelle["benutzer"] or "").strip()
+    daten["customer_ident"] = (quelle["ordner"] or "").strip() if (quelle["ordner"] or "").strip() not in ("*", "INBOX") else ""
+    daten["customer_password"] = entschluesseln(quelle["geheim"])
+    if form["submit"]:
+        daten[form["submit"][0]] = form["submit"][1]
+    ziel = urllib.parse.urljoin(basis + "index.html", form["action"] or "index.html")
+    antwort, _, _ = _portal_holen(oeffner, ziel, daten)
+    text = antwort.decode("utf-8", "replace")
+    if "logout.html" not in text and "invoices.html" not in text:
+        if "accept-terms" in text and "customer_password" not in text:
+            raise PortalFehler("Das Portal möchte, dass du einmal die AGB bestätigst. Bitte einmal selbst im Portal anmelden und bestätigen.")
+        raise PortalFehler("Anmeldung abgelehnt – Kundennummer oder Passwort prüfen.")
+    return oeffner
+
+
+def _betrag_cent(text):
+    t = (text or "").replace("€", "").replace("EUR", "").replace("\xa0", " ").strip()
+    m = re.search(r"(-?)\s*(\d{1,3}(?:\.\d{3})*|\d+),(\d{2})", t)
+    if not m:
+        return None
+    wert = int(m.group(2).replace(".", "")) * 100 + int(m.group(3))
+    return -wert if m.group(1) else wert
+
+
+def portal_rechnungen_lesen(html):
+    """Liest die Liste im Rechnungsarchiv -> [{id, datum, nummer, betrag, typ}]"""
+    import html as html_modul
+    liste = []
+    for zeile in re.findall(r"<tr\b.*?</tr>", html, re.S | re.I):
+        m_id = re.search(r"invoices-download\.html\?id=(\d+)", zeile)
+        if not m_id:
+            continue
+        m_datum = re.search(r'id="doc-date"[^>]*>\s*(\d{1,2}\.\d{1,2}\.\d{4})', zeile)
+        m_typ = re.search(r'data-filter="([^"]*)"', zeile)
+        m_kopf = re.search(r"<h\d[^>]*>\s*([^<]*?)\s*</h\d>", zeile, re.S)
+        nummer, betrag = "", None
+        if m_kopf:
+            kopf = html_modul.unescape(m_kopf.group(1))
+            m_nr = re.match(r"\s*([^\s(]+)", kopf)
+            nummer = m_nr.group(1) if m_nr else ""
+            m_b = re.search(r"\(([^)]*)\)", kopf)
+            betrag = _betrag_cent(m_b.group(1)) if m_b else None
+        liste.append({"id": m_id.group(1), "datum": datum_iso(m_datum.group(1)) if m_datum else "",
+                      "nummer": nummer, "betrag": betrag, "typ": html_modul.unescape(m_typ.group(1)) if m_typ else ""})
+    return liste
+
+
+def portal_abholen(quelle_id):
+    """Holt neue Rechnungen aus dem Lieferanten-Portal. Jede Rechnung wird genau einmal geladen."""
+    con = db()
+    quelle = con.execute("SELECT * FROM quellen WHERE id=?", (quelle_id,)).fetchone()
+    if not quelle or not quelle["aktiv"]:
+        con.close()
+        return 0, "pausiert"
+    portal = PORTALE.get(quelle["art"]) or PORTALE["backring"]
+    basis = portal["basis"]
+    neu = vorhanden = fehler = 0
+    try:
+        oeffner = portal_anmelden(quelle)
+        start = quelle["start_datum"] or (jetzt() - timedelta(days=60)).date().isoformat()
+        d = datetime.strptime(start, "%Y-%m-%d")
+        filter_daten = {
+            "bela_invoices_form_send": "1", "bela_invoices_doc": "0",  # 0 = nur Rechnungen (keine Lieferscheine)
+            "bela_search_input_field_datemin": d.strftime("%d.%m.%Y"), "bela_search_input_field_datemax": "",
+            "bela_search_input_field_number": "", "bela_search_input_field_amountmin": "",
+            "bela_search_input_field_amountmax": "", "bela_invoices_group": "0",
+        }
+        html, _, _ = _portal_holen(oeffner, basis + "invoices.html", filter_daten)
+        rechnungen = portal_rechnungen_lesen(html.decode("utf-8", "replace"))
+        if not rechnungen and "invoices-download" not in html.decode("utf-8", "replace") and "logout.html" not in html.decode("utf-8", "replace"):
+            raise PortalFehler("Rechnungsarchiv konnte nicht gelesen werden (Seite verändert?).")
+        for r in rechnungen:
+            schluessel = (quelle_id, "portal", "", r["id"])
+            if con.execute("SELECT 1 FROM quellen_gesehen WHERE quelle_id=? AND ordner=? AND uidvalidity=? AND uid=?", schluessel).fetchone():
+                continue
+            kopf = email.message.Message()
+            kopf["From"] = f"{portal['name']} Kundenportal"
+            kopf["Subject"] = f"Rechnung {r['nummer']}" + (f" ({betrag_text(r['betrag'])})" if r["betrag"] is not None else "")
+            if r["datum"]:
+                kopf["Date"] = datetime.strptime(r["datum"], "%Y-%m-%d").strftime("%a, %d %b %Y 12:00:00 +0100")
+            try:
+                inhalt, typ, _ = _portal_holen(oeffner, basis + f"invoices-download.html?id={r['id']}", zeit=90)
+                if not inhalt.startswith(b"%PDF"):
+                    raise PortalFehler("Download war keine PDF-Datei")
+                name = f"{dateiname_teil(portal['name'])}_{dateiname_teil(r['nummer'] or r['id'])}.pdf"
+                mail = {"von": f"{portal['name']} Kundenportal", "von_adresse": "portal." + quelle["art"],
+                        "betreff": kopf["Subject"], "datum": r["datum"]}
+                vorgaben = {"ohne_pruefung": True, "lieferant": portal["lieferant"], "art": "ER"}
+                if r["nummer"]:
+                    vorgaben["rechnungsnr"] = r["nummer"]
+                if r["datum"]:
+                    vorgaben["datum"] = r["datum"]
+                if r["betrag"] is not None:
+                    vorgaben["betrag"] = abs(r["betrag"])
+                    if r["betrag"] < 0:
+                        vorgaben["art"] = "GS"  # Gutschrift
+                con.commit()
+                beleg_id, ist_neu, grund = beleg_anlegen(inhalt, name, "application/pdf", quelle=quelle["name"], quelle_id=quelle_id,
+                                                         mail=mail, richtung="eingang", alles_ist_beleg=True, vorgaben=vorgaben)
+                if ist_neu:
+                    neu += 1
+                    _protokoll_eintrag(con, quelle_id, "Rechnungsarchiv", r["id"], kopf, "beleg", f"{name}: neuer Beleg", str(beleg_id or ""))
+                else:
+                    vorhanden += 1
+                    _protokoll_eintrag(con, quelle_id, "Rechnungsarchiv", r["id"], kopf, "vorhanden", f"{name}: {grund}", str(beleg_id or ""))
+                con.execute("INSERT OR IGNORE INTO quellen_gesehen VALUES (?, ?, ?, ?)", schluessel)
+            except Exception as exc:
+                fehler += 1
+                _protokoll_eintrag(con, quelle_id, "Rechnungsarchiv", r["id"], kopf, "fehler", f"Fehler beim Laden: {exc}")
+            con.commit()
+        # „Rechnung liegt im Portal“-Hinweise aus Mails sind jetzt erledigt
+        stichwort = f"%{quelle['art']}%"
+        con.execute("UPDATE belege SET status='ignoriert', notiz='Erledigt – wird automatisch aus dem Kundenportal geholt', geaendert=? "
+                    "WHERE status='portal' AND (LOWER(COALESCE(portal_link,'')) LIKE ? OR LOWER(COALESCE(mail_von,'')) LIKE ? OR LOWER(COALESCE(lieferant,'')) LIKE ?)",
+                    (jetzt_text(), stichwort, stichwort, stichwort))
+        meldung = f"{len(rechnungen)} Rechnungen im Portal · {neu} neu"
+        if vorhanden:
+            meldung += f" · {vorhanden} schon da"
+        if fehler:
+            meldung += f" · {fehler} mit Fehler (nächster Lauf versucht es erneut)"
+        con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=0, gefunden=gefunden+? WHERE id=?", (jetzt_text(), meldung, neu, quelle_id))
+    except PortalFehler as exc:
+        meldung = str(exc)
+        con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=1 WHERE id=?", (jetzt_text(), meldung, quelle_id))
+    except Exception as exc:
+        meldung = f"Portal nicht erreichbar: {exc}"
+        protokolliere(con, "fehler", traceback.format_exc())
+        con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=1 WHERE id=?", (jetzt_text(), meldung, quelle_id))
+    con.commit()
+    con.close()
+    return neu, meldung
+
+
+def portal_testen(quelle):
+    try:
+        portal_anmelden(quelle)
+    except PortalFehler as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, f"Portal nicht erreichbar: {exc}"
+    return True, "Anmeldung im Portal klappt. Die Rechnungen werden jetzt abgeholt."
+
+
 def quelle_abholen(quelle_id, max_mails=1500):
     """Liest ein Postfach. Jede Mail wird genau einmal verarbeitet (gemerkt über UID).
     Fehlgeschlagene Mails werden beim nächsten Lauf erneut versucht (höchstens 3-mal)."""
     con = db()
     quelle = con.execute("SELECT * FROM quellen WHERE id=?", (quelle_id,)).fetchone()
+    if quelle and quelle["art"] in PORTALE:
+        con.close()
+        return portal_abholen(quelle_id)
     if not quelle or not quelle["aktiv"]:
         con.close()
         return 0, "pausiert"

@@ -7495,6 +7495,24 @@ class App(BaseHTTPRequestHandler):
                 <label class="vw-schalter bh-schalter"><input type="checkbox" name="alles_ist_beleg" value="1" {'checked' if q.get('alles_ist_beleg') else ''}><span>Eigenes Belege-Postfach: jeder Anhang ist ein Beleg</span></label>
             </div>"""
 
+    def bh_portal_formular(self, q=None):
+        q = q or {}
+        portale = "".join(f'<option value="{k}" {"selected" if k == (q.get("art") or "backring") else ""}>{esc(v["name"])}</option>' for k, v in bh.PORTALE.items())
+        start = q.get("start_datum") or (bh.jetzt().replace(day=1).date().isoformat())
+        ident = q.get("ordner") if q.get("ordner") not in (None, "*", "INBOX") else ""
+        return f"""
+            <input type="hidden" name="quelle_id" value="{q.get('id', '')}"><input type="hidden" name="portal" value="1">
+            <div class="vw-zwei">
+                <label>Portal<select name="portal_art">{portale}</select></label>
+                <label>Rechnungen holen ab<input type="date" name="start_datum" value="{esc(start)}"></label>
+            </div>
+            <div class="vw-zwei">
+                <label>Kundennummer *<input name="benutzer" required autocomplete="off" value="{esc(q.get('benutzer', ''))}"></label>
+                <label>Ident (optional)<input name="ident" autocomplete="off" value="{esc(ident)}" placeholder="meist leer lassen"></label>
+            </div>
+            <label>Passwort {'(leer lassen = unverändert)' if q.get('id') else '*'}<span class="password-wrap"><input class="password-field" type="password" name="passwort" autocomplete="new-password" {'required' if not q.get('id') else ''}><button type="button" class="password-toggle">Anzeigen</button></span></label>
+            <p class="vw-klein">Das System meldet sich jede Nacht im Portal an und lädt neue Rechnungen herunter (nur Rechnungen, keine Lieferscheine). Im Portal wird nichts verändert. Das Passwort wird verschlüsselt gespeichert.</p>"""
+
     def handle_bh_quelle(self, aktion):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -7503,6 +7521,38 @@ class App(BaseHTTPRequestHandler):
         zurueck = "/admin/buchhaltung/einstellungen"
         con = bh.db()
         try:
+            if aktion == "speichern" and self.form_value(form, "portal"):
+                art = self.form_value(form, "portal_art", "backring")
+                if art not in bh.PORTALE:
+                    return self.redirect(zurueck)
+                werte = {
+                    "name": f"{bh.PORTALE[art]['name']} Kundenportal", "anbieter": art, "host": bh.PORTALE[art]["basis"], "port": 443,
+                    "benutzer": self.form_value(form, "benutzer").strip(), "ordner": self.form_value(form, "ident").strip(),
+                    "alles_ist_beleg": 1, "richtung": "eingang", "start_datum": bh.datum_iso(self.form_value(form, "start_datum")),
+                }
+                if not werte["benutzer"]:
+                    return self.redirect(zurueck + "?error=" + quote_plus("Bitte die Kundennummer eingeben."))
+                passwort = self.form_value(form, "passwort")
+                if qid.isdigit():
+                    setze = ", ".join(f"{k}=?" for k in werte)
+                    con.execute(f"UPDATE quellen SET {setze}, art=?, letzter_lauf='' WHERE id=?", (*werte.values(), art, int(qid)))
+                    if passwort:
+                        con.execute("UPDATE quellen SET geheim=?, letzter_fehler=0 WHERE id=?", (bh.verschluesseln(passwort), int(qid)))
+                    neue_id = int(qid)
+                else:
+                    if not passwort:
+                        return self.redirect(zurueck + "?error=" + quote_plus("Bitte das Passwort eingeben."))
+                    neue_id = con.execute(
+                        f"INSERT INTO quellen ({', '.join(werte)}, art, geheim, erstellt) VALUES ({', '.join('?' for _ in werte)}, ?, ?, ?)",
+                        (*werte.values(), art, bh.verschluesseln(passwort), bh.jetzt_text())).lastrowid
+                bh.protokolliere(con, "quelle", f"Portal {neue_id} gespeichert: {werte['name']}")
+                con.commit()
+                con.close()
+                con = None
+                ok, text = bh.quelle_testen(neue_id)
+                if ok:
+                    bh.alle_abholen(neue_id)
+                return self.redirect(zurueck + ("?msg=" if ok else "?error=") + quote_plus(("Gespeichert. " if ok else "Gespeichert, aber: ") + text) + f"#q-{neue_id}")
             if aktion == "speichern":
                 anbieter = self.form_value(form, "anbieter", "strato").strip()
                 host, port = bh.ANBIETER.get(anbieter, ("", "", 993))[1:]
@@ -9069,12 +9119,13 @@ class App(BaseHTTPRequestHandler):
         karten, dialoge = [], []
         for q in quellen:
             d = dict(q)
+            ist_portal = q["art"] in bh.PORTALE
             status = "Problem" if q["letzter_fehler"] else ("pausiert" if not q["aktiv"] else "aktiv")
             marke = "rot" if q["letzter_fehler"] else ("grau" if not q["aktiv"] else "gruen")
             karten.append(f"""
             <div class="bh-quelle-zeile" id="q-{q['id']}">
                 <div><b>{esc(q['name'])}</b> <span class="vw-marke {marke}">{status}</span>
-                    <small class="vw-klein-block">{esc(q['benutzer'])} · {esc(q['letzter_status'] or 'noch nie abgeholt')}{' · jeder Anhang ist ein Beleg' if q['alles_ist_beleg'] else ''}{(' · liest ab ' + esc(bh.datum_de(q['start_datum']))) if q['start_datum'] else ''}</small></div>
+                    <small class="vw-klein-block">{('Kundennummer ' if ist_portal else '') + esc(q['benutzer'])} · {esc(q['letzter_status'] or 'noch nie abgeholt')}{' · jeder Anhang ist ein Beleg' if q['alles_ist_beleg'] and not ist_portal else ''}{(' · liest ab ' + esc(bh.datum_de(q['start_datum']))) if q['start_datum'] else ''}</small></div>
                 <div class="vw-knopfreihe">
                     {self.bh_abholen_knopf(q['id'], 'Abholen', 'button')}
                     <a class="button" href="/admin/buchhaltung/protokoll?quelle={q['id']}">Protokoll</a>
@@ -9083,8 +9134,8 @@ class App(BaseHTTPRequestHandler):
             </div>""")
             dialoge.append(f"""
             <dialog class="vw-dialog" id="quelle-{q['id']}">
-                <div class="vw-dialog-kopf"><h3>Postfach bearbeiten</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-                <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular(d)}
+                <div class="vw-dialog-kopf"><h3>{'Kundenportal bearbeiten' if ist_portal else 'Postfach bearbeiten'}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+                <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_portal_formular(d) if ist_portal else self.bh_quelle_formular(d)}
                     <p class="vw-klein">Ändere „Ab wann einlesen“ auf ein früheres Datum, um ältere Mails noch einmal zu durchsuchen. Schon vorhandene Belege werden nicht doppelt angelegt.</p>
                     <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div></form>
                 <div class="vw-knopfreihe">
@@ -9109,7 +9160,7 @@ class App(BaseHTTPRequestHandler):
         {self.bh_lauf_html()}
         {admin_kopf('Buchhaltung · Einstellungen', 'Postfächer, Belegadresse, Regeln und gelernte Rechnungserkennung.', '<a class="button" href="/admin/buchhaltung">‹ Zurück zur Übersicht</a>')}
         <section class="vw-karte">
-            <div class="vw-karte-kopf"><h3>Postfächer</h3><button type="button" class="primary" data-dialog="neueQuelle">+ Postfach verbinden</button></div>
+            <div class="vw-karte-kopf"><h3>Postfächer & Kundenportale</h3><div class="vw-knopfreihe"><button type="button" class="button" data-dialog="neuesPortal">+ Kundenportal</button><button type="button" class="primary" data-dialog="neueQuelle">+ Postfach verbinden</button></div></div>
             <p class="vw-klein">Die Postfächer werden nur gelesen – nichts wird gelöscht, verschoben oder als gelesen markiert. Passwörter werden verschlüsselt gespeichert. Abgeholt wird jede Nacht und morgens um halb sechs automatisch.</p>
             {''.join(karten) or '<p class="vw-leer">Noch kein Postfach. Tipp: Lege bei Strato ein eigenes Postfach belege@opapeters.de an und verbinde es hier mit „Jeder Anhang ist ein Beleg“.</p>'}
         </section>
@@ -9144,6 +9195,11 @@ class App(BaseHTTPRequestHandler):
             <div class="vw-dialog-kopf"><h3>Postfach verbinden</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
             <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular()}
                 <div class="vw-dialog-fuss"><button class="primary" type="submit">Verbinden und testen</button></div></form>
+        </dialog>
+        <dialog class="vw-dialog" id="neuesPortal">
+            <div class="vw-dialog-kopf"><h3>Kundenportal verbinden</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_portal_formular()}
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Verbinden und Rechnungen holen</button></div></form>
         </dialog>
         {''.join(dialoge)}
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
