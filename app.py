@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-fragesammel"
+ASSET_VERSION = "2026-11-22-belegfilter"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -8824,31 +8824,78 @@ class App(BaseHTTPRequestHandler):
         im_monat = con.execute("SELECT * FROM belege WHERE substr(COALESCE(NULLIF(datum,''), erstellt),1,7)=? AND status NOT IN ('unsicher','portal') ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC", (monat,)).fetchall()
         aussortiert_alle = con.execute("SELECT * FROM belege WHERE status IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 300").fetchall()
         zuletzt = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 40").fetchall()
-        uebersprungen = con.execute("SELECT * FROM uebersprungen WHERE uebernommen=0 ORDER BY id DESC LIMIT 200").fetchall() if filt == "ignoriert" else []
+        uebersprungen = con.execute("SELECT * FROM uebersprungen WHERE uebernommen=0 ORDER BY id DESC LIMIT 200").fetchall() if filt == "ignoriert" else []  # Sonderansicht Aussortiert
         con.close()
         gueltig = [b for b in im_monat if b["status"] not in ("ignoriert", "doppelt")]
-        gruppen = {
-            "alle": gueltig,
-            "eingang": [b for b in gueltig if b["art"] in ("ER", "GS")],
-            "ausgang": [b for b in gueltig if b["art"] == "AR"],
-            "ohne": [b for b in gueltig if b["id"] not in belegt and not b["bar"]],
-            "ergaenzen": [b for b in gueltig if b["status"] == "neu" and not b["sicher"]],
-            "portal": list(portal),
-            "ignoriert": list(aussortiert_alle),
-            "zuletzt": [b for b in zuletzt if b["status"] != "unsicher"],
-        }
-        zeilen = gruppen.get(filt, gueltig)
+        # Zwei einfache Filter: Art (alle/eingang/ausgang) und Stand (alle/zugeordnet/offen)
+        alt_filter = {"eingang": ("eingang", "alle"), "ausgang": ("ausgang", "alle"), "ohne": ("alle", "offen"), "neu": ("alle", "alle")}
+        art_f = self.query_text(query, "art") or alt_filter.get(filt, ("alle",))[0]
+        stand_f = self.query_text(query, "stand") or (alt_filter.get(filt, ("", "alle"))[1])
+        if art_f not in ("alle", "eingang", "ausgang"):
+            art_f = "alle"
+        if stand_f not in ("alle", "zugeordnet", "offen"):
+            stand_f = "alle"
+        sonder = filt if filt in ("portal", "ignoriert", "ergaenzen", "zuletzt") else ""
+
+        def ist_zugeordnet(b):
+            return b["id"] in belegt or bool(b["bar"])
+
+        def nach_art(liste, a):
+            if a == "eingang":
+                return [b for b in liste if b["art"] in ("ER", "GS")]
+            if a == "ausgang":
+                return [b for b in liste if b["art"] == "AR"]
+            return list(liste)
+
+        def nach_stand(liste, st):
+            if st == "zugeordnet":
+                return [b for b in liste if ist_zugeordnet(b)]
+            if st == "offen":
+                return [b for b in liste if not ist_zugeordnet(b)]
+            return list(liste)
+
+        ergaenzen = [b for b in gueltig if b["status"] == "neu" and not b["sicher"]]
+        if sonder == "portal":
+            zeilen = list(portal)
+        elif sonder == "ignoriert":
+            zeilen = list(aussortiert_alle)
+        elif sonder == "ergaenzen":
+            zeilen = ergaenzen
+        elif sonder == "zuletzt":
+            zeilen = [b for b in zuletzt if b["status"] != "unsicher"]
+        else:
+            zeilen = nach_stand(nach_art(gueltig, art_f), stand_f)
         if suche:
             s = bh.schluessel_text(suche)
             zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
-        chips = [("zuletzt", "Zuletzt eingegangen"), ("alle", f"Alle {len(gruppen['alle'])}"), ("eingang", f"Eingang {len(gruppen['eingang'])}"), ("ausgang", f"Ausgang {len(gruppen['ausgang'])}"),
-                 ("ohne", f"Ohne Zahlung {len(gruppen['ohne'])}")]
-        if gruppen["ergaenzen"]:
-            chips.append(("ergaenzen", f"Unvollständig {len(gruppen['ergaenzen'])}"))
+
+        def link(a=None, st=None):
+            return f"/admin/buchhaltung/belege?monat={monat}&art={a or art_f}&stand={st or stand_f}"
+
+        def knopf(text, zahl, href, an):
+            return f'<a class="bh-seg-knopf" aria-pressed="{"true" if an else "false"}" href="{href}">{esc(text)} <span>{zahl}</span></a>'
+
+        basis_stand = nach_art(gueltig, art_f)
+        art_reihe = "".join([
+            knopf("Alle Belege", len(nach_stand(gueltig, stand_f)), link("alle"), not sonder and art_f == "alle"),
+            knopf("Eingang", len(nach_stand(nach_art(gueltig, "eingang"), stand_f)), link("eingang"), not sonder and art_f == "eingang"),
+            knopf("Ausgang", len(nach_stand(nach_art(gueltig, "ausgang"), stand_f)), link("ausgang"), not sonder and art_f == "ausgang"),
+        ])
+        stand_reihe = "".join([
+            knopf("Alle", len(basis_stand), link(st="alle"), not sonder and stand_f == "alle"),
+            knopf("✓ Zugeordnet", len(nach_stand(basis_stand, "zugeordnet")), link(st="zugeordnet"), not sonder and stand_f == "zugeordnet"),
+            knopf("Ohne Zahlung", len(nach_stand(basis_stand, "offen")), link(st="offen"), not sonder and stand_f == "offen"),
+        ])
+        hinweise = []
+        if ergaenzen:
+            hinweise.append(f'<a href="/admin/buchhaltung/belege?monat={monat}&filter=ergaenzen"><b>{len(ergaenzen)}</b> Beleg(e) unvollständig – bitte Betrag oder Datum ergänzen ›</a>')
         if portal:
-            chips.append(("portal", f"Im Portal holen {len(portal)}"))
-        chips.append(("ignoriert", "Aussortiert"))
-        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/belege?monat={monat}&filter={k}">{esc(t)}</a>' for k, t in chips)
+            hinweise.append(f'<a href="/admin/buchhaltung/belege?monat={monat}&filter=portal"><b>{len(portal)}</b> Rechnung(en) liegen nur im Kundenportal – dort herunterladen ›</a>')
+        hinweise_html = f'<div class="bh-hinweise">{"".join(hinweise)}</div>' if hinweise and not sonder else ""
+        sonder_titel = {"portal": "Rechnungen, die nur im Kundenportal liegen", "ignoriert": "Aussortiert – keine Rechnungen",
+                        "ergaenzen": "Unvollständige Belege – bitte ergänzen", "zuletzt": "Zuletzt eingegangen (alle Monate)"}.get(sonder, "")
+        filter_html = (f'<div class="bh-sonder"><a class="button" href="/admin/buchhaltung/belege?monat={monat}">‹ Alle Belege</a><b>{esc(sonder_titel)}</b></div>' if sonder else
+                       f'<div class="bh-segmente"><div class="bh-seg" role="group" aria-label="Art">{art_reihe}</div><div class="bh-seg" role="group" aria-label="Zahlung">{stand_reihe}</div></div>')
         frage_html = ""
         if unsicher:
             fragen = "".join(
@@ -8879,7 +8926,7 @@ class App(BaseHTTPRequestHandler):
             elif b["status"] == "neu" and not b["sicher"]:
                 status = '<span class="bh-status frage">bitte ergänzen</span>'
             else:
-                status = '<span class="bh-status frage">Zahlung offen</span>'
+                status = '<span class="bh-status frage">ohne Zahlung</span>'
             endung = os.path.splitext(b["datei"] or "")[1].lower().lstrip(".") or "pdf"
             if endung == "xml":
                 bild = '<span class="bh-kachel-ersatz">E-Rechnung<br>(XML)</span>'
@@ -8890,11 +8937,11 @@ class App(BaseHTTPRequestHandler):
                 <span class="bh-kachel-bild">{bild}</span>
                 <b class="bh-kachel-name">{esc(b['lieferant'] or 'Unbekannt')}</b>
                 <span class="bh-art-text {b['art']}">{esc(bh.ARTEN.get(b['art'], b['art']))}{' · Foto' if endung in ('jpg', 'jpeg', 'png', 'webp', 'heic') else ''}</span>
-                <small>{esc(bh.datum_de(b['datum']) or 'ohne Datum')} · {esc(b['rechnungsnr'] or 'ohne Nr.')}{(' · eingegangen ' + esc(bh.datum_de(b['erstellt'][:10]))) if filt == 'zuletzt' else ''}</small>
+                <small>{esc(bh.datum_de(b['datum']) or 'ohne Datum')} · {esc(b['rechnungsnr'] or 'ohne Nr.')}{(' · eingegangen ' + esc(bh.datum_de(b['erstellt'][:10]))) if sonder == 'zuletzt' else ''}</small>
                 <span class="bh-kachel-fuss"><b>{esc(bh.betrag_text(b['betrag'], b['waehrung']))}</b>{status}</span>
             </button>""")
-        anzahl = len(gruppen["alle"])
-        if filt == "zuletzt":
+        anzahl = len(gueltig)
+        if sonder == "zuletzt":
             kacheln_hinweis = '<p class="vw-klein">Die 40 zuletzt eingegangenen Belege – egal aus welchem Monat. Eine Rechnung vom Oktober, die erst im November kommt, steht sonst unter Oktober.</p>'
         else:
             kacheln_hinweis = ""
@@ -8903,13 +8950,15 @@ class App(BaseHTTPRequestHandler):
         {self.bh_lauf_html()}
         {self.bh_kopf('belege', f'{anzahl} Belege in diesem Monat · automatisch benannt (Datum_Art_Lieferant_Nummer_Betrag)', '<button type="button" class="primary" data-dialog="belegHochladen">Beleg hochladen</button>', monat)}
         {frage_html}
-        <form method="get" action="/admin/buchhaltung/belege" class="vw-werkzeug bh-filterleiste"><input type="hidden" name="monat" value="{monat}"><input type="hidden" name="filter" value="{esc(filt)}">
-            <div class="vw-chips">{chips_html}</div>
+        <form method="get" action="/admin/buchhaltung/belege" class="vw-werkzeug bh-filterleiste"><input type="hidden" name="monat" value="{monat}"><input type="hidden" name="art" value="{art_f}"><input type="hidden" name="stand" value="{stand_f}">{f'<input type="hidden" name="filter" value="{sonder}">' if sonder else ''}
+            {filter_html}
             <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Nummer, Betrag"></label></form>
-        {'<p class="vw-klein">Alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; ein Klick auf das Dokument und „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
-        {self.bh_uebersprungen_html(uebersprungen) if filt == 'ignoriert' else ''}
+        {hinweise_html}
+        {'<p class="vw-klein">Alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; ein Klick auf das Dokument und „Wieder aufnehmen“ holt es zurück.</p>' if sonder == 'ignoriert' else ''}
+        {self.bh_uebersprungen_html(uebersprungen) if sonder == 'ignoriert' else ''}
         {kacheln_hinweis}
         <div class="bh-kacheln">{''.join(kacheln) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
+        {'' if sonder else f'<p class="bh-fusslinks"><a href="/admin/buchhaltung/belege?filter=zuletzt">Zuletzt eingegangen (alle Monate)</a> · <a href="/admin/buchhaltung/belege?monat={monat}&filter=ignoriert">Aussortiert ansehen</a></p>'}
         {self.bh_upload_dialog()}
         <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""

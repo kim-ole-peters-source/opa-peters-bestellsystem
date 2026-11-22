@@ -3237,3 +3237,17 @@ tr.ist-gewaehlt td{background:#FDF3DF}
 .bh-frage-alle .bh-haken{flex-direction:row!important;width:auto!important;white-space:nowrap;margin:4px 0 0!important;gap:10px}
 .bh-frage-alle p{margin:0 0 6px}
 .bh-frage-zeile{gap:12px}
+/* Belege: zwei einfache Filterreihen */
+.bh-segmente{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+.bh-seg{display:inline-flex;background:#F3ECE3;border-radius:999px;padding:4px;gap:2px}
+.bh-seg-knopf{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;font-weight:600;font-size:14px;color:#5C4A3D;text-decoration:none;white-space:nowrap}
+.bh-seg-knopf span{font-size:12px;font-weight:700;background:rgba(42,31,24,.08);border-radius:999px;padding:1px 8px}
+.bh-seg-knopf[aria-pressed=true]{background:#2A1F18;color:#FCF7F1;box-shadow:0 2px 6px rgba(42,31,24,.18)}
+.bh-seg-knopf[aria-pressed=true] span{background:rgba(255,255,255,.18)}
+.bh-seg-knopf:hover{color:#2A1F18}.bh-seg-knopf[aria-pressed=true]:hover{color:#fff}
+.bh-hinweise{display:flex;flex-direction:column;gap:6px;margin:4px 0 14px}
+.bh-hinweise a{display:block;background:#FFF3DC;border:1px solid #F0D9A8;border-radius:12px;padding:10px 14px;color:#5C4A3D;text-decoration:none;font-size:14px}
+.bh-hinweise a:hover{background:#FFEBC4}
+.bh-sonder{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.bh-fusslinks{margin-top:18px;font-size:14px;color:#8A7A6D}.bh-fusslinks a{color:#5C4A3D}
+@media (max-width:760px){.bh-segmente{flex-direction:column;align-items:stretch}.bh-seg{display:flex}.bh-seg-knopf{flex:1;justify-content:center;padding:8px 6px;font-size:13px;gap:5px}.bh-seg-knopf span{padding:1px 6px}}

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v68-fragesammel';
+const CACHE_NAME = 'opa-peters-bestellung-v69-belegfilter';
 const STATIC_ASSETS = [
   '/',
   '/login',
