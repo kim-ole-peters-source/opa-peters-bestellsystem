@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-21-kasse"
+ASSET_VERSION = "2026-11-22-buchhaltung-neu"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -4120,16 +4120,18 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_uebersicht(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/status":
             return self.show_bh_status(query=parse_qs(parsed.query))
-        if path == "/admin/buchhaltung/quellen":
-            return self.show_bh_quellen(query=parse_qs(parsed.query))
+        if path in ("/admin/buchhaltung/quellen", "/admin/buchhaltung/einstellungen"):
+            return self.show_bh_einstellungen(query=parse_qs(parsed.query))
+        if path == "/admin/buchhaltung/lieferanten":
+            return self.show_bh_lieferanten(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/belege":
             return self.show_bh_belege(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/beleg":
             return self.show_bh_beleg(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/datei":
             return self.show_bh_datei(query=parse_qs(parsed.query))
-        if path == "/admin/buchhaltung/konten":
-            return self.show_bh_konten(query=parse_qs(parsed.query))
+        if path in ("/admin/buchhaltung/konten", "/admin/buchhaltung/bank"):
+            return self.show_bh_bank(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/buchung":
             return self.show_bh_buchung(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/export":
@@ -7402,16 +7404,6 @@ class App(BaseHTTPRequestHandler):
     # =================================================================
     #   BUCHHALTUNG
     # =================================================================
-    def bh_kopf(self, aktiv, unter="", aktionen=""):
-        reiter = [
-            ("uebersicht", "Übersicht", "/admin/buchhaltung"),
-            ("quellen", "Quellen", "/admin/buchhaltung/quellen"),
-            ("belege", "Belege", "/admin/buchhaltung/belege"),
-            ("konten", "Kontoauszüge", "/admin/buchhaltung/konten"),
-            ("export", "Monatsexport", "/admin/buchhaltung/export"),
-        ]
-        return admin_kopf("Buchhaltung", unter, aktionen, reiter, aktiv)
-
     def bh_lauf_html(self):
         if bh.LAUF.get("laeuft"):
             return '<div class="vw-meldung ok bh-lauf" data-bh-lauf>Belege werden gerade abgeholt … Die Seite aktualisiert sich von selbst.</div>'
@@ -7446,64 +7438,6 @@ class App(BaseHTTPRequestHandler):
         self.wfile.write(daten)
 
     # ---------------------------------------------------------- Übersicht
-    def show_bh_uebersicht(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        monat = self.bh_monat(query)
-        z = bh.monats_zahlen(monat)
-        con = bh.db()
-        zu_pruefen = con.execute("SELECT COUNT(*) FROM belege WHERE status='neu'").fetchone()[0]
-        unsicher = con.execute("SELECT COUNT(*) FROM belege WHERE status='unsicher'").fetchone()[0]
-        portal = con.execute("SELECT COUNT(*) FROM belege WHERE status='portal'").fetchone()[0]
-        quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
-        letzter = bh.einstellung(con, "letzter_lauf")
-        abschluss = con.execute("SELECT * FROM monate WHERE monat=?", (monat,)).fetchone()
-        con.close()
-        erledigt = z["zugeordnet"] + z["kein_beleg"]
-        prozent = round(100 * erledigt / z["gesamt"]) if z["gesamt"] else 0
-        ampel = "gruen" if z["gesamt"] and not (z["offen"] or z["vorschlag"]) else ("honig" if prozent >= 70 else "rot")
-        quellen_zeilen = "".join(
-            f'<a class="vw-zeile" href="/admin/buchhaltung/quellen#q-{q["id"]}"><span><b>{esc(q["name"])}</b><small>{esc(q["letzter_status"] or "noch nie abgeholt")}</small></span>'
-            f'<span class="vw-marke {"rot" if q["letzter_fehler"] else ("grau" if not q["aktiv"] else "gruen")}">{"Problem" if q["letzter_fehler"] else ("pausiert" if not q["aktiv"] else "ok")}</span></a>'
-            for q in quellen
-        )
-        if not quellen:
-            quellen_zeilen = '<p class="vw-leer">Noch keine Quelle angelegt. <a href="/admin/buchhaltung/quellen">Jetzt das erste Postfach verbinden</a></p>'
-        todo = []
-        if z["offen"]:
-            todo.append((f"{z['offen']} Buchungen ohne Beleg", f"/admin/buchhaltung/konten?monat={monat}&filter=offen", "Ansehen"))
-        if z["vorschlag"]:
-            todo.append((f"{z['vorschlag']} Vorschläge bestätigen", f"/admin/buchhaltung/konten?monat={monat}&filter=vorschlag", "Prüfen"))
-        if zu_pruefen:
-            todo.append((f"{zu_pruefen} neue Belege kurz prüfen", "/admin/buchhaltung/belege?filter=neu", "Prüfen"))
-        if unsicher:
-            todo.insert(0, (f"{unsicher} Dokument(e): Ist das eine Rechnung?", "/admin/buchhaltung/belege?filter=unsicher", "Ansehen"))
-        if portal:
-            todo.append((f"{portal} Rechnungen liegen nur im Kundenportal", "/admin/buchhaltung/belege?filter=portal", "Ansehen"))
-        if not z["gesamt"]:
-            todo.append((f"Für {monat[5:]}/{monat[:4]} ist noch kein Kontoauszug hochgeladen", "/admin/buchhaltung/konten", "Hochladen"))
-        todo_html = "".join(f'<div class="vw-hinweis"><span>{esc(t)}</span><a class="button" href="{esc(l)}">{esc(b)}</a></div>' for t, l, b in todo)
-        body = f"""
-        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.bh_lauf_html()}
-        {self.bh_kopf('uebersicht', f'Zuletzt abgeholt: {esc(letzter) if letzter else "noch nie"}', self.bh_abholen_knopf())}
-        <div class="vw-werkzeug vw-monatsleiste">{self.bh_monat_leiste('/admin/buchhaltung', monat)}
-            {f'<span class="vw-marke grau">abgeschlossen am {esc(abschluss["abgeschlossen_am"][:10])}</span>' if abschluss else ''}</div>
-        <div class="vw-kennzahlen">
-            <div class="bh-ampel {ampel}"><small>Belege vollständig</small><b>{prozent} %</b><span class="vw-balken"><span style="width:{prozent}%"></span></span></div>
-            <div><small>Buchungen</small><b>{z['gesamt']}</b><span class="vw-klein">{z['zugeordnet']} mit Beleg · {z['kein_beleg']} ohne nötig</span></div>
-            <div><small>Beleg fehlt</small><b class="{'minus' if z['offen'] else ''}">{z['offen']}</b><span class="vw-klein">+ {z['vorschlag']} Vorschläge</span></div>
-            <div><small>Neue Belege</small><b>{zu_pruefen}</b><span class="vw-klein">{portal} im Portal holen</span></div>
-        </div>
-        <div class="vw-raster-2">
-            <section class="vw-karte"><div class="vw-karte-kopf"><h3>Zu erledigen</h3></div>{todo_html or '<p class="vw-leer">Alles erledigt für diesen Monat. 👍</p>'}
-                <div class="vw-karte-fuss"><a class="button primary" href="/admin/buchhaltung/export?monat={monat}">Monatsexport</a></div></section>
-            <section class="vw-karte"><div class="vw-karte-kopf"><h3>Quellen</h3><a class="button" href="/admin/buchhaltung/quellen">+ Quelle</a></div><div class="vw-liste">{quellen_zeilen}</div></section>
-        </div>
-        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
-        self.admin_seite("Buchhaltung", body)
-
     def show_bh_status(self, query=None):
         if not self.is_admin():
             return self.send_json({"ok": False}, 403)
@@ -7514,7 +7448,7 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/login")
         form = self.read_form()
         qid = self.form_value(form, "quelle_id").strip()
-        zurueck = "/admin/buchhaltung/quellen" if qid else "/admin/buchhaltung"
+        zurueck = "/admin/buchhaltung/einstellungen" if qid else "/admin/buchhaltung"
         if bh.alle_abholen(int(qid) if qid.isdigit() else None):
             return self.redirect(zurueck + "?msg=" + quote_plus("Abholen gestartet. Das dauert je nach Postfach ein paar Minuten."))
         self.redirect(zurueck + "?error=" + quote_plus("Es läuft gerade schon ein Abholvorgang."))
@@ -7552,88 +7486,12 @@ class App(BaseHTTPRequestHandler):
                 <label class="vw-schalter bh-schalter"><input type="checkbox" name="alles_ist_beleg" value="1" {'checked' if q.get('alles_ist_beleg') else ''}><span>Eigenes Belege-Postfach: jeder Anhang ist ein Beleg</span></label>
             </div>"""
 
-    def show_bh_quellen(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        con = bh.db()
-        quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
-        namen = bh.einstellung(con, "eigene_namen")
-        domains = bh.einstellung(con, "eigene_domains")
-        belege_adresse = bh.einstellung(con, "belege_adresse")
-        erinnerung_an = bh.einstellung(con, "erinnerung_an")
-        gelernt = con.execute("SELECT * FROM gelernt ORDER BY erstellt DESC").fetchall()
-        con.close()
-        karten, dialoge = [], []
-        for q in quellen:
-            d = dict(q)
-            status = "Problem" if q["letzter_fehler"] else ("pausiert" if not q["aktiv"] else "aktiv")
-            marke = "rot" if q["letzter_fehler"] else ("grau" if not q["aktiv"] else "gruen")
-            karten.append(f"""
-            <section class="vw-karte bh-quelle" id="q-{q['id']}">
-                <div class="vw-karte-kopf"><h3>{esc(q['name'])}</h3><span class="vw-marke {marke}">{status}</span></div>
-                <p class="vw-klein">{esc(bh.QUELLEN_ARTEN.get(q['art'], q['art']))} · {esc(q['benutzer'])} · Ordner: {esc(q['ordner'])}{' · jeder Anhang ist ein Beleg' if q['alles_ist_beleg'] else ''}</p>
-                <p class="vw-klein">Letzter Lauf: {esc(q['letzter_lauf'] or 'noch nie')} – {esc(q['letzter_status'] or '')}<br>Bisher gefunden: {q['gefunden']} Belege</p>
-                <div class="vw-knopfreihe">
-                    {self.bh_abholen_knopf(q['id'], 'Jetzt abholen', 'button')}
-                    <form method="post" action="/admin/buchhaltung/quelle/testen"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="button" type="submit">Verbindung testen</button></form>
-                    <button type="button" class="button" data-dialog="quelle-{q['id']}">Bearbeiten</button>
-                    <form method="post" action="/admin/buchhaltung/quelle/aktiv"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="vw-leise" type="submit">{'Pausieren' if q['aktiv'] else 'Wieder aktivieren'}</button></form>
-                </div>
-            </section>""")
-            dialoge.append(f"""
-            <dialog class="vw-dialog" id="quelle-{q['id']}">
-                <div class="vw-dialog-kopf"><h3>Quelle bearbeiten</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-                <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular(d)}
-                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div></form>
-                <form method="post" action="/admin/buchhaltung/quelle/loeschen" class="vw-gefahrzone" data-vw-confirm="Quelle „{esc(q['name'])}“ entfernen? Bereits gefundene Belege bleiben erhalten.">
-                    <input type="hidden" name="quelle_id" value="{q['id']}"><span>Quelle entfernen (Belege bleiben)</span><button class="danger" type="submit">Entfernen</button></form>
-            </dialog>""")
-        body = f"""
-        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.bh_lauf_html()}
-        {self.bh_kopf('quellen', 'Hier legst du jederzeit neue Postfächer an, aus denen Rechnungen geholt werden.', '<button type="button" class="primary" data-dialog="neueQuelle">+ Neue Quelle</button>' + self.bh_abholen_knopf(None, 'Alle abholen', 'button'))}
-        <p class="vw-klein">Die Postfächer werden nur gelesen – es wird nichts gelöscht, verschoben oder als gelesen markiert. Passwörter werden verschlüsselt gespeichert. Abgeholt wird jede Nacht automatisch und jederzeit über den Knopf.</p>
-        <div class="vw-raster-2">{''.join(karten) or '<section class="vw-karte"><p class="vw-leer">Noch keine Quelle. Tipp: Lege zuerst ein eigenes Postfach belege@opapeters.de bei Strato an und verbinde es hier mit „Jeder Anhang ist ein Beleg“.</p></section>'}</div>
-        <details class="vw-karte vw-aufklapp">
-            <summary>Einstellungen: eigene Firma, Belege-Adresse, Monatserinnerung</summary>
-            <form method="post" action="/admin/buchhaltung/einstellungen" class="vw-formular">
-                <label>Firmennamen, mit Komma getrennt<input name="eigene_namen" value="{esc(namen)}"></label>
-                <label>Eigene E-Mail-Domains, mit Komma getrennt<input name="eigene_domains" value="{esc(domains)}"></label>
-                <p class="vw-klein">Rechnungen, in denen deine Firma als Verkäufer steht oder die von deinen eigenen Adressen verschickt wurden, gelten als Ausgangsrechnung.</p>
-                <label>Adresse, an die Lieferanten Rechnungen schicken sollen<input type="email" name="belege_adresse" value="{esc(belege_adresse)}" placeholder="belege@opapeters.de"></label>
-                <label>Monatserinnerung am 3. an<input type="email" name="erinnerung_an" value="{esc(erinnerung_an)}" placeholder="info@opapeters.de"></label>
-                <p class="vw-klein">Am 3. jedes Monats kommt eine Mail (und eine Push-Nachricht aufs Handy), was für den Vormonat noch fehlt. Leer lassen = Adresse aus den Einstellungen für die Zeiterfassung.</p>
-                <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
-            </form>
-        </details>
-        <details class="vw-karte vw-aufklapp" id="gelernt">
-            <summary>Rechnungserkennung: was das System gelernt hat ({len(gelernt)})</summary>
-            <p class="vw-klein">Ein PDF wird nur übernommen, wenn es wie eine Rechnung aussieht (Rechnungsnummer, Datum, Endbetrag, MwSt …). BWA, Umsatzberichte, Mahnungen, Angebote, Lieferscheine, AGB usw. werden übersprungen. Unklare Fälle landen unter Belege → „Rechnung?“. Was du dort entscheidest, merkt sich das System hier.</p>
-            {('<div class="vw-tabelle-wrap vw-ohne-rand"><table class="vw-tabelle"><tr><th>Absender</th><th>Dokumentart</th><th>Entscheidung</th><th></th></tr>' + ''.join(
-                f"""<tr><td>{esc(r['absender'] if r['absender'] != '*' else 'jeder Absender')}</td><td>{esc(r['titel'] if r['titel'] != '*' else 'alles')}<small class="vw-klein-block">{esc(r['beispiel'])}</small></td>
-                <td>{'<span class="vw-marke gruen">Rechnung</span>' if r['urteil'] == 'ja' else '<span class="vw-marke grau">überspringen</span>'}</td>
-                <td><form method="post" action="/admin/buchhaltung/erkennung/regel-loeschen"><input type="hidden" name="absender" value="{esc(r['absender'])}"><input type="hidden" name="titel" value="{esc(r['titel'])}"><button class="vw-leise" type="submit">Vergessen</button></form></td></tr>"""
-                for r in gelernt) + '</table></div>') if gelernt else '<p class="vw-leer">Noch nichts gelernt.</p>'}
-            <form method="post" action="/admin/buchhaltung/erkennung/neu-pruefen" class="vw-knopfreihe" data-vw-confirm="Alle noch nicht bestätigten Belege aus Postfächern mit der aktuellen Erkennung neu prüfen? Nichts wird gelöscht.">
-                <button class="button" type="submit">Alle Belege neu prüfen</button></form>
-        </details>
-        <p class="vw-klein">Weitere Quellenarten (z. B. PayPal, Kassensystem, Online-Shops) lassen sich hier ergänzen – sag Bescheid, welche du brauchst.</p>
-        <dialog class="vw-dialog" id="neueQuelle">
-            <div class="vw-dialog-kopf"><h3>Neue Quelle: E-Mail-Postfach</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-            <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular()}
-                <div class="vw-dialog-fuss"><button class="primary" type="submit">Anlegen und testen</button></div></form>
-        </dialog>
-        {''.join(dialoge)}
-        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
-        self.admin_seite("Quellen", body)
-
     def handle_bh_quelle(self, aktion):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
         qid = self.form_value(form, "quelle_id").strip()
-        zurueck = "/admin/buchhaltung/quellen"
+        zurueck = "/admin/buchhaltung/einstellungen"
         con = bh.db()
         try:
             if aktion == "speichern":
@@ -7653,7 +7511,7 @@ class App(BaseHTTPRequestHandler):
                 passwort = self.form_value(form, "passwort")
                 if qid.isdigit():
                     setze = ", ".join(f"{k}=?" for k in werte)
-                    con.execute(f"UPDATE quellen SET {setze} WHERE id=?", (*werte.values(), int(qid)))
+                    con.execute(f"UPDATE quellen SET {setze}, letzter_lauf='' WHERE id=?", (*werte.values(), int(qid)))
                     if passwort:
                         con.execute("UPDATE quellen SET geheim=?, letzter_fehler=0 WHERE id=?", (bh.verschluesseln(passwort), int(qid)))
                     neue_id = int(qid)
@@ -7702,78 +7560,9 @@ class App(BaseHTTPRequestHandler):
             bh.setze_einstellung(con, feld, wert if email_sieht_gueltig_aus(wert) else "")
         con.commit()
         con.close()
-        self.redirect("/admin/buchhaltung/quellen?msg=" + quote_plus("Gespeichert."))
+        self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus("Gespeichert."))
 
     # ---------------------------------------------------------- Belege
-    def show_bh_belege(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        filt = self.query_text(query, "filter")
-        suche = self.query_text(query, "q")
-        con = bh.db()
-        zahlen = {r["status"]: r["n"] for r in con.execute("SELECT status, COUNT(*) n FROM belege GROUP BY status")}
-        filt = filt or ("unsicher" if zahlen.get("unsicher") else "neu")
-        belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
-        bedingung = {
-            "neu": "status='neu'", "unsicher": "status='unsicher'", "portal": "status='portal'", "eingang": "art IN ('ER','GS') AND status NOT IN ('portal','doppelt','ignoriert','unsicher')",
-            "ausgang": "art='AR' AND status NOT IN ('portal','doppelt','ignoriert','unsicher')", "alle": "1=1", "ignoriert": "status IN ('ignoriert','doppelt')",
-        }.get(filt, "status='neu'")
-        zeilen = con.execute(f"SELECT * FROM belege WHERE {bedingung} ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC LIMIT 600").fetchall()
-        con.close()
-        if suche:
-            s = bh.schluessel_text(suche)
-            zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
-        if filt == "offen":
-            zeilen = [b for b in zeilen if b["id"] not in belegt]
-        chips = ([("unsicher", f"Rechnung? ({zahlen['unsicher']})")] if zahlen.get("unsicher") else []) + [("neu", f"Zu prüfen ({zahlen.get('neu', 0)})"), ("eingang", "Eingang"), ("ausgang", "Ausgang"), ("portal", f"Im Portal holen ({zahlen.get('portal', 0)})"),
-                 ("alle", "Alle"), ("ignoriert", "Aussortiert")]
-        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/belege?filter={k}">{esc(t)}</a>' for k, t in chips)
-        liste = []
-        for b in zeilen:
-            if b["status"] == "portal":
-                rechts = f'<a class="button" href="{esc(b["portal_link"])}" target="_blank" rel="noopener">Im Portal öffnen</a>'
-            else:
-                rechts = f'<b class="bh-betrag">{esc(bh.betrag_text(b["betrag"], b["waehrung"]))}</b>'
-            marken = []
-            if b["status"] == "neu":
-                marken.append('<span class="vw-marke honig">zu prüfen</span>' if b["sicher"] else '<span class="vw-marke rot">bitte ergänzen</span>')
-            if b["id"] in belegt:
-                marken.append('<span class="vw-marke gruen">✓ Buchung</span>')
-            if b["bar"]:
-                marken.append('<span class="vw-marke blau">bar</span>')
-            if b["dauer"]:
-                marken.append('<span class="vw-marke blau">Dauerbeleg</span>')
-            if b["status"] == "unsicher":
-                marken.append('<span class="vw-marke honig">Rechnung?</span>')
-            if b["status"] in ("doppelt", "ignoriert"):
-                marken.append(f'<span class="vw-marke grau">{esc(bh.STATUS_TEXT.get(b["status"], b["status"]))}</span>')
-            if b["status"] in ("unsicher", "ignoriert") and b["notiz"]:
-                marken.append(f'<small class="bh-grund">{esc(b["notiz"][:90])}</small>')
-            liste.append(f"""
-            <div class="bh-beleg" id="b-{b['id']}">
-                <button type="button" class="bh-beleg-knopf" data-bh-beleg="{b['id']}">
-                    <span class="bh-art {b['art']}">{esc(b['art'])}</span>
-                    <span class="bh-beleg-text"><b>{esc(b['lieferant'] or 'Unbekannt')}</b><small>{esc(bh.datum_de(b['datum']))} · {esc(b['rechnungsnr'] or 'ohne Nr.')} · {esc(b['quelle'])}{(' · ' + esc(b['mail_betreff'][:60])) if b['status'] == 'portal' else ''}</small></span>
-                    <span class="bh-marken">{''.join(marken)}</span>
-                </button>
-                <span class="bh-rechts">{rechts}</span>
-            </div>""")
-        body = f"""
-        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.bh_lauf_html()}
-        {self.bh_kopf('belege', 'Alle gefundenen Rechnungen. Klick auf einen Beleg zeigt ihn an und lässt dich die Angaben korrigieren.', '<button type="button" class="primary" data-dialog="belegHochladen">+ Beleg hochladen</button>')}
-        <form method="get" action="/admin/buchhaltung/belege" class="vw-werkzeug"><input type="hidden" name="filter" value="{esc(filt)}">
-            <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Rechnungsnummer oder Betrag …"></label></form>
-        <div class="vw-chips">{chips_html}</div>
-        {'<p class="vw-klein">Diese Dokumente sehen nicht eindeutig nach Rechnung aus. Klick drauf und entscheide – das System merkt sich deine Antwort für ähnliche Dokumente.</p>' if filt == 'unsicher' else ''}
-        {'<p class="vw-klein">Hier landet alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
-        <div class="bh-belegliste">{''.join(liste) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
-        {self.bh_upload_dialog()}
-        <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
-        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
-        self.admin_seite("Belege", body)
-
     def bh_upload_dialog(self, buchung_id=""):
         return f"""
         <dialog class="vw-dialog" id="belegHochladen">
@@ -7923,7 +7712,7 @@ class App(BaseHTTPRequestHandler):
         neu = sum(1 for _, n in ids if n)
         text = f"{neu} Beleg(e) hochgeladen." + ("" if neu == len(ids) else f" {len(ids) - neu} gab es schon.")
         if buchung_id.isdigit():
-            return self.redirect("/admin/buchhaltung/konten?msg=" + quote_plus(text + " Und zugeordnet."))
+            return self.redirect("/admin/buchhaltung/bank?msg=" + quote_plus(text + " Und zugeordnet."))
         self.redirect("/admin/buchhaltung/belege?filter=neu&msg=" + quote_plus(text) + f"#b-{ids[0][0]}")
 
     def handle_bh_beleg_speichern(self):
@@ -7987,90 +7776,10 @@ class App(BaseHTTPRequestHandler):
             con.execute("DELETE FROM gelernt WHERE absender=? AND titel=?", (self.form_value(form, "absender"), self.form_value(form, "titel")))
             con.commit()
             con.close()
-            return self.redirect("/admin/buchhaltung/quellen?msg=" + quote_plus("Gelernte Regel entfernt.") + "#gelernt")
-        self.redirect("/admin/buchhaltung/quellen")
+            return self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus("Gelernte Regel entfernt.") + "#gelernt")
+        self.redirect("/admin/buchhaltung/einstellungen")
 
     # ---------------------------------------------------------- Kontoauszüge & Abgleich
-    def show_bh_konten(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        monat = self.bh_monat(query)
-        filt = self.query_text(query, "filter") or "alle"
-        con = bh.db()
-        konten = con.execute("SELECT * FROM konten ORDER BY name").fetchall()
-        konto_namen = {k["id"]: k["name"] for k in konten}
-        buchungen = con.execute("SELECT * FROM buchungen WHERE substr(datum,1,7)=? ORDER BY datum DESC, id DESC", (monat,)).fetchall()
-        zuord = {}
-        for r in con.execute("SELECT z.buchung_id, b.id, b.lieferant, b.rechnungsnr, b.art FROM zuordnung z JOIN belege b ON b.id=z.beleg_id"):
-            zuord.setdefault(r["buchung_id"], []).append(r)
-        vorschlaege = {r["id"]: r for r in con.execute("SELECT * FROM belege WHERE id IN (SELECT vorschlag_id FROM buchungen WHERE vorschlag_id IS NOT NULL)")}
-        regeln = con.execute("SELECT * FROM regeln ORDER BY name").fetchall()
-        importe = con.execute("SELECT i.*, k.name konto FROM importe i LEFT JOIN konten k ON k.id=i.konto_id ORDER BY i.id DESC LIMIT 5").fetchall()
-        con.close()
-        z = {"alle": len(buchungen)}
-        for bu in buchungen:
-            z[bu["status"]] = z.get(bu["status"], 0) + 1
-        if filt != "alle":
-            buchungen = [bu for bu in buchungen if bu["status"] == filt]
-        chips = [("alle", f"Alle ({z['alle']})"), ("offen", f"Beleg fehlt ({z.get('offen', 0)})"), ("vorschlag", f"Vorschlag prüfen ({z.get('vorschlag', 0)})"),
-                 ("zugeordnet", f"Mit Beleg ({z.get('zugeordnet', 0)})"), ("kein_beleg", f"Kein Beleg nötig ({z.get('kein_beleg', 0)})")]
-        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/konten?monat={monat}&filter={k}">{esc(t)}</a>' for k, t in chips)
-        zeilen = []
-        for bu in buchungen:
-            if bu["status"] == "zugeordnet":
-                info = "".join(f'<span class="vw-marke gruen">✓ {esc(b["lieferant"] or "Beleg")} {esc(b["rechnungsnr"])}</span> ' for b in zuord.get(bu["id"], []))
-            elif bu["status"] == "vorschlag" and bu["vorschlag_id"] in vorschlaege:
-                v = vorschlaege[bu["vorschlag_id"]]
-                info = (f'<span class="vw-marke honig">Vorschlag: {esc(v["lieferant"])} {esc(v["rechnungsnr"])}</span>'
-                        f'<form method="post" action="/admin/buchhaltung/buchung/zuordnen" class="vw-inline-form"><input type="hidden" name="buchung_id" value="{bu["id"]}"><input type="hidden" name="beleg_{v["id"]}" value="1"><input type="hidden" name="monat" value="{monat}"><button class="button bh-klein" type="submit">✓ Passt</button></form>')
-            elif bu["status"] == "kein_beleg":
-                info = '<span class="vw-marke grau">kein Beleg nötig</span>'
-            else:
-                info = '<span class="vw-marke rot">Beleg fehlt</span>'
-            zeilen.append(f"""
-            <tr class="vw-klickzeile" data-bh-buchung="{bu['id']}">
-                <td>{esc(bh.datum_de(bu['datum']))}<small class="vw-klein-block">{esc(konto_namen.get(bu['konto_id'], ''))}</small></td>
-                <td><b>{esc(bu['gegenpartei'] or '–')}</b><small class="vw-klein-block">{esc(bu['zweck'][:110])}</small></td>
-                <td class="zahl {'minus' if bu['betrag'] < 0 else 'plus'}">{esc(bh.betrag_text(bu['betrag']))}</td>
-                <td class="bh-info">{info}</td>
-            </tr>""")
-        konto_optionen = '<option value="">automatisch (aus der Datei)</option>' + "".join(f'<option value="{esc(k["name"])}">{esc(k["name"])}</option>' for k in konten)
-        regeln_html = "".join(
-            f'<li><span>{esc(r["muster"])}</span><form method="post" action="/admin/buchhaltung/regel/loeschen" class="vw-inline-form"><input type="hidden" name="regel_id" value="{r["id"]}"><button class="vw-leise" type="submit" aria-label="Regel löschen">×</button></form></li>'
-            for r in regeln
-        )
-        importe_html = "".join(f'<li>{esc(i["erstellt"][:16])} · {esc(i["konto"] or "")} · {esc(i["dateiname"])}: {i["neu"]} neu, {i["doppelt"]} schon da</li>' for i in importe)
-        body = f"""
-        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.bh_kopf('konten', 'Kontoauszug hochladen – das System sucht zu jeder Buchung den passenden Beleg.', '<button type="button" class="primary" data-dialog="auszugHochladen">+ Kontoauszug hochladen</button>')}
-        <div class="vw-werkzeug vw-monatsleiste">{self.bh_monat_leiste('/admin/buchhaltung/konten', monat, '&filter=' + filt)}</div>
-        <div class="vw-chips">{chips_html}</div>
-        <div class="vw-tabelle-wrap"><table class="vw-tabelle bh-buchungen">
-            <tr><th>Datum</th><th>Empfänger / Zahler · Verwendungszweck</th><th class="zahl">Betrag</th><th>Beleg</th></tr>
-            {''.join(zeilen) or '<tr><td colspan="4">Keine Buchungen in diesem Monat. Lade oben einen Kontoauszug hoch.</td></tr>'}
-        </table></div>
-        <div class="vw-raster-2 bh-unten">
-            <section class="vw-karte"><h3>Regeln „kein Beleg nötig“</h3><p class="vw-klein">Buchungen, deren Empfänger oder Verwendungszweck diesen Text enthält, zählen nie als fehlend (z. B. Lohn, Finanzamt, Bankgebühren).</p>
-                <ul class="bh-regeln">{regeln_html or '<li class="vw-klein">Noch keine Regeln. Du legst sie an, wenn du bei einer Buchung „Kein Beleg nötig – immer“ wählst.</li>'}</ul>
-                <form method="post" action="/admin/buchhaltung/regel/neu" class="vw-inline-form"><input name="muster" placeholder="z. B. Finanzamt" required class="vw-wachsen"><button class="button" type="submit">+ Regel</button></form></section>
-            <section class="vw-karte"><h3>Letzte Uploads</h3><ul class="bh-importe">{importe_html or '<li class="vw-klein">Noch nichts hochgeladen.</li>'}</ul></section>
-        </div>
-        <dialog class="vw-dialog" id="auszugHochladen">
-            <div class="vw-dialog-kopf"><h3>Kontoauszug hochladen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
-            <form method="post" action="/admin/buchhaltung/konto/upload" enctype="multipart/form-data" class="vw-formular">
-                <label>Datei aus dem Online-Banking<input type="file" name="datei" accept=".xml,.zip,.csv,.txt" required></label>
-                <p class="vw-klein">Am besten im Format <b>CAMT.053</b> (XML oder ZIP). CSV geht auch – auch die Abrechnungen von PayPal oder der Kreditkarte. Doppelte Buchungen werden erkannt, du kannst also ruhig überlappende Zeiträume hochladen.</p>
-                <label>Zu welchem Konto?<select name="konto">{konto_optionen}</select></label>
-                <label>… oder neues Konto anlegen<input name="konto_neu" placeholder="z. B. PayPal oder Kreditkarte"></label>
-                <div class="vw-dialog-fuss"><button class="primary" type="submit">Hochladen und abgleichen</button></div>
-            </form>
-        </dialog>
-        {self.bh_upload_dialog()}
-        <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBuchungPanel"><div id="bhBuchungPanelInhalt"></div></dialog>
-        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
-        self.admin_seite("Kontoauszüge", body)
-
     def show_bh_buchung(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -8124,7 +7833,7 @@ class App(BaseHTTPRequestHandler):
         </form>{self.bh_anfordern_html(bu)}"""
         if self.query_text(query, "embed"):
             return self.send_html(html_text.encode("utf-8"))
-        body = f'{self.bh_kopf("konten")}<section class="vw-karte vw-schmal">{html_text}</section>{self.bh_upload_dialog(bu["id"])}<script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>'
+        body = f'{self.bh_kopf("bank")}<section class="vw-karte vw-schmal">{html_text}</section>{self.bh_upload_dialog(bu["id"])}<script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>'
         self.admin_seite("Buchung", body)
 
     def handle_bh_buchung(self, aktion):
@@ -8132,7 +7841,7 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/login")
         form = self.read_form()
         monat = self.form_value(form, "monat").strip()
-        zurueck = "/admin/buchhaltung/konten" + (f"?monat={quote_plus(monat)}" if re.match(r"^\d{4}-\d{2}$", monat or "") else "?")
+        zurueck = "/admin/buchhaltung/bank" + (f"?monat={quote_plus(monat)}" if re.match(r"^\d{4}-\d{2}$", monat or "") else "?")
         if aktion == "regel-neu":
             muster = self.form_value(form, "muster").strip()
             if muster:
@@ -8172,68 +7881,19 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         datei = form.get("datei")
         if not isinstance(datei, UploadedFile) or not datei.content:
-            return self.redirect("/admin/buchhaltung/konten?error=" + quote_plus("Bitte eine Datei auswählen."))
+            return self.redirect("/admin/buchhaltung/bank?error=" + quote_plus("Bitte eine Datei auswählen."))
         konto = (self.form_value(form, "konto_neu").strip() or self.form_value(form, "konto").strip())[:60]
         try:
             ergebnis = bh.kontoauszug_importieren(datei.content, datei.filename or "auszug", konto)
         except Exception as exc:
-            return self.redirect("/admin/buchhaltung/konten?error=" + quote_plus(f"Die Datei konnte nicht gelesen werden: {exc}"))
+            return self.redirect("/admin/buchhaltung/bank?error=" + quote_plus(f"Die Datei konnte nicht gelesen werden: {exc}"))
         z = bh.db()
         letzter = z.execute("SELECT MAX(datum) FROM buchungen WHERE import_id=(SELECT MAX(id) FROM importe)").fetchone()[0]
         z.close()
         monat = (letzter or "")[:7] or bh.jetzt().strftime("%Y-%m")
-        self.redirect(f"/admin/buchhaltung/konten?monat={monat}&msg=" + quote_plus(f"{ergebnis['neu']} neue Buchungen übernommen, {ergebnis['doppelt']} waren schon da. Abgleich ist gelaufen."))
+        self.redirect(f"/admin/buchhaltung/bank?monat={monat}&msg=" + quote_plus(f"{ergebnis['neu']} neue Buchungen übernommen, {ergebnis['doppelt']} waren schon da. Abgleich ist gelaufen."))
 
     # ---------------------------------------------------------- Monatsexport
-    def show_bh_export(self, query=None):
-        if not self.is_admin():
-            return self.redirect("/admin/login")
-        query = query or {}
-        monat_aktiv = self.bh_monat(query)
-        con = bh.db()
-        abschluesse = {r["monat"]: r for r in con.execute("SELECT * FROM monate")}
-        zahlen_belege = {r["m"]: r for r in con.execute(
-            "SELECT substr(datum,1,7) m, SUM(art='AR') ar, SUM(art!='AR') er FROM belege WHERE status NOT IN ('ignoriert','doppelt','portal') GROUP BY m")}
-        con.close()
-        zeilen = []
-        for monat in bh.monate_mit_daten()[:18]:
-            z = bh.monats_zahlen(monat)
-            fertig = z["gesamt"] and not (z["offen"] or z["vorschlag"])
-            ab = abschluesse.get(monat)
-            b = zahlen_belege.get(monat)
-            zeilen.append(f"""
-            <tr class="{'ist-aktiv' if monat == monat_aktiv else ''}">
-                <td><b>{monat[5:]}/{monat[:4]}</b>{f'<small class="vw-klein-block">abgeschlossen {esc(ab["abgeschlossen_am"][:10])}</small>' if ab else ''}</td>
-                <td class="zahl">{z['gesamt']}</td>
-                <td class="zahl">{z['zugeordnet'] + z['kein_beleg']}</td>
-                <td class="zahl {'minus' if z['offen'] + z['vorschlag'] else ''}">{z['offen'] + z['vorschlag']}</td>
-                <td class="zahl">{(b['er'] or 0) if b else 0} / {(b['ar'] or 0) if b else 0}</td>
-                <td><span class="vw-marke {'gruen' if fertig else ('grau' if not z['gesamt'] else 'honig')}">{'vollständig' if fertig else ('kein Auszug' if not z['gesamt'] else 'unvollständig')}</span></td>
-                <td class="bh-export-knoepfe">
-                    <a class="button primary" href="/admin/buchhaltung/export.zip?monat={monat}">⤓ ZIP</a>
-                    <form method="post" action="/admin/buchhaltung/monat/{'oeffnen' if ab else 'abschliessen'}" {'' if ab else f'data-vw-confirm="Monat {monat[5:]}/{monat[:4]} abschließen? Später gefundene Belege landen dann im Ordner Nachtrag."'}><input type="hidden" name="monat" value="{monat}"><button class="vw-leise" type="submit">{'wieder öffnen' if ab else 'abschließen'}</button></form>
-                </td>
-            </tr>""")
-        body = f"""
-        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {self.bh_kopf('export', 'Ein Paket je Monat – die beiden Ordner lädst du bei DATEV hoch.')}
-        <div class="vw-tabelle-wrap"><table class="vw-tabelle bh-export">
-            <tr><th>Monat</th><th class="zahl">Buchungen</th><th class="zahl">erledigt</th><th class="zahl">Beleg fehlt</th><th class="zahl">Belege Eingang / Ausgang</th><th>Stand</th><th></th></tr>
-            {''.join(zeilen)}
-        </table></div>
-        <section class="vw-karte bh-paket">
-            <h3>Das steckt im Paket</h3>
-            <pre class="bh-baum">Buchhaltung_JJJJ-MM/
-  Rechnungseingang/      alle Eingangsrechnungen und Gutschriften
-  Rechnungsausgang/      alle Ausgangsrechnungen
-  Fehlende_Belege_JJJJ-MM.pdf    Buchungen ohne Beleg, größte zuerst
-  Offene_Rechnungen_JJJJ-MM.pdf  Rechnungen ohne Zahlung
-  Abgleich_JJJJ-MM.xlsx          jede Buchung mit ihrem Beleg-Dateinamen</pre>
-            <p class="vw-klein">Der Monat richtet sich nach dem Buchungsdatum auf dem Kontoauszug. Bar bezahlte Belege kommen nach Rechnungsdatum dazu. Dateinamen: Datum_Art_Lieferant_Rechnungsnummer_Betrag. E-Rechnungen liegen zusätzlich als XML-Original bei.</p>
-        </section>
-        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
-        self.admin_seite("Monatsexport", body)
-
     def show_bh_export_zip(self, query=None):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -8360,7 +8020,7 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         bid = self.form_value(form, "buchung_id").strip()
         monat = self.form_value(form, "monat").strip()
-        zurueck = f"/admin/buchhaltung/konten?monat={quote_plus(monat)}"
+        zurueck = f"/admin/buchhaltung/bank?monat={quote_plus(monat)}"
         an = self.form_value(form, "an").strip()
         if not bid.isdigit() or not email_sieht_gueltig_aus(an):
             return self.redirect(zurueck + "&error=" + quote_plus("Bitte eine gültige E-Mail-Adresse eintragen."))
@@ -8796,6 +8456,656 @@ class App(BaseHTTPRequestHandler):
             return self.redirect(ziel + ("msg=" if gespeichert else "error=") + quote_plus(meldung))
         self.redirect("/admin/tagesabschluss")
 
+    # =================================================================
+    #   BUCHHALTUNG (neu): Übersicht · Bank · Belege · Lieferanten · Export · Einstellungen
+    # =================================================================
+    def bh_kopf(self, aktiv, unter="", aktionen="", monat=None):
+        m = f"?monat={monat}" if monat else ""
+        reiter = [
+            ("uebersicht", "Übersicht", f"/admin/buchhaltung{m}"),
+            ("bank", "Bank", f"/admin/buchhaltung/bank{m}"),
+            ("belege", "Belege", f"/admin/buchhaltung/belege{m}"),
+            ("lieferanten", "Lieferanten", f"/admin/buchhaltung/lieferanten{m}"),
+            ("export", "Export", f"/admin/buchhaltung/export{m}"),
+        ]
+        zahnrad = ('<a class="button bh-zahnrad" href="/admin/buchhaltung/einstellungen" aria-label="Einstellungen und Postfächer" title="Postfächer und Einstellungen">'
+                   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></a>')
+        leiste = self.bh_monat_leiste(self.path.split("?")[0], monat) if monat else ""
+        return admin_kopf("Buchhaltung", unter, f'<div class="bh-kopf-rechts">{leiste}{aktionen}{zahnrad}</div>', reiter, aktiv)
+
+    def bh_vormonat(self, monat):
+        j, m = int(monat[:4]), int(monat[5:])
+        return f"{j - (m == 1)}-{12 if m == 1 else m - 1:02d}"
+
+    def bh_summen(self, monat):
+        con = bh.db()
+        r = con.execute("SELECT COALESCE(SUM(CASE WHEN betrag<0 THEN -betrag END),0) aus, COALESCE(SUM(CASE WHEN betrag>0 THEN betrag END),0) ein FROM buchungen WHERE substr(datum,1,7)=?", (monat,)).fetchone()
+        con.close()
+        return r["aus"], r["ein"]
+
+    def bh_veraenderung(self, jetzt_wert, vorher, mehr_ist_gut):
+        if not vorher or not jetzt_wert:
+            return '<span class="bh-trend">noch kein Vergleich</span>'
+        p = round((jetzt_wert / vorher - 1) * 100)
+        gut = (p >= 0) == mehr_ist_gut
+        return f'<span class="bh-trend {"gut" if gut else "schlecht"}">{p:+d} % zum Vormonat</span>'
+
+    def bh_pruefpunkte(self, monat):
+        """Die Liste „Das solltest du dir ansehen“: (farbe, titel, unterzeile, link, knopf)"""
+        punkte = []
+        con = bh.db()
+        offen = con.execute("SELECT * FROM buchungen WHERE substr(datum,1,7)=? AND status='offen' ORDER BY ABS(betrag) DESC", (monat,)).fetchall()
+        vorschlag = con.execute("SELECT COUNT(*) FROM buchungen WHERE substr(datum,1,7)=? AND status='vorschlag'", (monat,)).fetchone()[0]
+        unsicher = con.execute("SELECT * FROM belege WHERE status='unsicher' ORDER BY id DESC").fetchall()
+        portal = con.execute("SELECT COUNT(*) FROM belege WHERE status='portal'").fetchone()[0]
+        neu = con.execute("SELECT COUNT(*) FROM belege WHERE status='neu' AND sicher=0 AND substr(datum,1,7)=?", (monat,)).fetchone()[0]
+        konten = con.execute("SELECT k.name, MAX(b.datum) bis FROM konten k LEFT JOIN buchungen b ON b.konto_id=k.id GROUP BY k.id").fetchall()
+        # Ausgaben je Gegenpartei: dieser Monat gegen die 3 Monate davor
+        m1 = self.bh_vormonat(monat)
+        m2 = self.bh_vormonat(m1)
+        m3 = self.bh_vormonat(m2)
+        summen = {}
+        for r in con.execute("SELECT gegenpartei, substr(datum,1,7) m, -SUM(betrag) s FROM buchungen WHERE betrag<0 AND substr(datum,1,7) IN (?,?,?,?) GROUP BY gegenpartei, m", (monat, m1, m2, m3)):
+            summen.setdefault(bh.schluessel_text(r["gegenpartei"]), {"name": r["gegenpartei"], "m": {}})["m"][r["m"]] = r["s"]
+        frueher = {bh.schluessel_text(r[0]) for r in con.execute("SELECT DISTINCT gegenpartei FROM buchungen WHERE substr(datum,1,7) < ?", (monat,))}
+        hat_vormonate = con.execute("SELECT 1 FROM buchungen WHERE substr(datum,1,7) < ? LIMIT 1", (monat,)).fetchone()
+        neue = con.execute("SELECT gegenpartei, MIN(datum) d, SUM(betrag) s FROM buchungen WHERE substr(datum,1,7)=? AND betrag<0 GROUP BY gegenpartei", (monat,)).fetchall()
+        con.close()
+        if offen:
+            namen = " · ".join(f"{b['gegenpartei'] or 'Unbekannt'} {bh.betrag_text(abs(b['betrag']))}" for b in offen[:3]) + (" …" if len(offen) > 3 else "")
+            punkte.append(("rot", f"{len(offen)} Zahlung(en) ohne Beleg", namen, f"/admin/buchhaltung/bank?monat={monat}&filter=offen", "Belege nachreichen", True))
+        if vorschlag:
+            punkte.append(("honig", f"{vorschlag} Vorschlag/Vorschläge kurz bestätigen", "Das System hat einen passenden Beleg gefunden, ist sich aber nicht ganz sicher.", f"/admin/buchhaltung/bank?monat={monat}&filter=vorschlag", "Bestätigen", False))
+        if unsicher:
+            namen = " · ".join(f"„{(b['original_name'] or b['lieferant'] or 'Dokument')[:40]}“" for b in unsicher[:2])
+            punkte.append(("honig", f"{len(unsicher)} Dokument(e) – ist das eine Rechnung?", namen, "/admin/buchhaltung/belege#rechnung-frage", "Ansehen", False))
+        if neu:
+            punkte.append(("honig", f"{neu} Beleg(e) mit unvollständigen Angaben", "Betrag oder Datum konnte nicht sicher gelesen werden.", f"/admin/buchhaltung/belege?monat={monat}&filter=ergaenzen", "Ergänzen", False))
+        if portal:
+            punkte.append(("honig", f"{portal} Rechnung(en) liegen nur im Kundenportal", "Dort herunterladen und hier hochladen.", "/admin/buchhaltung/belege?filter=portal", "Ansehen", False))
+        for eintrag in summen.values():
+            jetzt_s = eintrag["m"].get(monat, 0)
+            vorher = [eintrag["m"][x] for x in (m1, m2, m3) if x in eintrag["m"]]
+            if jetzt_s >= 10000 and len(vorher) >= 2:
+                schnitt = sum(vorher) / len(vorher)
+                if jetzt_s > 1.6 * schnitt:
+                    punkte.append(("blau", f"Ungewöhnlich hoch: {eintrag['name']}", f"{bh.betrag_text(jetzt_s)} in diesem Monat – sonst im Schnitt {bh.betrag_text(round(schnitt))}",
+                                   f"/admin/buchhaltung/lieferanten?monat={monat}&l={quote_plus(bh.schluessel_text(eintrag['name']))}", "Ansehen", False))
+        if hat_vormonate:
+            for r in neue:
+                if r["gegenpartei"] and bh.schluessel_text(r["gegenpartei"]) not in frueher:
+                    punkte.append(("blau", f"Neuer Empfänger: {r['gegenpartei']}", f"Erste Zahlung am {bh.datum_de(r['d'])} über {bh.betrag_text(abs(r['s']))}",
+                                   f"/admin/buchhaltung/bank?monat={monat}&q={quote_plus(r['gegenpartei'])}", "Ansehen", False))
+        ende = (datetime.strptime(monat + "-01", "%Y-%m-%d") + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        heute = bh.jetzt().date()
+        soll_bis = min(ende.date(), heute - timedelta(days=1))
+        if not konten:
+            punkte.append(("blau", "Noch kein Kontoauszug hochgeladen", "Ohne Kontoauszug weiß das System nicht, welche Belege fehlen.", "/admin/buchhaltung/bank", "Kontoauszug hochladen", False))
+        for k in konten:
+            if k["bis"] and k["bis"] < soll_bis.isoformat() and k["bis"][:7] <= monat:
+                punkte.append(("blau", f"Kontoauszug {k['name']} fehlt ab {bh.datum_de((datetime.strptime(k['bis'], '%Y-%m-%d') + timedelta(days=1)).date().isoformat())}",
+                               f"Letzte Buchung im System: {bh.datum_de(k['bis'])}", "/admin/buchhaltung/bank#auszug", "Kontoauszug hochladen", False))
+        return punkte
+
+    # ---------------------------------------------------------- Übersicht
+    def show_bh_uebersicht(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        monat = self.bh_monat(query)
+        z = bh.monats_zahlen(monat)
+        con = bh.db()
+        quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
+        letzter = bh.einstellung(con, "letzter_lauf")
+        adresse = bh.einstellung(con, "belege_adresse")
+        abschluss = con.execute("SELECT * FROM monate WHERE monat=?", (monat,)).fetchone()
+        belege_monat = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status NOT IN ('ignoriert','doppelt','unsicher')", (monat,)).fetchone()[0]
+        auto = con.execute("SELECT COUNT(DISTINCT z.buchung_id) FROM zuordnung z JOIN buchungen b ON b.id=z.buchung_id WHERE substr(b.datum,1,7)=? AND z.art IN ('auto','dauer')", (monat,)).fetchone()[0]
+        con.close()
+        aus, ein = self.bh_summen(monat)
+        aus_v, ein_v = self.bh_summen(self.bh_vormonat(monat))
+        erledigt = z["zugeordnet"] + z["kein_beleg"]
+        punkte = self.bh_pruefpunkte(monat)
+        offen_anzahl = len(punkte)
+        auto_quote = round(100 * auto / z["zugeordnet"]) if z["zugeordnet"] else None
+        prozent = round(100 * erledigt / z["gesamt"]) if z["gesamt"] else 0
+        # Die drei Schritte
+        s1_ok = bool(quellen) and belege_monat > 0
+        s2_ok = z["gesamt"] > 0 and not (z["offen"] or z["vorschlag"])
+        s3_ok = bool(abschluss)
+        jetzt_dran = 1 if not s1_ok else (2 if not s2_ok else (3 if not s3_ok else 0))
+
+        def schritt(nr, titel, text, ok, balken=""):
+            klasse = "ok" if ok else ("dran" if nr == jetzt_dran else "")
+            zusatz = " ✓" if ok else (" – jetzt dran" if nr == jetzt_dran else "")
+            return f'<div class="bh-schritt {klasse}"><b>{nr} · {esc(titel)}{zusatz}</b><span>{text}</span>{balken}</div>'
+        quellen_text = f"{len(quellen)} Postfach/Postfächer" if quellen else '<a href="/admin/buchhaltung/einstellungen">Postfach verbinden</a>'
+        s1 = schritt(1, "Belege sammeln", f"{belege_monat} Belege · {quellen_text}, Uploads und Fotos", s1_ok)
+        s2 = schritt(2, "Zuordnen", (f"{erledigt} von {z['gesamt']} Zahlungen erledigt" if z["gesamt"] else "Kontoauszug hochladen"), s2_ok,
+                     f'<span class="vw-balken"><span style="width:{prozent}%"></span></span>' if z["gesamt"] else "")
+        s3 = schritt(3, "Abschließen", (f"Abgeschlossen am {esc(abschluss['abgeschlossen_am'][:10])}" if abschluss else "Export für DATEV, dann Monat sperren"), s3_ok)
+        if s3_ok:
+            ueberschrift = "Dieser Monat ist abgeschlossen"
+            unter = "Später gefundene Belege landen automatisch in den Nachträgen."
+        elif not z["gesamt"] and not belege_monat:
+            ueberschrift = "Noch nichts da"
+            unter = "Verbinde ein Postfach und lade den Kontoauszug hoch – dann geht es los."
+        elif offen_anzahl:
+            ueberschrift = "Fast fertig" if prozent >= 80 else "Es gibt etwas zu tun"
+            unter = f"Noch {offen_anzahl} Punkt(e), dann kann der Monat zu DATEV"
+        else:
+            ueberschrift = "Alles erledigt"
+            unter = "Der Monat kann exportiert werden."
+        punkte_html = "".join(
+            f'<div class="bh-punkt"><span class="bh-punkt-farbe {f}"></span><div class="bh-punkt-text"><b>{esc(t)}</b><small>{esc(u)}</small></div>'
+            f'<a class="button{" primary" if haupt else ""}" href="{esc(l)}">{esc(k)}</a></div>'
+            for f, t, u, l, k, haupt in punkte
+        ) or '<p class="vw-leer">Nichts zu tun – alles andere hat das System erledigt. 👍</p>'
+        quellen_status = ""
+        if quellen:
+            fehler = [q for q in quellen if q["letzter_fehler"]]
+            quellen_status = (f'{len(quellen)} Postfach/Postfächer verbunden · zuletzt abgeholt {esc(letzter[:16]) if letzter else "noch nie"}'
+                              + (f'<br><span class="minus">Problem bei: {esc(", ".join(q["name"] for q in fehler))}</span>' if fehler else ""))
+        else:
+            quellen_status = "Noch kein Postfach verbunden."
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_lauf_html()}
+        {self.bh_kopf('uebersicht', '', '', monat)}
+        <section class="vw-karte bh-fortschritt">
+            <div class="bh-fortschritt-kopf"><h3>{esc(ueberschrift)}</h3><span>{esc(unter)}</span></div>
+            <div class="bh-schritte">{s1}{s2}{s3}</div>
+        </section>
+        <div class="vw-kennzahlen">
+            <div><small>Ausgaben</small><b>{esc(bh.betrag_text(aus))}</b>{self.bh_veraenderung(aus, aus_v, False)}</div>
+            <div><small>Einnahmen</small><b>{esc(bh.betrag_text(ein))}</b>{self.bh_veraenderung(ein, ein_v, True)}</div>
+            <div><small>Automatisch zugeordnet</small><b>{f"{auto_quote} %" if auto_quote is not None else "–"}</b><span class="bh-trend">{auto} von {z['zugeordnet']} ohne Klick</span></div>
+            <div><small>Zu prüfen</small><b class="{'minus' if offen_anzahl else ''}">{offen_anzahl}</b><span class="bh-trend">{'Punkte unten' if offen_anzahl else 'nichts offen'}</span></div>
+        </div>
+        <div class="bh-zwei">
+            <section class="vw-karte bh-haupt">
+                <div class="vw-karte-kopf"><h3>Das solltest du dir ansehen</h3></div>
+                <div class="bh-punkte">{punkte_html}</div>
+            </section>
+            <aside class="bh-seite">
+                <section class="vw-karte bh-adresse">
+                    <small>Deine Belegadresse</small>
+                    <b>{esc(adresse) if adresse else '<a href="/admin/buchhaltung/einstellungen#einstellungen">festlegen</a>'}</b>
+                    <span>Lieferanten, Team und du schicken Rechnungen einfach hierhin. Fotos gehen über „Beleg fotografieren“ in der App.</span>
+                </section>
+                <section class="vw-karte">
+                    <div class="vw-karte-kopf"><h3>Beleg hinzufügen</h3></div>
+                    <button type="button" class="bh-ablage" data-dialog="belegHochladen">PDF oder Foto hochladen</button>
+                </section>
+                <section class="vw-karte">
+                    <div class="vw-karte-kopf"><h3>Postfächer</h3><a class="vw-leise" href="/admin/buchhaltung/einstellungen">verwalten</a></div>
+                    <p class="vw-klein">{quellen_status}</p>
+                    {self.bh_abholen_knopf(None, 'Jetzt abholen', 'button') if quellen else '<a class="button" href="/admin/buchhaltung/einstellungen">+ Postfach verbinden</a>'}
+                </section>
+            </aside>
+        </div>
+        {self.bh_upload_dialog()}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Buchhaltung", body)
+
+    # ---------------------------------------------------------- Bank
+    def show_bh_bank(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        monat = self.bh_monat(query)
+        filt = self.query_text(query, "filter") or "alle"
+        suche = self.query_text(query, "q")
+        con = bh.db()
+        konten = con.execute("SELECT k.*, MAX(b.datum) bis FROM konten k LEFT JOIN buchungen b ON b.konto_id=k.id GROUP BY k.id ORDER BY k.name").fetchall()
+        konto_namen = {k["id"]: k["name"] for k in konten}
+        buchungen = con.execute("SELECT * FROM buchungen WHERE substr(datum,1,7)=? ORDER BY datum DESC, id DESC", (monat,)).fetchall()
+        zuord = {}
+        for r in con.execute("SELECT z.buchung_id, b.id, b.lieferant, b.rechnungsnr, b.art, b.bar, b.dauer FROM zuordnung z JOIN belege b ON b.id=z.beleg_id"):
+            zuord.setdefault(r["buchung_id"], []).append(r)
+        vorschlaege = {r["id"]: r for r in con.execute("SELECT * FROM belege WHERE id IN (SELECT vorschlag_id FROM buchungen WHERE vorschlag_id IS NOT NULL)")}
+        con.close()
+        if suche:
+            s = bh.schluessel_text(suche)
+            buchungen = [b for b in buchungen if s in bh.schluessel_text(f"{b['gegenpartei']} {b['zweck']} {bh.betrag_text(b['betrag'])}")]
+        z = {"alle": len(buchungen)}
+        for bu in buchungen:
+            z[bu["status"]] = z.get(bu["status"], 0) + 1
+        if filt != "alle":
+            buchungen = [bu for bu in buchungen if bu["status"] == filt]
+        chips = [("alle", f"Alle {z['alle']}"), ("offen", f"Fehlt {z.get('offen', 0)}")]
+        if z.get("vorschlag"):
+            chips.append(("vorschlag", f"Bitte bestätigen {z['vorschlag']}"))
+        chips += [("zugeordnet", f"Beleg da {z.get('zugeordnet', 0)}"), ("kein_beleg", f"Kein Beleg nötig {z.get('kein_beleg', 0)}")]
+        q_teil = f"&q={quote_plus(suche)}" if suche else ""
+        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/bank?monat={monat}&filter={k}{q_teil}">{esc(t)}</a>' for k, t in chips)
+        zeilen = []
+        for bu in buchungen:
+            if bu["status"] == "zugeordnet":
+                b0 = zuord.get(bu["id"], [])
+                info = '<span class="bh-status da">✓ ' + esc(", ".join((b["rechnungsnr"] or b["lieferant"] or "Beleg") for b in b0)[:40]) + "</span>"
+            elif bu["status"] == "vorschlag" and bu["vorschlag_id"] in vorschlaege:
+                v = vorschlaege[bu["vorschlag_id"]]
+                info = (f'<span class="bh-status frage">Passt {esc(v["rechnungsnr"] or v["lieferant"])}?</span>'
+                        f'<form method="post" action="/admin/buchhaltung/buchung/zuordnen" class="vw-inline-form"><input type="hidden" name="buchung_id" value="{bu["id"]}"><input type="hidden" name="beleg_{v["id"]}" value="1"><input type="hidden" name="monat" value="{monat}"><button class="button bh-klein" type="submit">Ja</button></form>')
+            elif bu["status"] == "kein_beleg":
+                info = '<span class="bh-status grau">kein Beleg nötig</span>'
+            else:
+                info = '<span class="bh-status fehlt">fehlt</span>'
+            zeilen.append(f"""
+            <tr class="vw-klickzeile" data-bh-buchung="{bu['id']}">
+                <td>{esc(bh.datum_de(bu['datum'])[:6])}<small class="vw-klein-block">{esc(konto_namen.get(bu['konto_id'], ''))}</small></td>
+                <td><b>{esc(bu['gegenpartei'] or '–')}</b><small class="vw-klein-block">{esc(bu['zweck'][:90])}</small></td>
+                <td class="zahl {'minus' if bu['betrag'] < 0 else 'plus'}"><b>{esc(bh.betrag_text(bu['betrag']))}</b></td>
+                <td class="bh-info">{info}</td>
+            </tr>""")
+        konten_text = " · ".join(f"{k['name']} bis {bh.datum_de(k['bis'])}" for k in konten if k["bis"]) or "Noch kein Kontoauszug hochgeladen"
+        konto_optionen = '<option value="">automatisch (aus der Datei)</option>' + "".join(f'<option value="{esc(k["name"])}">{esc(k["name"])}</option>' for k in konten)
+        leer = ("Keine Zahlungen in diesem Monat. Lade oben rechts einen Kontoauszug hoch." if not z["alle"] and not suche
+                else "Hier ist nichts – prima." if filt == "offen" else "Keine Treffer.")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_kopf('bank', esc(konten_text), '<button type="button" class="primary" data-dialog="auszugHochladen" id="auszug">Kontoauszug hochladen</button>', monat)}
+        <form method="get" action="/admin/buchhaltung/bank" class="vw-werkzeug bh-filterleiste"><input type="hidden" name="monat" value="{monat}"><input type="hidden" name="filter" value="{esc(filt)}">
+            <div class="vw-chips">{chips_html}</div>
+            <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Name oder Betrag"></label></form>
+        <div class="vw-tabelle-wrap"><table class="vw-tabelle bh-buchungen">
+            <tr><th>Datum</th><th>Empfänger / Zahler</th><th class="zahl">Betrag</th><th>Beleg</th></tr>
+            {''.join(zeilen) or f'<tr><td colspan="4" class="vw-leer">{leer}</td></tr>'}
+        </table></div>
+        <p class="vw-klein">Klick auf eine Zahlung: Beleg zuordnen oder hochladen, beim Lieferanten anfordern oder „kein Beleg nötig“.</p>
+        <dialog class="vw-dialog" id="auszugHochladen">
+            <div class="vw-dialog-kopf"><h3>Kontoauszug hochladen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/buchhaltung/konto/upload" enctype="multipart/form-data" class="vw-formular">
+                <label>Datei aus dem Online-Banking<input type="file" name="datei" accept=".xml,.zip,.csv,.txt" required></label>
+                <p class="vw-klein">Am besten im Format <b>CAMT.053</b> (XML oder ZIP). CSV geht auch – auch die Abrechnung von PayPal oder der Kreditkarte. Doppelte Zahlungen werden erkannt, überlappende Zeiträume sind also kein Problem.</p>
+                <label>Zu welchem Konto?<select name="konto">{konto_optionen}</select></label>
+                <label>… oder neues Konto anlegen<input name="konto_neu" placeholder="z. B. PayPal oder Kreditkarte"></label>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Hochladen und abgleichen</button></div>
+            </form>
+        </dialog>
+        {self.bh_upload_dialog()}
+        <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBuchungPanel"><div id="bhBuchungPanelInhalt"></div></dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Bank", body)
+
+    # ---------------------------------------------------------- Belege
+    def show_bh_belege(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        monat = self.bh_monat(query)
+        filt = self.query_text(query, "filter") or "alle"
+        suche = self.query_text(query, "q")
+        con = bh.db()
+        belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
+        unsicher = con.execute("SELECT * FROM belege WHERE status='unsicher' ORDER BY id DESC").fetchall()
+        portal = con.execute("SELECT * FROM belege WHERE status='portal' ORDER BY id DESC").fetchall()
+        im_monat = con.execute("SELECT * FROM belege WHERE substr(COALESCE(NULLIF(datum,''), erstellt),1,7)=? AND status NOT IN ('unsicher','portal') ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC", (monat,)).fetchall()
+        aussortiert_alle = con.execute("SELECT * FROM belege WHERE status IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 300").fetchall()
+        con.close()
+        gueltig = [b for b in im_monat if b["status"] not in ("ignoriert", "doppelt")]
+        gruppen = {
+            "alle": gueltig,
+            "eingang": [b for b in gueltig if b["art"] in ("ER", "GS")],
+            "ausgang": [b for b in gueltig if b["art"] == "AR"],
+            "ohne": [b for b in gueltig if b["id"] not in belegt and not b["bar"]],
+            "ergaenzen": [b for b in gueltig if b["status"] == "neu" and not b["sicher"]],
+            "portal": list(portal),
+            "ignoriert": list(aussortiert_alle),
+        }
+        zeilen = gruppen.get(filt, gueltig)
+        if suche:
+            s = bh.schluessel_text(suche)
+            zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
+        chips = [("alle", f"Alle {len(gruppen['alle'])}"), ("eingang", f"Eingang {len(gruppen['eingang'])}"), ("ausgang", f"Ausgang {len(gruppen['ausgang'])}"),
+                 ("ohne", f"Ohne Zahlung {len(gruppen['ohne'])}")]
+        if gruppen["ergaenzen"]:
+            chips.append(("ergaenzen", f"Unvollständig {len(gruppen['ergaenzen'])}"))
+        if portal:
+            chips.append(("portal", f"Im Portal holen {len(portal)}"))
+        chips.append(("ignoriert", "Aussortiert"))
+        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/belege?monat={monat}&filter={k}">{esc(t)}</a>' for k, t in chips)
+        frage_html = ""
+        if unsicher:
+            fragen = "".join(
+                f"""<div class="bh-punkt"><div class="bh-punkt-text"><b>{esc(b['original_name'] or 'Dokument')}</b> · {esc(b['lieferant'] or parseaddr(b['mail_von'] or '')[1] or '')}{(' · ' + esc(bh.betrag_text(b['betrag']))) if b['betrag'] is not None else ''}<small>{esc(b['notiz'] or '')}</small></div>
+                <button type="button" class="button" data-bh-beleg="{b['id']}">Ansehen</button>
+                <form method="post" action="/admin/buchhaltung/beleg/urteil" class="vw-inline-form"><input type="hidden" name="id" value="{b['id']}">
+                <button class="primary" type="submit" name="urteil" value="ja">Ja, Rechnung</button><button class="button" type="submit" name="urteil" value="nein">Keine Rechnung</button></form></div>"""
+                for b in unsicher)
+            frage_html = f"""<section class="vw-karte bh-frage-karte" id="rechnung-frage"><div class="vw-karte-kopf"><h3>Ist das eine Rechnung? ({len(unsicher)})</h3></div>
+                <p class="vw-klein">Deine Antwort merkt sich das System für ähnliche Dokumente vom selben Absender.</p>{fragen}</section>"""
+        kacheln = []
+        for b in zeilen:
+            if b["status"] == "portal":
+                status = f'<a class="bh-status frage" href="{esc(b["portal_link"])}" target="_blank" rel="noopener">im Portal öffnen</a>'
+            elif b["status"] in ("ignoriert", "doppelt"):
+                status = f'<span class="bh-status grau">{esc(bh.STATUS_TEXT.get(b["status"], b["status"]))}</span>'
+            elif b["id"] in belegt:
+                status = '<span class="bh-status da">✓ Zahlung</span>'
+            elif b["bar"]:
+                status = '<span class="bh-status da">✓ bar bezahlt</span>'
+            elif b["status"] == "neu" and not b["sicher"]:
+                status = '<span class="bh-status frage">bitte ergänzen</span>'
+            else:
+                status = '<span class="bh-status frage">Zahlung offen</span>'
+            endung = os.path.splitext(b["datei"] or "")[1].lower().lstrip(".") or "pdf"
+            kacheln.append(f"""
+            <button type="button" class="bh-kachel" data-bh-beleg="{b['id']}">
+                <span class="bh-kachel-bild"><span class="bh-art {b['art']}">{esc(bh.ARTEN.get(b['art'], b['art']))}</span><small>{esc(endung.upper())}{' · Foto' if b['bar'] else ''}</small></span>
+                <b>{esc(b['lieferant'] or 'Unbekannt')}</b>
+                <small>{esc(bh.datum_de(b['datum']))} · {esc(b['rechnungsnr'] or 'ohne Nr.')}</small>
+                <span class="bh-kachel-fuss"><b>{esc(bh.betrag_text(b['betrag'], b['waehrung']))}</b>{status}</span>
+            </button>""")
+        anzahl = len(gruppen["alle"])
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_lauf_html()}
+        {self.bh_kopf('belege', f'{anzahl} Belege in diesem Monat · automatisch benannt (Datum_Art_Lieferant_Nummer_Betrag)', '<button type="button" class="primary" data-dialog="belegHochladen">Beleg hochladen</button>', monat)}
+        {frage_html}
+        <form method="get" action="/admin/buchhaltung/belege" class="vw-werkzeug bh-filterleiste"><input type="hidden" name="monat" value="{monat}"><input type="hidden" name="filter" value="{esc(filt)}">
+            <div class="vw-chips">{chips_html}</div>
+            <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Nummer, Betrag"></label></form>
+        {'<p class="vw-klein">Alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; ein Klick auf das Dokument und „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
+        <div class="bh-kacheln">{''.join(kacheln) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
+        {self.bh_upload_dialog()}
+        <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Belege", body)
+
+    # ---------------------------------------------------------- Lieferanten
+    def bh_lieferanten_daten(self, jahr):
+        con = bh.db()
+        belege = con.execute("SELECT * FROM belege WHERE art IN ('ER','GS') AND status NOT IN ('ignoriert','doppelt','unsicher','portal') AND substr(datum,1,4)=?", (jahr,)).fetchall()
+        offen = con.execute("SELECT * FROM buchungen WHERE status='offen' AND betrag<0 AND substr(datum,1,4)=?", (jahr,)).fetchall()
+        belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
+        gelernt = {r["absender"]: r["urteil"] for r in con.execute("SELECT * FROM gelernt WHERE titel='*'")}
+        con.close()
+        liste = {}
+        for b in belege:
+            key = bh.schluessel_text(b["lieferant"] or "unbekannt") or "unbekannt"
+            e = liste.setdefault(key, {"key": key, "name": b["lieferant"] or "Unbekannt", "belege": [], "summe": 0, "monate": {}, "fehlt": [], "ohne_zahlung": 0, "mail": ""})
+            e["belege"].append(b)
+            betrag = b["betrag"] or 0
+            e["summe"] += -betrag if b["art"] == "GS" else betrag
+            e["monate"][(b["datum"] or "")[:7]] = e["monate"].get((b["datum"] or "")[:7], 0) + betrag
+            if b["id"] not in belegt and not b["bar"]:
+                e["ohne_zahlung"] += 1
+            if not e["mail"] and b["mail_von"]:
+                e["mail"] = parseaddr(b["mail_von"])[1]
+        for bu in offen:
+            treffer = next((e for e in liste.values() if bh.gleicher_lieferant(e["name"], bu["gegenpartei"])), None)
+            if treffer is None:
+                key = bh.schluessel_text(bu["gegenpartei"] or "unbekannt") or "unbekannt"
+                treffer = liste.setdefault(key, {"key": key, "name": bu["gegenpartei"] or "Unbekannt", "belege": [], "summe": 0, "monate": {}, "fehlt": [], "ohne_zahlung": 0, "mail": ""})
+            treffer["fehlt"].append(bu)
+        for e in liste.values():
+            e["immer"] = bool(e["mail"]) and gelernt.get(e["mail"].lower()) == "ja"
+        return sorted(liste.values(), key=lambda e: -e["summe"])
+
+    def show_bh_lieferanten(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        monat = self.bh_monat(query)
+        jahr = monat[:4]
+        suche = self.query_text(query, "q")
+        alle = self.bh_lieferanten_daten(jahr)
+        liste = [e for e in alle if not suche or bh.schluessel_text(suche) in e["key"]]
+        gewaehlt = self.query_text(query, "l") or (liste[0]["key"] if liste else "")
+        e = next((x for x in alle if x["key"] == gewaehlt), None)
+        zeilen = []
+        for x in liste:
+            if x["fehlt"]:
+                stand = f'<span class="bh-status fehlt">{len(x["fehlt"])} Beleg(e) fehlen</span>'
+            elif x["ohne_zahlung"]:
+                stand = f'<span class="bh-status frage">{x["ohne_zahlung"]} Zahlung(en) offen</span>'
+            else:
+                stand = '<span class="bh-status da">✓ alles da</span>'
+            zeilen.append(f"""<tr class="vw-klickzeile {'ist-aktiv' if e and x['key'] == e['key'] else ''}" data-href="/admin/buchhaltung/lieferanten?monat={monat}&l={quote_plus(x['key'])}{('&q=' + quote_plus(suche)) if suche else ''}">
+                <td><b>{esc(x['name'])}</b></td><td class="zahl">{len(x['belege'])}</td><td class="zahl"><b>{esc(bh.betrag_text(x['summe']))}</b></td><td>{stand}</td></tr>""")
+        detail = '<p class="vw-leer">Noch keine Lieferanten. Sie entstehen automatisch aus deinen Belegen und Zahlungen.</p>'
+        if e:
+            namen = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+            letzte6 = []
+            m = monat
+            for _ in range(6):
+                letzte6.append(m)
+                m = self.bh_vormonat(m)
+            letzte6.reverse()
+            hoechst = max([e["monate"].get(x, 0) for x in letzte6] + [1])
+            balken = "".join(
+                f'<div class="bh-balken-spalte"><span title="{esc(bh.betrag_text(e["monate"].get(x, 0)))}" style="height:{max(3, round(120 * e["monate"].get(x, 0) / hoechst))}px" class="{"jetzt" if x == monat else ""}"></span><small>{namen[int(x[5:]) - 1]}</small></div>'
+                for x in letzte6)
+            monate_mit = [v for k, v in e["monate"].items() if k]
+            schnitt = round(sum(monate_mit) / len(monate_mit)) if monate_mit else 0
+            belege_html = "".join(
+                f'<button type="button" class="vw-zeile bh-zeile-knopf" data-bh-beleg="{b["id"]}"><span>{esc(bh.datum_de(b["datum"]))} · {esc(b["rechnungsnr"] or "ohne Nr.")}</span><b>{esc(bh.betrag_text(b["betrag"]))}</b></button>'
+                for b in sorted(e["belege"], key=lambda b: b["datum"] or "", reverse=True)[:8])
+            fehlt_html = "".join(
+                f'<a class="vw-zeile" href="/admin/buchhaltung/bank?monat={(bu["datum"] or "")[:7]}&filter=offen"><span>{esc(bh.datum_de(bu["datum"]))} · Zahlung ohne Beleg</span><b class="minus">{esc(bh.betrag_text(bu["betrag"]))}</b></a>'
+                for bu in e["fehlt"][:6])
+            immer = ""
+            if e["mail"]:
+                immer = f"""<form method="post" action="/admin/buchhaltung/lieferant/immer" class="bh-immer"><input type="hidden" name="mail" value="{esc(e['mail'])}"><input type="hidden" name="zurueck" value="/admin/buchhaltung/lieferanten?monat={monat}&l={quote_plus(e['key'])}">
+                    <label class="vw-schalter bh-schalter"><input type="checkbox" name="an" value="1" {'checked' if e['immer'] else ''} data-auto-submit><span>Alles von {esc(e['mail'])} ist eine Rechnung</span></label></form>"""
+            detail = f"""
+                <small class="bh-ueber">Lieferant</small>
+                <h3 class="bh-detail-titel">{esc(e['name'])}</h3>
+                <p class="vw-klein">{esc(e['mail']) + ' · Rechnungen kommen per Mail' if e['mail'] else 'Rechnungen kommen per Upload oder Foto'}</p>
+                <h4 class="vw-zwischentitel">Ausgaben pro Monat</h4>
+                <div class="bh-balken">{balken}</div>
+                <div class="bh-mini-zahlen"><div><small>Ø pro Monat {esc(jahr)}</small><b>{esc(bh.betrag_text(schnitt))}</b></div><div><small>Summe {esc(jahr)}</small><b>{esc(bh.betrag_text(e['summe']))}</b></div></div>
+                {f'<h4 class="vw-zwischentitel">Belege fehlen</h4><div class="vw-liste">{fehlt_html}</div>' if fehlt_html else ''}
+                <h4 class="vw-zwischentitel">Letzte Belege</h4><div class="vw-liste">{belege_html or '<p class="vw-leer">Noch keine.</p>'}</div>
+                {immer}"""
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_kopf('lieferanten', f'Automatisch aus deinen Belegen und Zahlungen {esc(jahr)} – nichts einzutragen.', '', monat)}
+        <div class="bh-zwei">
+            <section class="bh-haupt">
+                <form method="get" action="/admin/buchhaltung/lieferanten" class="vw-werkzeug"><input type="hidden" name="monat" value="{monat}">
+                    <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant suchen"></label></form>
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+                    <tr><th>Lieferant</th><th class="zahl">Belege {esc(jahr)}</th><th class="zahl">Summe {esc(jahr)}</th><th>Stand</th></tr>
+                    {''.join(zeilen) or '<tr><td colspan="4" class="vw-leer">Noch keine Lieferanten.</td></tr>'}
+                </table></div>
+            </section>
+            <aside class="vw-karte bh-seite bh-detail">{detail}</aside>
+        </div>
+        <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Lieferanten", body)
+
+    def handle_bh_lieferant_immer(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        mail = self.form_value(form, "mail").strip().lower()
+        zurueck = self.form_value(form, "zurueck")
+        if not zurueck.startswith("/admin/buchhaltung/lieferanten"):
+            zurueck = "/admin/buchhaltung/lieferanten"
+        if mail:
+            con = bh.db()
+            if self.form_value(form, "an"):
+                con.execute("INSERT OR REPLACE INTO gelernt (absender, titel, urteil, beispiel, erstellt) VALUES (?, '*', 'ja', 'von dir festgelegt', ?)", (mail, bh.jetzt_text()))
+            else:
+                con.execute("DELETE FROM gelernt WHERE absender=? AND titel='*' AND urteil='ja'", (mail,))
+            con.commit()
+            con.close()
+        self.redirect(zurueck)
+
+    # ---------------------------------------------------------- Export
+    def show_bh_export(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        monat = self.bh_monat(query)
+        z = bh.monats_zahlen(monat)
+        con = bh.db()
+        abschluss = con.execute("SELECT * FROM monate WHERE monat=?", (monat,)).fetchone()
+        abschluesse = {r["monat"]: r for r in con.execute("SELECT * FROM monate")}
+        unsicher = con.execute("SELECT COUNT(*) FROM belege WHERE status='unsicher'").fetchone()[0]
+        er = con.execute("SELECT COUNT(*) FROM belege WHERE art IN ('ER','GS') AND status NOT IN ('ignoriert','doppelt','portal','unsicher') AND substr(datum,1,7)=?", (monat,)).fetchone()[0]
+        ar = con.execute("SELECT COUNT(*) FROM belege WHERE art='AR' AND status NOT IN ('ignoriert','doppelt','portal','unsicher') AND substr(datum,1,7)=?", (monat,)).fetchone()[0]
+        konten = con.execute("SELECT k.name, MAX(b.datum) bis FROM konten k LEFT JOIN buchungen b ON b.konto_id=k.id GROUP BY k.id").fetchall()
+        nachtraege = con.execute("SELECT COUNT(*) FROM belege b JOIN monate m ON m.monat=substr(b.datum,1,7) WHERE b.erstellt > m.abgeschlossen_am AND b.status NOT IN ('ignoriert','doppelt','unsicher','portal')").fetchone()[0]
+        con.close()
+        ende = ((datetime.strptime(monat + "-01", "%Y-%m-%d") + timedelta(days=32)).replace(day=1) - timedelta(days=1)).date()
+        auszug_ok = bool(konten) and all((k["bis"] or "") >= min(ende, bh.jetzt().date() - timedelta(days=1)).isoformat() for k in konten)
+
+        def punkt(ok, titel, text):
+            return f'<div class="bh-check"><span class="bh-check-zeichen {"ok" if ok else "warn"}">{"✓" if ok else "!"}</span><div><b>{esc(titel)}</b><small>{esc(text)}</small></div></div>'
+        fehlend = z["offen"] + z["vorschlag"]
+        checks = "".join([
+            punkt(auszug_ok, "Kontoauszüge bis Monatsende", " · ".join(f"{k['name']} bis {bh.datum_de(k['bis'])}" for k in konten) or "Noch kein Kontoauszug hochgeladen"),
+            punkt(not fehlend, f"{fehlend} Zahlung(en) ohne Beleg" if fehlend else "Alle Zahlungen haben einen Beleg",
+                  "Du kannst trotzdem exportieren – sie stehen dann auf der Liste „Fehlende Belege“." if fehlend else f"{z['zugeordnet']} zugeordnet, {z['kein_beleg']} ohne Beleg nötig"),
+            punkt(not unsicher, "Alle Dokumente geprüft" if not unsicher else f"{unsicher} „Rechnung?“-Frage(n) offen", "Keine offenen Fragen" if not unsicher else "Unter Belege oben beantworten"),
+        ])
+        inhalt = "".join(f'<div class="bh-ordner"><span>📁</span><span>{esc(n)}</span><small>{esc(c)}</small></div>' for n, c in [
+            ("Rechnungseingang", f"{er} Belege"), ("Rechnungsausgang", f"{ar} Belege"), ("Fehlende_Belege.pdf", f"{fehlend} Zahlungen"),
+            ("Offene_Rechnungen.pdf", "Rechnungen ohne Zahlung"), ("Abgleich.xlsx", "jede Zahlung mit ihrem Beleg")])
+        andere = []
+        for m in bh.monate_mit_daten()[:8]:
+            if m == monat:
+                continue
+            ab = abschluesse.get(m)
+            zz = bh.monats_zahlen(m)
+            stand = (f'<span class="bh-status da">✓ abgeschlossen {esc(ab["abgeschlossen_am"][:10])}</span>' if ab
+                     else (f'<span class="bh-status frage">{zz["offen"] + zz["vorschlag"]} fehlen</span>' if zz["offen"] + zz["vorschlag"] else '<span class="bh-status grau">offen</span>'))
+            andere.append(f'<a class="vw-zeile" href="/admin/buchhaltung/export?monat={m}"><span>{m[5:]}/{m[:4]}</span>{stand}</a>')
+        name = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"][int(monat[5:]) - 1]
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_kopf('export', 'Ein Klick – du bekommst eine ZIP-Datei, die du bei DATEV hochlädst.', '', monat)}
+        <div class="bh-zwei">
+            <section class="vw-karte bh-haupt">
+                <div class="vw-karte-kopf"><h3>{esc(name)} – bereit?</h3>{f'<span class="vw-marke gruen">abgeschlossen {esc(abschluss["abgeschlossen_am"][:10])}</span>' if abschluss else ''}</div>
+                {checks}
+                <div class="vw-knopfreihe bh-export-knoepfe">
+                    <a class="button primary" href="/admin/buchhaltung/export.zip?monat={monat}">⤓ {esc(name)} als ZIP herunterladen</a>
+                    <form method="post" action="/admin/buchhaltung/monat/{'oeffnen' if abschluss else 'abschliessen'}" {'' if abschluss else f'data-vw-confirm="{esc(name)} abschließen? Später gefundene Belege landen dann im Ordner Nachtrag."'}><input type="hidden" name="monat" value="{monat}"><button class="button" type="submit">{'Wieder öffnen' if abschluss else 'Monat abschließen'}</button></form>
+                </div>
+                <p class="vw-klein">Abschließen sperrt den Monat. Kommt danach noch ein Beleg, landet er beim nächsten Export im Ordner „Nachtrag“.</p>
+            </section>
+            <aside class="bh-seite">
+                <section class="vw-karte"><div class="vw-karte-kopf"><h3>Inhalt der ZIP-Datei</h3></div>{inhalt}
+                    <p class="vw-klein">Dateinamen: Datum_Art_Lieferant_Nummer_Betrag. E-Rechnungen zusätzlich als XML-Original.</p></section>
+                <section class="vw-karte"><div class="vw-karte-kopf"><h3>Andere Monate</h3></div><div class="vw-liste">{''.join(andere) or '<p class="vw-leer">Noch keine.</p>'}</div>
+                    {f'<p class="vw-klein">{nachtraege} Nachtrag/Nachträge für abgeschlossene Monate – sie kommen beim Export des jeweiligen Monats in den Ordner „Nachtrag“.</p>' if nachtraege else ''}</section>
+            </aside>
+        </div>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Export", body)
+
+    # ---------------------------------------------------------- Einstellungen (Zahnrad)
+    def show_bh_einstellungen(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        con = bh.db()
+        quellen = con.execute("SELECT * FROM quellen ORDER BY name").fetchall()
+        namen = bh.einstellung(con, "eigene_namen")
+        domains = bh.einstellung(con, "eigene_domains")
+        belege_adresse = bh.einstellung(con, "belege_adresse")
+        erinnerung_an = bh.einstellung(con, "erinnerung_an")
+        gelernt = con.execute("SELECT * FROM gelernt ORDER BY erstellt DESC").fetchall()
+        regeln = con.execute("SELECT * FROM regeln ORDER BY name").fetchall()
+        importe = con.execute("SELECT i.*, k.name konto FROM importe i LEFT JOIN konten k ON k.id=i.konto_id ORDER BY i.id DESC LIMIT 5").fetchall()
+        con.close()
+        karten, dialoge = [], []
+        for q in quellen:
+            d = dict(q)
+            status = "Problem" if q["letzter_fehler"] else ("pausiert" if not q["aktiv"] else "aktiv")
+            marke = "rot" if q["letzter_fehler"] else ("grau" if not q["aktiv"] else "gruen")
+            karten.append(f"""
+            <div class="bh-quelle-zeile" id="q-{q['id']}">
+                <div><b>{esc(q['name'])}</b> <span class="vw-marke {marke}">{status}</span>
+                    <small class="vw-klein-block">{esc(q['benutzer'])} · {esc(q['letzter_status'] or 'noch nie abgeholt')}{' · jeder Anhang ist ein Beleg' if q['alles_ist_beleg'] else ''}{(' · liest ab ' + esc(bh.datum_de(q['start_datum']))) if q['start_datum'] else ''}</small></div>
+                <div class="vw-knopfreihe">
+                    {self.bh_abholen_knopf(q['id'], 'Abholen', 'button')}
+                    <button type="button" class="button" data-dialog="quelle-{q['id']}">Bearbeiten</button>
+                </div>
+            </div>""")
+            dialoge.append(f"""
+            <dialog class="vw-dialog" id="quelle-{q['id']}">
+                <div class="vw-dialog-kopf"><h3>Postfach bearbeiten</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+                <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular(d)}
+                    <p class="vw-klein">Ändere „Ab wann einlesen“ auf ein früheres Datum, um ältere Mails noch einmal zu durchsuchen. Schon vorhandene Belege werden nicht doppelt angelegt.</p>
+                    <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div></form>
+                <div class="vw-knopfreihe">
+                    <form method="post" action="/admin/buchhaltung/quelle/testen"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="button" type="submit">Verbindung testen</button></form>
+                    <form method="post" action="/admin/buchhaltung/quelle/aktiv"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="vw-leise" type="submit">{'Pausieren' if q['aktiv'] else 'Wieder aktivieren'}</button></form>
+                </div>
+                <form method="post" action="/admin/buchhaltung/quelle/loeschen" class="vw-gefahrzone" data-vw-confirm="Postfach „{esc(q['name'])}“ entfernen? Bereits gefundene Belege bleiben erhalten.">
+                    <input type="hidden" name="quelle_id" value="{q['id']}"><span>Postfach entfernen (Belege bleiben)</span><button class="danger" type="submit">Entfernen</button></form>
+            </dialog>""")
+        gelernt_html = ('<div class="vw-tabelle-wrap vw-ohne-rand"><table class="vw-tabelle"><tr><th>Absender</th><th>Dokumentart</th><th>Entscheidung</th><th></th></tr>' + ''.join(
+            f"""<tr><td>{esc(r['absender'] if r['absender'] != '*' else 'jeder Absender')}</td><td>{esc(r['titel'] if r['titel'] != '*' else 'alles')}<small class="vw-klein-block">{esc(r['beispiel'])}</small></td>
+            <td>{'<span class="vw-marke gruen">Rechnung</span>' if r['urteil'] == 'ja' else '<span class="vw-marke grau">überspringen</span>'}</td>
+            <td><form method="post" action="/admin/buchhaltung/erkennung/regel-loeschen"><input type="hidden" name="absender" value="{esc(r['absender'])}"><input type="hidden" name="titel" value="{esc(r['titel'])}"><button class="vw-leise" type="submit">Vergessen</button></form></td></tr>"""
+            for r in gelernt) + '</table></div>') if gelernt else '<p class="vw-leer">Noch nichts gelernt.</p>'
+        regeln_html = "".join(
+            f'<li><span>{esc(r["muster"])}</span><form method="post" action="/admin/buchhaltung/regel/loeschen" class="vw-inline-form"><input type="hidden" name="regel_id" value="{r["id"]}"><button class="vw-leise" type="submit" aria-label="Regel löschen">×</button></form></li>'
+            for r in regeln)
+        importe_html = "".join(f'<li>{esc(i["erstellt"][:16])} · {esc(i["konto"] or "")} · {esc(i["dateiname"])}: {i["neu"]} neu, {i["doppelt"]} schon da</li>' for i in importe)
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.bh_lauf_html()}
+        {admin_kopf('Buchhaltung · Einstellungen', 'Postfächer, Belegadresse, Regeln und gelernte Rechnungserkennung.', '<a class="button" href="/admin/buchhaltung">‹ Zurück zur Übersicht</a>')}
+        <section class="vw-karte">
+            <div class="vw-karte-kopf"><h3>Postfächer</h3><button type="button" class="primary" data-dialog="neueQuelle">+ Postfach verbinden</button></div>
+            <p class="vw-klein">Die Postfächer werden nur gelesen – nichts wird gelöscht, verschoben oder als gelesen markiert. Passwörter werden verschlüsselt gespeichert. Abgeholt wird jede Nacht und morgens um halb sechs automatisch.</p>
+            {''.join(karten) or '<p class="vw-leer">Noch kein Postfach. Tipp: Lege bei Strato ein eigenes Postfach belege@opapeters.de an und verbinde es hier mit „Jeder Anhang ist ein Beleg“.</p>'}
+        </section>
+        <section class="vw-karte" id="einstellungen">
+            <div class="vw-karte-kopf"><h3>Allgemein</h3></div>
+            <form method="post" action="/admin/buchhaltung/einstellungen" class="vw-formular">
+                <div class="vw-zwei"><label>Deine Belegadresse<input type="email" name="belege_adresse" value="{esc(belege_adresse)}" placeholder="belege@opapeters.de"></label>
+                    <label>Monatserinnerung am 3. an<input type="email" name="erinnerung_an" value="{esc(erinnerung_an)}" placeholder="info@opapeters.de"></label></div>
+                <div class="vw-zwei"><label>Eigene Firmennamen (mit Komma)<input name="eigene_namen" value="{esc(namen)}"></label>
+                    <label>Eigene E-Mail-Domains (mit Komma)<input name="eigene_domains" value="{esc(domains)}"></label></div>
+                <p class="vw-klein">Rechnungen, in denen deine Firma als Verkäufer steht, gelten als Ausgangsrechnung.</p>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
+            </form>
+        </section>
+        <div class="vw-raster-2">
+            <section class="vw-karte"><div class="vw-karte-kopf"><h3>Kein Beleg nötig</h3></div>
+                <p class="vw-klein">Zahlungen, deren Empfänger oder Verwendungszweck diesen Text enthält, zählen nie als fehlend (z. B. Lohn, Finanzamt, Bankgebühren).</p>
+                <ul class="bh-regeln">{regeln_html or '<li class="vw-klein">Noch keine Regeln.</li>'}</ul>
+                <form method="post" action="/admin/buchhaltung/regel/neu" class="vw-inline-form"><input name="muster" placeholder="z. B. Finanzamt" required class="vw-wachsen"><button class="button" type="submit">+ Regel</button></form></section>
+            <section class="vw-karte"><div class="vw-karte-kopf"><h3>Letzte Kontoauszüge</h3></div><ul class="bh-importe">{importe_html or '<li class="vw-klein">Noch nichts hochgeladen.</li>'}</ul></section>
+        </div>
+        <details class="vw-karte vw-aufklapp" id="gelernt">
+            <summary>Rechnungserkennung: was das System gelernt hat ({len(gelernt)})</summary>
+            <p class="vw-klein">Ein PDF wird nur übernommen, wenn es wie eine Rechnung aussieht. BWA, Umsatzberichte, Mahnungen, Angebote, Lieferscheine, AGB usw. werden übersprungen. Unklare Fälle landen unter Belege → „Ist das eine Rechnung?“.</p>
+            {gelernt_html}
+            <form method="post" action="/admin/buchhaltung/erkennung/neu-pruefen" class="vw-knopfreihe" data-vw-confirm="Alle noch nicht bestätigten Belege aus Postfächern neu prüfen? Nichts wird gelöscht.">
+                <button class="button" type="submit">Alle Belege neu prüfen</button></form>
+        </details>
+        <form method="post" action="/admin/buchhaltung/leeren" class="vw-gefahrzone" data-vw-confirm="Wirklich ALLE Belege und Kontoauszüge löschen? Vorher wird automatisch eine Sicherung angelegt. Postfächer, Einstellungen und Gelerntes bleiben.">
+            <span>Buchhaltung leeren – alle Belege und Kontoauszüge entfernen und bei null anfangen (mit Sicherung)</span><button class="danger" type="submit">Leeren</button></form>
+        <dialog class="vw-dialog" id="neueQuelle">
+            <div class="vw-dialog-kopf"><h3>Postfach verbinden</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/buchhaltung/quelle/speichern" class="vw-formular">{self.bh_quelle_formular()}
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Verbinden und testen</button></div></form>
+        </dialog>
+        {''.join(dialoge)}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Buchhaltung · Einstellungen", body)
+
+    def handle_bh_leeren(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        self.read_form()
+        try:
+            ziel = bh.alles_leeren("Von Hand geleert")
+        except Exception as fehler:
+            return self.redirect("/admin/buchhaltung/einstellungen?error=" + quote_plus(f"Leeren fehlgeschlagen: {fehler}"))
+        self.redirect("/admin/buchhaltung?msg=" + quote_plus(f"Alles geleert. Sicherung: {os.path.basename(ziel)}. Ab jetzt kommen nur neue Mails dazu."))
+
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -8904,6 +9214,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_quelle("loeschen")
             if path == "/admin/buchhaltung/einstellungen":
                 return self.handle_bh_einstellungen()
+            if path == "/admin/buchhaltung/lieferant/immer":
+                return self.handle_bh_lieferant_immer()
+            if path == "/admin/buchhaltung/leeren":
+                return self.handle_bh_leeren()
             if path == "/admin/buchhaltung/beleg/upload":
                 return self.handle_bh_beleg_upload()
             if path == "/admin/buchhaltung/beleg/speichern":

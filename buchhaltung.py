@@ -214,6 +214,14 @@ def init(data_dir):
         setze_einstellung(con, "eigene_domains", "opapeters.de")
     con.commit()
     con.close()
+    if not einstellung_lesen("neustart_v1"):
+        # Einmaliger Neustart (Wunsch Nov. 2026): alle bisherigen Belege und Kontoauszüge raus, Sicherung vorher
+        alles_leeren(grund="Neustart der Buchhaltung")
+        con = db()
+        setze_einstellung(con, "neustart_v1", jetzt_text())
+        setze_einstellung(con, "aufgeraeumt_v1", jetzt_text())
+        con.commit()
+        con.close()
     if not einstellung_lesen("aufgeraeumt_v1"):
         ergebnis = belege_neu_pruefen()
         con = db()
@@ -1737,3 +1745,53 @@ def belege_neu_pruefen():
     finally:
         con.close()
     return ergebnis
+
+
+# ---------------------------------------------------------------- Alles leeren (Neustart)
+
+def alles_leeren(grund="Buchhaltung geleert"):
+    """Löscht alle Belege, Kontoauszüge/Buchungen, Zuordnungen und Monatsabschlüsse.
+    Bleibt erhalten: Postfächer (Quellen), Einstellungen, gelernte Rechnungserkennung, Regeln, Lieferanten-Namen.
+    Vorher wird alles als ZIP gesichert. -> Pfad der Sicherung"""
+    import zipfile
+    sicherungen = os.path.join(os.path.dirname(BASIS.rstrip("/")), "sicherungen")
+    os.makedirs(sicherungen, exist_ok=True)
+    ziel = os.path.join(sicherungen, f"buchhaltung_vor_leeren_{jetzt().strftime('%Y-%m-%d_%H-%M-%S')}.zip")
+    kopie = DB_PFAD + ".sicherung"
+    quelle = sqlite3.connect(DB_PFAD)
+    ziel_db = sqlite3.connect(kopie)
+    quelle.backup(ziel_db)
+    ziel_db.close()
+    quelle.close()
+    with zipfile.ZipFile(ziel, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(kopie, "buchhaltung.db")
+        for wurzel, _ordner, dateien in os.walk(ARCHIV):
+            for name in dateien:
+                pfad = os.path.join(wurzel, name)
+                z.write(pfad, os.path.join("archiv", os.path.relpath(pfad, ARCHIV)))
+    os.remove(kopie)
+    con = db()
+    for tabelle in ("zuordnung", "buchungen", "importe", "konten", "belege", "positionen", "positionen_gelesen",
+                    "anforderungen", "monate", "quellen_gesehen"):
+        con.execute(f"DELETE FROM {tabelle}")
+    heute = jetzt().date().isoformat()
+    con.execute("UPDATE quellen SET start_datum=?, gefunden=0, letzter_status='', letzter_fehler=0", (heute,))
+    for key in ("erinnerung_%",):
+        con.execute("DELETE FROM einstellungen WHERE schluessel LIKE ?", (key,))
+    protokolliere(con, "leeren", f"{grund}: alle Belege und Kontoauszüge entfernt, Sicherung {os.path.basename(ziel)}")
+    con.commit()
+    con.execute("VACUUM")
+    con.close()
+    for wurzel, ordner, dateien in os.walk(ARCHIV, topdown=False):
+        for name in dateien:
+            try:
+                os.chmod(os.path.join(wurzel, name), 0o640)
+                os.remove(os.path.join(wurzel, name))
+            except OSError:
+                pass
+        for name in ordner:
+            try:
+                os.rmdir(os.path.join(wurzel, name))
+            except OSError:
+                pass
+    return ziel
