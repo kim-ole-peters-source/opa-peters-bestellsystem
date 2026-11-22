@@ -1653,6 +1653,11 @@ FUELLWOERTER = {"gmbh", "mbh", "und", "co", "kg", "ag", "ug", "ohg", "gbr", "ev"
                 "notprovided", "zahlung", "payment", "online", "deutschland", "germany", "europe", "service", "services", "www", "com", "de"}
 
 
+# Zahlungsdienste: hier steht oft nicht der eigentliche Lieferant als Empfänger
+ZAHLDIENSTE = {"paypal", "klarna", "stripe", "adyen", "mollie", "sumup", "unzer", "payone", "concardis", "nexi", "worldline",
+               "sofort", "giropay", "ratepay", "billpay", "afterpay", "riverty", "payu", "wirecard", "computop", "heidelpay", "secupay", "american", "express", "amex", "visa", "mastercard"}
+
+
 def _woerter(text):
     return {w for w in schluessel_text(text).split() if len(w) >= 3 and not w.isdigit() and w not in FUELLWOERTER}
 
@@ -1707,11 +1712,17 @@ def punkte(buchung, beleg, bekannt=None):
     lief = _woerter(beleg["lieferant"])
     if lief & _woerter(zweck):
         p += 25
-    elif bekannt:
-        for key in (schluessel_text(buchung["iban_gegen"] or ""), schluessel_text(buchung["gegenpartei"] or "")):
-            if key and lief & bekannt.get(key, set()):
-                p += 20
-                break
+    else:
+        gelernt = False
+        if bekannt:
+            for key in (schluessel_text(buchung["iban_gegen"] or ""), schluessel_text(buchung["gegenpartei"] or "")):
+                if key and lief & bekannt.get(key, set()):
+                    p += 20
+                    gelernt = True
+                    break
+        gegen = _woerter(buchung["gegenpartei"])
+        if not gelernt and not nummer and lief and gegen and not (gegen & ZAHLDIENSTE) and not (lief & {"unbekannt"}):
+            p -= 35  # ganz anderer Empfänger (z. B. Amazon-Zahlung, Telekom-Rechnung) -> nur gleicher Betrag reicht nicht
     try:
         tage = (datetime.strptime(buchung["datum"], "%Y-%m-%d") - datetime.strptime(beleg["datum"], "%Y-%m-%d")).days
         if -5 <= tage <= 21:
