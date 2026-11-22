@@ -8574,6 +8574,7 @@ class App(BaseHTTPRequestHandler):
         adresse = bh.einstellung(con, "belege_adresse")
         abschluss = con.execute("SELECT * FROM monate WHERE monat=?", (monat,)).fetchone()
         belege_monat = con.execute("SELECT COUNT(*) FROM belege WHERE substr(datum,1,7)=? AND status NOT IN ('ignoriert','doppelt','unsicher')", (monat,)).fetchone()[0]
+        eingang = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 6").fetchall()
         auto = con.execute("SELECT COUNT(DISTINCT z.buchung_id) FROM zuordnung z JOIN buchungen b ON b.id=z.buchung_id WHERE substr(b.datum,1,7)=? AND z.art IN ('auto','dauer')", (monat,)).fetchone()[0]
         con.close()
         aus, ein = self.bh_summen(monat)
@@ -8650,6 +8651,10 @@ class App(BaseHTTPRequestHandler):
                 <section class="vw-karte">
                     <div class="vw-karte-kopf"><h3>Beleg hinzufügen</h3></div>
                     <button type="button" class="bh-ablage" data-dialog="belegHochladen">PDF oder Foto hochladen</button>
+                </section>
+                <section class="vw-karte">
+                    <div class="vw-karte-kopf"><h3>Zuletzt eingegangen</h3><a class="vw-leise" href="/admin/buchhaltung/belege?filter=zuletzt">alle</a></div>
+                    <div class="vw-liste">{''.join(f'<button type="button" class="vw-zeile bh-zeile-knopf" data-bh-ansehen="{b["id"]}"><span><b>{esc(b["lieferant"] or "Unbekannt")}</b><small>{esc(bh.datum_de(b["datum"]) or "ohne Datum")} · {"Rechnung?" if b["status"] == "unsicher" else ("Portal" if b["status"] == "portal" else esc(bh.ARTEN.get(b["art"], "")))}</small></span><b>{esc(bh.betrag_text(b["betrag"])) if b["betrag"] is not None else ""}</b></button>' for b in eingang) or '<p class="vw-leer">Noch nichts.</p>'}</div>
                 </section>
                 <section class="vw-karte">
                     <div class="vw-karte-kopf"><h3>Postfächer</h3><a class="vw-leise" href="/admin/buchhaltung/einstellungen">verwalten</a></div>
@@ -8768,6 +8773,7 @@ class App(BaseHTTPRequestHandler):
         portal = con.execute("SELECT * FROM belege WHERE status='portal' ORDER BY id DESC").fetchall()
         im_monat = con.execute("SELECT * FROM belege WHERE substr(COALESCE(NULLIF(datum,''), erstellt),1,7)=? AND status NOT IN ('unsicher','portal') ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC", (monat,)).fetchall()
         aussortiert_alle = con.execute("SELECT * FROM belege WHERE status IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 300").fetchall()
+        zuletzt = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 40").fetchall()
         uebersprungen = con.execute("SELECT * FROM uebersprungen WHERE uebernommen=0 ORDER BY id DESC LIMIT 200").fetchall() if filt == "ignoriert" else []
         con.close()
         gueltig = [b for b in im_monat if b["status"] not in ("ignoriert", "doppelt")]
@@ -8779,12 +8785,13 @@ class App(BaseHTTPRequestHandler):
             "ergaenzen": [b for b in gueltig if b["status"] == "neu" and not b["sicher"]],
             "portal": list(portal),
             "ignoriert": list(aussortiert_alle),
+            "zuletzt": [b for b in zuletzt if b["status"] != "unsicher"],
         }
         zeilen = gruppen.get(filt, gueltig)
         if suche:
             s = bh.schluessel_text(suche)
             zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
-        chips = [("alle", f"Alle {len(gruppen['alle'])}"), ("eingang", f"Eingang {len(gruppen['eingang'])}"), ("ausgang", f"Ausgang {len(gruppen['ausgang'])}"),
+        chips = [("zuletzt", "Zuletzt eingegangen"), ("alle", f"Alle {len(gruppen['alle'])}"), ("eingang", f"Eingang {len(gruppen['eingang'])}"), ("ausgang", f"Ausgang {len(gruppen['ausgang'])}"),
                  ("ohne", f"Ohne Zahlung {len(gruppen['ohne'])}")]
         if gruppen["ergaenzen"]:
             chips.append(("ergaenzen", f"Unvollständig {len(gruppen['ergaenzen'])}"))
@@ -8826,10 +8833,14 @@ class App(BaseHTTPRequestHandler):
                 <span class="bh-kachel-bild">{bild}</span>
                 <b class="bh-kachel-name">{esc(b['lieferant'] or 'Unbekannt')}</b>
                 <span class="bh-art-text {b['art']}">{esc(bh.ARTEN.get(b['art'], b['art']))}{' · Foto' if endung in ('jpg', 'jpeg', 'png', 'webp', 'heic') else ''}</span>
-                <small>{esc(bh.datum_de(b['datum']))} · {esc(b['rechnungsnr'] or 'ohne Nr.')}</small>
+                <small>{esc(bh.datum_de(b['datum']) or 'ohne Datum')} · {esc(b['rechnungsnr'] or 'ohne Nr.')}{(' · eingegangen ' + esc(bh.datum_de(b['erstellt'][:10]))) if filt == 'zuletzt' else ''}</small>
                 <span class="bh-kachel-fuss"><b>{esc(bh.betrag_text(b['betrag'], b['waehrung']))}</b>{status}</span>
             </button>""")
         anzahl = len(gruppen["alle"])
+        if filt == "zuletzt":
+            kacheln_hinweis = '<p class="vw-klein">Die 40 zuletzt eingegangenen Belege – egal aus welchem Monat. Eine Rechnung vom Oktober, die erst im November kommt, steht sonst unter Oktober.</p>'
+        else:
+            kacheln_hinweis = ""
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
         {self.bh_lauf_html()}
@@ -8840,6 +8851,7 @@ class App(BaseHTTPRequestHandler):
             <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Nummer, Betrag"></label></form>
         {'<p class="vw-klein">Alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; ein Klick auf das Dokument und „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
         {self.bh_uebersprungen_html(uebersprungen) if filt == 'ignoriert' else ''}
+        {kacheln_hinweis}
         <div class="bh-kacheln">{''.join(kacheln) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
         {self.bh_upload_dialog()}
         <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>

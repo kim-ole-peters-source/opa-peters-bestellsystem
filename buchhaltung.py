@@ -364,6 +364,11 @@ def datum_de(iso):
 
 
 def dateiname_teil(text, laenge=40):
+    import unicodedata
+    text = (text or "")
+    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue"), ("ß", "ss")):
+        text = text.replace(alt, neu)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     text = (text or "").strip()
     for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue"), ("ß", "ss"), ("&", "und")):
         text = text.replace(alt, neu)
@@ -515,6 +520,19 @@ def pdf_lesen(inhalt):
             teile.append(seite.extract_text() or "")
     except Exception:
         pass
+    if len(re.sub(r"\s", "", "".join(teile))) < 60:
+        # Manche PDFs liest pypdf schlecht -> zweiter Leser (pdfium)
+        try:
+            import pypdfium2 as pdfium
+            dokument = pdfium.PdfDocument(inhalt)
+            try:
+                andere = [dokument[i].get_textpage().get_text_range() for i in range(min(4, len(dokument)))]
+            finally:
+                dokument.close()
+            if len(re.sub(r"\s", "", "".join(andere))) > len(re.sub(r"\s", "", "".join(teile))):
+                teile = andere
+        except Exception:
+            pass
     return "\n".join(teile), xml
 
 
@@ -608,7 +626,12 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
         if daten.get("gutschrift") and art == "ER":
             art = "GS"
         if art == "AR":
-            lieferant = daten.get("kaeufer") or mail.get("an_name") or lieferant_aus_absender(con, mail.get("an", "")) or ""
+            kunde = ""
+            m = re.search(r"^\s*(?:An|Rechnungsempf(?:ä|ae)nger|Kunde|Bill\s+to|Empf(?:ä|ae)nger)\s*:?\s+(.{3,60})$", text or "", re.I | re.M)
+            if m and not ist_eigene_firma(con, m.group(1)):
+                kunde = m.group(1).strip(" ,")
+            kandidaten_namen = [daten.get("kaeufer"), kunde, mail.get("an_name"), lieferant_aus_absender(con, mail.get("an", ""))]
+            lieferant = next((n for n in kandidaten_namen if n and not ist_eigene_firma(con, n)), "")
         else:
             lieferant = daten.get("verkaeufer") or lieferant_aus_absender(con, mail.get("von", "")) or ""
         if not lieferant and text and art != "AR":
@@ -1993,34 +2016,10 @@ def lernen(beleg_id, urteil, ganzer_absender=False):
         con.close()
 
 
-def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperren=False):
-    """-> ('ja' | 'unsicher' | 'nein', Begründung). nur_sperren: eigenes Belege-Postfach (alles ist Beleg, außer klar keiner)."""
-    mail = mail or {}
-    daten = daten if daten is not None else text_auslesen(text)
-    titel = dokument_titel(text, dateiname)
-    gelernt, wie = gelerntes_urteil(con, mail.get("von_adresse", ""), titel)
-    if gelernt == "nein":
-        return "nein", f"keine Rechnung ({wie})"
-    if gelernt == "ja":
-        return "ja", f"Rechnung ({wie})"
-    if not (text or "").strip():
-        # Scan ohne Text: Betreff/Dateiname entscheiden, im Zweifel ansehen lassen
-        hinweis = " ".join([dateiname or "", mail.get("betreff", "")])
-        if any(m.search(hinweis) for _, m in SPERR_MUSTER):
-            return "nein", "keine Rechnung (laut Dateiname/Betreff)"
-        return ("ja" if nur_sperren or TITEL_RECHNUNG.search(hinweis) else "unsicher"), "Scan ohne lesbaren Text"
-    kopf = "\n".join([z for z in text.splitlines() if z.strip()][:18])[:900]
-    rechnung_im_kopf = TITEL_RECHNUNG.search(kopf)
-    for name, muster in SPERR_MUSTER:
-        treffer = muster.search(kopf) or muster.search(os.path.basename(dateiname or ""))
-        if not treffer:
-            continue
-        # "Rechnung" steht weiter oben als das Sperrwort -> ist trotzdem eine Rechnung (z. B. "Rechnung ... Vertrag Nr.")
-        if rechnung_im_kopf and rechnung_im_kopf.start() < (treffer.start() if muster.search(kopf) else 10 ** 6) and name not in ("Mahnung", "BWA", "Kontoauszug", "Summen- und Saldenliste", "Lohn / Steuer"):
-            continue
-        return "nein", f"keine Rechnung: {name}"
-    if nur_sperren:
-        return "ja", ""
+HARTE_SPERREN = {"BWA", "Umsatzbericht", "Kontoauszug", "Mahnung", "Summen- und Saldenliste", "Lohn / Steuer"}
+
+
+def _rechnungs_punkte(text, daten, rechnung_im_kopf):
     punkte, merkmale = 0, []
     if rechnung_im_kopf:
         punkte += 3; merkmale.append("Titel")
@@ -2038,9 +2037,47 @@ def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperre
         punkte += 1; merkmale.append("Steuernummer")
     if ZAHLUNG_MUSTER.search(text):
         punkte += 1; merkmale.append("Zahlungshinweis")
-    if punkte >= 7 and rechnung_im_kopf or punkte >= 8:
+    return punkte, merkmale
+
+
+def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperren=False):
+    """-> ('ja' | 'unsicher' | 'nein', Begründung). nur_sperren: eigenes Belege-Postfach (alles ist Beleg, außer klar keiner).
+    Grundsatz: lieber einmal zu viel fragen („Rechnung?“) als eine echte Rechnung wegwerfen."""
+    mail = mail or {}
+    daten = daten if daten is not None else text_auslesen(text)
+    titel = dokument_titel(text, dateiname)
+    gelernt, wie = gelerntes_urteil(con, mail.get("von_adresse", ""), titel)
+    if gelernt == "nein":
+        return "nein", f"keine Rechnung ({wie})"
+    if gelernt == "ja":
+        return "ja", f"Rechnung ({wie})"
+    hinweis = " ".join([os.path.basename(dateiname or ""), mail.get("betreff", "")])
+    if not (text or "").strip():
+        # Scan ohne Text: Betreff/Dateiname entscheiden, im Zweifel ansehen lassen
+        if any(m.search(hinweis) for n, m in SPERR_MUSTER if n in HARTE_SPERREN):
+            return "nein", "keine Rechnung (laut Dateiname/Betreff)"
+        return ("ja" if nur_sperren or TITEL_RECHNUNG.search(hinweis) else "unsicher"), "Scan ohne lesbaren Text"
+    zeilen = [z.strip() for z in text.splitlines() if z.strip()][:25]
+    kopf = "\n".join(zeilen)[:1200]
+    rechnung_im_kopf = TITEL_RECHNUNG.search(kopf)
+    punkte, merkmale = _rechnungs_punkte(text, daten, rechnung_im_kopf)
+    stark = bool(daten.get("rechnungsnr")) and "Endbetrag" in merkmale and punkte >= 6
+    # Sperrwörter zählen nur als Überschrift (kurze Zeile) oder im Dateinamen – nicht irgendwo im Fußtext
+    for name, muster in SPERR_MUSTER:
+        als_titel = any(len(z) <= 70 and muster.search(z) for z in zeilen[:12])
+        if not (als_titel or muster.search(os.path.basename(dateiname or ""))):
+            continue
+        if name in HARTE_SPERREN:
+            if name == "Mahnung" or not (rechnung_im_kopf and stark):
+                return "nein", f"keine Rechnung: {name}"
+            continue
+        if not stark:
+            return "nein", f"keine Rechnung: {name}"
+    if nur_sperren:
         return "ja", ""
-    if punkte >= 4:
+    if punkte >= 7 or (rechnung_im_kopf and punkte >= 6) or (stark and punkte >= 6):
+        return "ja", ""
+    if punkte >= 3 or TITEL_RECHNUNG.search(hinweis):
         fehlt = [m for m in ("Titel", "Rechnungsnummer", "Endbetrag", "MwSt") if m not in merkmale]
         return "unsicher", "Nicht sicher, ob Rechnung – es fehlt: " + ", ".join(fehlt)
     return "nein", "keine Rechnungsmerkmale gefunden"
