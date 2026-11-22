@@ -1036,12 +1036,19 @@ def portal_anmelden(quelle):
     if form["submit"]:
         daten[form["submit"][0]] = form["submit"][1]
     ziel = urllib.parse.urljoin(basis + "index.html", form["action"] or "index.html")
+    oeffner.addheaders = oeffner.addheaders + [("Referer", basis + "index.html"), ("X-Requested-With", "XMLHttpRequest")]
     antwort, _, _ = _portal_holen(oeffner, ziel, daten)
-    text = antwort.decode("utf-8", "replace")
-    if "logout.html" not in text and "invoices.html" not in text:
-        if "accept-terms" in text and "customer_password" not in text:
+    antwort_text = antwort.decode("utf-8", "replace")
+    # Die Anmeldung läuft per AJAX – ob sie geklappt hat, zeigt erst die nächste Seite
+    oeffner.addheaders = [h for h in oeffner.addheaders if h[0] != "X-Requested-With"]
+    seite, _, _ = _portal_holen(oeffner, basis + "invoices.html")
+    text = seite.decode("utf-8", "replace")
+    if "logout.html" not in text or ('name="customer_password"' in text and "invoices-download" not in text and "bela_invoices_form_send" not in text):
+        if "accept-terms" in antwort_text.lower():
             raise PortalFehler("Das Portal möchte, dass du einmal die AGB bestätigst. Bitte einmal selbst im Portal anmelden und bestätigen.")
-        raise PortalFehler("Anmeldung abgelehnt – Kundennummer oder Passwort prüfen.")
+        hinweis = re.sub(r"<[^>]+>", " ", antwort_text)
+        hinweis = re.sub(r"\s+", " ", hinweis).strip()[:160]
+        raise PortalFehler("Anmeldung abgelehnt – Kundennummer oder Passwort prüfen." + (f" (Portal sagt: {hinweis})" if hinweis and len(hinweis) < 160 else ""))
     return oeffner
 
 
