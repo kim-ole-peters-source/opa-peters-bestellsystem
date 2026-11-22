@@ -1152,22 +1152,41 @@ def uebersprungen_uebernehmen(eintrag_id):
     return beleg_id, ("Als Beleg übernommen. Ähnliche Dokumente von diesem Absender werden künftig übernommen." if neu else "War schon als Beleg vorhanden.")
 
 
+_warteschlange = []          # Postfach-IDs (oder None = alle), die nach dem laufenden Abholen drankommen
+_warte_lock = threading.Lock()
+
+
 def alle_abholen(nur_quelle=None):
-    """Läuft im Hintergrund. Gibt False zurück, wenn schon ein Lauf aktiv ist."""
-    if not _lauf_lock.acquire(blocking=False):
-        return False
+    """Läuft im Hintergrund. Läuft schon ein Abholen, wird der Auftrag hinten angestellt (Warteschlange).
+    Gibt True zurück, wenn sofort gestartet, sonst False (= wartet)."""
+    with _warte_lock:
+        if nur_quelle not in _warteschlange and None not in _warteschlange:
+            _warteschlange.append(nur_quelle)
+        if not _lauf_lock.acquire(blocking=False):
+            return False
     def lauf():
         try:
             LAUF.update({"laeuft": True, "start": jetzt_text(), "ende": "", "meldung": "läuft …", "neu": 0})
-            con = db()
-            ids = [r["id"] for r in con.execute("SELECT id FROM quellen WHERE aktiv=1" + (" AND id=?" if nur_quelle else ""), ((nur_quelle,) if nur_quelle else ())).fetchall()]
-            con.close()
-            neu, meldungen = 0, []
-            for qid in ids:
-                LAUF.update({"meldung": f"Postfach {len(meldungen) + 1} von {len(ids)} …"})
-                n, text = quelle_abholen(qid)
-                neu += n
-                meldungen.append(text)
+            neu, meldungen, erledigt = 0, [], set()
+            while True:
+                with _warte_lock:
+                    if not _warteschlange:
+                        break
+                    auftrag = _warteschlange.pop(0)
+                con = db()
+                ids = [r["id"] for r in con.execute("SELECT id FROM quellen WHERE aktiv=1" + (" AND id=?" if auftrag else ""), ((auftrag,) if auftrag else ())).fetchall()]
+                con.close()
+                for qid in ids:
+                    with _warte_lock:
+                        rest = len(_warteschlange)
+                    LAUF.update({"meldung": f"Postfach {len(meldungen) + 1} wird gelesen …" + (f" ({rest} weitere warten)" if rest else "")})
+                    try:
+                        n, text = quelle_abholen(qid)
+                    except Exception as exc:
+                        n, text = 0, f"Postfach {qid}: Fehler {exc}"
+                    neu += n
+                    meldungen.append(text)
+                    erledigt.add(qid)
             abgleichen()
             con = db()
             setze_einstellung(con, "letzter_lauf", jetzt_text())
@@ -1178,7 +1197,11 @@ def alle_abholen(nur_quelle=None):
             LAUF.update({"meldung": f"Fehler: {exc}"})
         finally:
             LAUF.update({"laeuft": False, "ende": jetzt_text()})
-            _lauf_lock.release()
+            with _warte_lock:
+                _lauf_lock.release()
+                nochmal = bool(_warteschlange)
+            if nochmal:
+                alle_abholen(_warteschlange[0] if _warteschlange else None)
     threading.Thread(target=lauf, daemon=True).start()
     return True
 

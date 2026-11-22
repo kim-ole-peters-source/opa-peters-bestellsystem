@@ -7460,7 +7460,7 @@ class App(BaseHTTPRequestHandler):
         zurueck = "/admin/buchhaltung/einstellungen" if qid else "/admin/buchhaltung"
         if bh.alle_abholen(int(qid) if qid.isdigit() else None):
             return self.redirect(zurueck + "?msg=" + quote_plus("Abholen gestartet. Das dauert je nach Postfach ein paar Minuten."))
-        self.redirect(zurueck + "?error=" + quote_plus("Es läuft gerade schon ein Abholvorgang."))
+        self.redirect(zurueck + "?msg=" + quote_plus("Es läuft gerade schon ein Abholvorgang – dein Auftrag ist eingereiht und kommt direkt danach dran."))
 
     # ---------------------------------------------------------- Quellen
     def bh_quelle_formular(self, q=None):
@@ -9262,8 +9262,11 @@ class App(BaseHTTPRequestHandler):
         qid = self.form_value(form, "quelle_id")
         if qid.isdigit():
             bh.quelle_neu_durchsuchen(int(qid))
-            bh.alle_abholen(int(qid))
-        self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus("Das Postfach wird jetzt ab dem Startdatum komplett neu durchsucht. Doppelte Belege entstehen dabei nicht."))
+            sofort = bh.alle_abholen(int(qid))
+            text = ("Das Postfach wird jetzt ab dem Startdatum komplett neu durchsucht." if sofort else
+                    "Ein anderes Postfach wird gerade gelesen – dieses ist eingereiht und kommt direkt danach dran.")
+            return self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus(text + " Doppelte Belege entstehen dabei nicht."))
+        self.redirect("/admin/buchhaltung/einstellungen")
 
     def show_bh_protokoll(self, query=None):
         if not self.is_admin():
