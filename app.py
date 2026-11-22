@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-banklayout"
+ASSET_VERSION = "2026-11-22-scrollpos"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -7771,7 +7771,7 @@ class App(BaseHTTPRequestHandler):
         neu = sum(1 for _, n in ids if n)
         text = f"{neu} Beleg(e) hochgeladen." + ("" if neu == len(ids) else f" {len(ids) - neu} gab es schon.")
         if buchung_id.isdigit():
-            return self.redirect("/admin/buchhaltung/bank?msg=" + quote_plus(text + " Und zugeordnet."))
+            return self.redirect(self.bh_zurueck_bank() + "msg=" + quote_plus(text + " Und zugeordnet."))
         self.redirect("/admin/buchhaltung/belege?filter=neu&msg=" + quote_plus(text) + f"#b-{ids[0][0]}")
 
     def handle_bh_beleg_speichern(self):
@@ -7900,12 +7900,21 @@ class App(BaseHTTPRequestHandler):
         body = f'{self.bh_kopf("bank")}<section class="vw-karte vw-schmal">{html_text}</section>{self.bh_upload_dialog(bu["id"])}<script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>'
         self.admin_seite("Buchung", body)
 
+    def bh_zurueck_bank(self, monat=""):
+        """Zurück genau auf die Bank-Ansicht, von der man kam (gleicher Filter, gleiche Suche) – ohne alte Meldungen."""
+        from urllib.parse import urlparse, parse_qsl, urlencode
+        ref = urlparse(self.headers.get("Referer") or "")
+        if ref.path == "/admin/buchhaltung/bank":
+            teile = [(k, v) for k, v in parse_qsl(ref.query) if k not in ("msg", "error")]
+            return "/admin/buchhaltung/bank?" + urlencode(teile) + ("&" if teile else "")
+        return "/admin/buchhaltung/bank?" + (f"monat={quote_plus(monat)}&" if re.match(r"^\d{4}-\d{2}$", monat or "") else "")
+
     def handle_bh_buchung(self, aktion):
         if not self.is_admin():
             return self.redirect("/admin/login")
         form = self.read_form()
         monat = self.form_value(form, "monat").strip()
-        zurueck = "/admin/buchhaltung/bank" + (f"?monat={quote_plus(monat)}" if re.match(r"^\d{4}-\d{2}$", monat or "") else "?")
+        zurueck = self.bh_zurueck_bank(monat) + "v=1"
         if aktion == "regel-neu":
             muster = self.form_value(form, "muster").strip()
             if muster:
@@ -8084,7 +8093,7 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         bid = self.form_value(form, "buchung_id").strip()
         monat = self.form_value(form, "monat").strip()
-        zurueck = f"/admin/buchhaltung/bank?monat={quote_plus(monat)}"
+        zurueck = self.bh_zurueck_bank(monat) + "v=1"
         an = self.form_value(form, "an").strip()
         if not bid.isdigit() or not email_sieht_gueltig_aus(an):
             return self.redirect(zurueck + "&error=" + quote_plus("Bitte eine gültige E-Mail-Adresse eintragen."))
@@ -9270,7 +9279,7 @@ class App(BaseHTTPRequestHandler):
         form = self.read_form()
         monat = self.form_value(form, "monat").strip()
         filt = self.form_value(form, "filter").strip()
-        zurueck = "/admin/buchhaltung/bank?" + (f"monat={quote_plus(monat)}&" if re.match(r"^\d{4}-\d{2}$", monat or "") else "") + (f"filter={quote_plus(filt)}&" if filt else "")
+        zurueck = self.bh_zurueck_bank(monat)
         ids = [int(k[2:]) for k, v in form.items() if k.startswith("b_") and k[2:].isdigit() and v]
         if not ids:
             return self.redirect(zurueck + "error=" + quote_plus("Bitte zuerst Zahlungen ankreuzen."))

@@ -319,3 +319,23 @@
     if (!d.open) d.showModal();
   }, true);
 })();
+
+/* Buchhaltung: nach Speichern/Zuordnen an derselben Stelle bleiben (nicht wieder ganz nach oben springen) */
+(function () {
+  if (location.pathname.indexOf('/admin/buchhaltung') !== 0) return;
+  var SCHLUESSEL = 'bhScrollPos';
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f || (f.method || '').toLowerCase() !== 'post') return;
+    try { sessionStorage.setItem(SCHLUESSEL, JSON.stringify({ pfad: location.pathname, y: window.scrollY, zeit: Date.now() })); } catch (x) {}
+  }, true);
+  var gespeichert = null;
+  try { gespeichert = JSON.parse(sessionStorage.getItem(SCHLUESSEL) || 'null'); sessionStorage.removeItem(SCHLUESSEL); } catch (x) {}
+  if (gespeichert && gespeichert.pfad === location.pathname && Date.now() - gespeichert.zeit < 120000 && !location.hash) {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+    var hin = function () { window.scrollTo(0, gespeichert.y); };
+    hin();
+    window.addEventListener('load', hin);
+    setTimeout(hin, 150);
+  }
+})();
