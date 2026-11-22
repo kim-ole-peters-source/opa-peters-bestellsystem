@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-buchhaltung-neu"
+ASSET_VERSION = "2026-11-22-sammel"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -8681,6 +8681,8 @@ class App(BaseHTTPRequestHandler):
         chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/bank?monat={monat}&filter={k}{q_teil}">{esc(t)}</a>' for k, t in chips)
         zeilen = []
         for bu in buchungen:
+            waehlbar = bu["status"] != "zugeordnet"
+            haken = (f'<input type="checkbox" name="b_{bu["id"]}" value="1" form="bhSammel" data-sammel-haken aria-label="Zahlung auswählen">' if waehlbar else "")
             if bu["status"] == "zugeordnet":
                 b0 = zuord.get(bu["id"], [])
                 info = '<span class="bh-status da">✓ ' + esc(", ".join((b["rechnungsnr"] or b["lieferant"] or "Beleg") for b in b0)[:40]) + "</span>"
@@ -8694,6 +8696,7 @@ class App(BaseHTTPRequestHandler):
                 info = '<span class="bh-status fehlt">fehlt</span>'
             zeilen.append(f"""
             <tr class="vw-klickzeile" data-bh-buchung="{bu['id']}">
+                <td class="bh-haken">{haken}</td>
                 <td>{esc(bh.datum_de(bu['datum'])[:6])}<small class="vw-klein-block">{esc(konto_namen.get(bu['konto_id'], ''))}</small></td>
                 <td><b>{esc(bu['gegenpartei'] or '–')}</b><small class="vw-klein-block">{esc(bu['zweck'][:90])}</small></td>
                 <td class="zahl {'minus' if bu['betrag'] < 0 else 'plus'}"><b>{esc(bh.betrag_text(bu['betrag']))}</b></td>
@@ -8710,10 +8713,18 @@ class App(BaseHTTPRequestHandler):
             <div class="vw-chips">{chips_html}</div>
             <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Name oder Betrag"></label></form>
         <div class="vw-tabelle-wrap"><table class="vw-tabelle bh-buchungen">
-            <tr><th>Datum</th><th>Empfänger / Zahler</th><th class="zahl">Betrag</th><th>Beleg</th></tr>
-            {''.join(zeilen) or f'<tr><td colspan="4" class="vw-leer">{leer}</td></tr>'}
+            <tr><th class="bh-haken"><input type="checkbox" data-sammel-alle aria-label="Alle auswählen"></th><th>Datum</th><th>Empfänger / Zahler</th><th class="zahl">Betrag</th><th>Beleg</th></tr>
+            {''.join(zeilen) or f'<tr><td colspan="5" class="vw-leer">{leer}</td></tr>'}
         </table></div>
-        <p class="vw-klein">Klick auf eine Zahlung: Beleg zuordnen oder hochladen, beim Lieferanten anfordern oder „kein Beleg nötig“.</p>
+        <p class="vw-klein">Klick auf eine Zahlung: Beleg zuordnen oder hochladen, beim Lieferanten anfordern oder „kein Beleg nötig“. Mit den Häkchen links kannst du mehrere Zahlungen auf einmal bearbeiten.</p>
+        <form method="post" action="/admin/buchhaltung/buchung/sammel" id="bhSammel" class="bh-sammelleiste" data-sammel-leiste hidden>
+            <input type="hidden" name="monat" value="{monat}"><input type="hidden" name="filter" value="{esc(filt)}">
+            <b><span data-sammel-zahl>0</span> ausgewählt</b>
+            <label class="bh-sammel-immer"><input type="checkbox" name="immer" value="1"> Für diese Empfänger immer</label>
+            <button class="primary" type="submit" name="aktion" value="kein">Kein Beleg nötig</button>
+            <button class="button" type="submit" name="aktion" value="offen">Wieder als fehlend</button>
+            <button class="vw-leise" type="button" data-sammel-aufheben>Auswahl aufheben</button>
+        </form>
         <dialog class="vw-dialog" id="auszugHochladen">
             <div class="vw-dialog-kopf"><h3>Kontoauszug hochladen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
             <form method="post" action="/admin/buchhaltung/konto/upload" enctype="multipart/form-data" class="vw-formular">
@@ -9106,6 +9117,51 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/buchhaltung/einstellungen?error=" + quote_plus(f"Leeren fehlgeschlagen: {fehler}"))
         self.redirect("/admin/buchhaltung?msg=" + quote_plus(f"Alles geleert. Sicherung: {os.path.basename(ziel)}. Ab jetzt kommen nur neue Mails dazu."))
 
+    def handle_bh_sammel(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        monat = self.form_value(form, "monat").strip()
+        filt = self.form_value(form, "filter").strip()
+        zurueck = "/admin/buchhaltung/bank?" + (f"monat={quote_plus(monat)}&" if re.match(r"^\d{4}-\d{2}$", monat or "") else "") + (f"filter={quote_plus(filt)}&" if filt else "")
+        ids = [int(k[2:]) for k, v in form.items() if k.startswith("b_") and k[2:].isdigit() and v]
+        if not ids:
+            return self.redirect(zurueck + "error=" + quote_plus("Bitte zuerst Zahlungen ankreuzen."))
+        aktion = self.form_value(form, "aktion")
+        con = bh.db()
+        zeilen = con.execute(f"SELECT * FROM buchungen WHERE id IN ({','.join('?' for _ in ids)}) AND status != 'zugeordnet'", ids).fetchall()
+        vorhandene = {bh.schluessel_text(r["muster"]) for r in con.execute("SELECT muster FROM regeln")}
+        con.close()
+        if aktion == "offen":
+            con = bh.db()
+            regel_ids = {r["regel_id"] for r in zeilen if r["regel_id"]}
+            regel_namen = [r["muster"] for r in con.execute(f"SELECT muster FROM regeln WHERE id IN ({','.join('?' for _ in regel_ids)})", list(regel_ids))] if regel_ids else []
+            con.executemany("UPDATE buchungen SET status='offen', regel_id=NULL, notiz='' WHERE id=?", [(r["id"],) for r in zeilen])
+            bh.protokolliere(con, "zuordnung", f"{len(zeilen)} Buchungen wieder als fehlend markiert")
+            con.commit()
+            con.close()
+            for rid in regel_ids:  # sonst würde die Regel sie sofort wieder abhaken
+                bh.regel_loeschen(rid)
+            bh.abgleichen()
+            text = f"{len(zeilen)} Zahlung(en) wieder als fehlend markiert."
+            if regel_namen:
+                text += f" Regel(n) entfernt: {', '.join(regel_namen[:5])}."
+            return self.redirect(zurueck + "msg=" + quote_plus(text))
+        immer = bool(self.form_value(form, "immer"))
+        neue_regeln = []
+        for r in zeilen:
+            muster = ""
+            name = (r["gegenpartei"] or "").strip()[:60]
+            if immer and name and bh.schluessel_text(name) not in vorhandene:
+                muster = name
+                vorhandene.add(bh.schluessel_text(name))
+                neue_regeln.append(name)
+            bh.kein_beleg(r["id"], muster)
+        text = f"{len(zeilen)} Zahlung(en) als „kein Beleg nötig“ markiert."
+        if neue_regeln:
+            text += f" Regeln angelegt für: {', '.join(neue_regeln[:5])}{' …' if len(neue_regeln) > 5 else ''}."
+        self.redirect(zurueck + "msg=" + quote_plus(text))
+
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -9218,6 +9274,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_lieferant_immer()
             if path == "/admin/buchhaltung/leeren":
                 return self.handle_bh_leeren()
+            if path == "/admin/buchhaltung/buchung/sammel":
+                return self.handle_bh_sammel()
             if path == "/admin/buchhaltung/beleg/upload":
                 return self.handle_bh_beleg_upload()
             if path == "/admin/buchhaltung/beleg/speichern":

@@ -3191,3 +3191,20 @@ tr.ist-aktiv td{background:#FDF3DF}
 .bh-kachel>*{text-align:left}
 .bh-kachel-bild{width:100%;align-self:stretch}
 .bh-kachel-fuss b{white-space:nowrap}
+.bh-haken{width:44px;text-align:center}
+.bh-haken input{width:20px;height:20px;cursor:pointer;accent-color:#C44D49}
+tr.ist-gewaehlt td{background:#FDF3DF}
+.bh-sammelleiste{position:sticky;bottom:16px;z-index:20;display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:12px;background:#2A1F18;color:#FCF7F1;border-radius:18px;padding:12px 16px;box-shadow:0 8px 24px rgba(42,31,24,.25)}
+.bh-sammelleiste[hidden]{display:none!important}
+.bh-sammelleiste .bh-schalter span{color:#FCF7F1}
+.bh-sammelleiste .vw-leise{color:#E8E2D9}
+@media (max-width:760px){.bh-sammelleiste{bottom:84px}}
+.bh-haken input[type=checkbox],.bh-sammel-immer input[type=checkbox]{appearance:auto;-webkit-appearance:checkbox;width:20px;height:20px;min-height:0;padding:0;margin:0;border:0;box-shadow:none;background:none;vertical-align:middle}
+.bh-buchungen td.bh-info{display:table-cell}
+.bh-buchungen td.bh-info>*{display:inline-block;margin:2px 6px 2px 0;vertical-align:middle}
+.bh-sammel-immer{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:#FCF7F1;cursor:pointer}
+.bh-sammelleiste .primary{background:#C44D49;border-color:#C44D49;color:#fff}
+.bh-sammelleiste .button{background:#fff;color:#2A1F18}
+.bh-sammelleiste{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;width:min(1100px,calc(100% - 32px));box-sizing:border-box;margin:0}
+@media (max-width:760px){.bh-sammelleiste{bottom:84px}}
+@media (max-width:760px){.bh-sammelleiste{gap:8px;padding:10px 12px}.bh-sammelleiste>b{flex:1 0 auto}.bh-sammelleiste .bh-sammel-immer{flex:1 0 100%;font-size:13px}.bh-sammelleiste>button{flex:1 1 40%;padding:9px 10px;font-size:13px;min-height:0}.bh-sammelleiste [data-sammel-aufheben]{flex:0 0 auto;order:-1}}

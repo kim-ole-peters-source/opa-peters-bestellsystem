@@ -266,3 +266,28 @@
   var verlauf = $('.vw-chat-verlauf');
   if (verlauf) verlauf.scrollTop = verlauf.scrollHeight;
 })();
+
+/* Buchhaltung: Sammelbearbeitung auf der Bank-Seite */
+(function () {
+  var leiste = document.querySelector('[data-sammel-leiste]');
+  if (!leiste) return;
+  var zahl = leiste.querySelector('[data-sammel-zahl]');
+  var alle = document.querySelector('[data-sammel-alle]');
+  function haken() { return Array.prototype.slice.call(document.querySelectorAll('[data-sammel-haken]')); }
+  function aktualisieren() {
+    var n = haken().filter(function (h) { return h.checked; }).length;
+    zahl.textContent = n;
+    leiste.hidden = n === 0;
+    if (alle) { alle.checked = n > 0 && n === haken().length; alle.indeterminate = n > 0 && n < haken().length; }
+    haken().forEach(function (h) { var tr = h.closest('tr'); if (tr) tr.classList.toggle('ist-gewaehlt', h.checked); });
+  }
+  document.addEventListener('change', function (e) {
+    if (e.target.matches('[data-sammel-haken]')) aktualisieren();
+    if (e.target.matches('[data-sammel-alle]')) { haken().forEach(function (h) { h.checked = e.target.checked; }); aktualisieren(); }
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('td.bh-haken') && !e.target.matches('input')) { var h = e.target.closest('td').querySelector('input'); if (h) { h.checked = !h.checked; aktualisieren(); } e.stopPropagation(); }
+    if (e.target.closest('[data-sammel-aufheben]')) { haken().forEach(function (h) { h.checked = false; }); aktualisieren(); }
+  }, true);
+  aktualisieren();
+})();
