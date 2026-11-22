@@ -207,6 +207,10 @@ def init(data_dir):
             id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT UNIQUE, dateiname TEXT, datei TEXT, quelle TEXT, quelle_id INTEGER,
             absender TEXT, betreff TEXT, mail_datum TEXT, grund TEXT, erstellt TEXT, uebernommen INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS abhol_protokoll (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, quelle_id INTEGER, zeit TEXT, ordner TEXT, uid TEXT,
+            mail_datum TEXT, von TEXT, betreff TEXT, ergebnis TEXT, art TEXT, beleg_ids TEXT DEFAULT ''
+        );
         CREATE TABLE IF NOT EXISTS quellen_versuche (
             quelle_id INTEGER, ordner TEXT, uidvalidity TEXT, uid TEXT, versuche INTEGER DEFAULT 0, fehler TEXT,
             PRIMARY KEY (quelle_id, ordner, uidvalidity, uid)
@@ -222,6 +226,12 @@ def init(data_dir):
         setze_einstellung(con, "eigene_domains", "opapeters.de")
     con.commit()
     con.close()
+    if not einstellung_lesen("ordner_alle_v1"):
+        con = db()
+        con.execute("UPDATE quellen SET ordner='*' WHERE TRIM(UPPER(ordner)) IN ('INBOX', '')")
+        setze_einstellung(con, "ordner_alle_v1", jetzt_text())
+        con.commit()
+        con.close()
     if not einstellung_lesen("neustart_v1"):
         # Einmaliger Neustart (Wunsch Nov. 2026): alle bisherigen Belege und Kontoauszüge raus, Sicherung vorher
         alles_leeren(grund="Neustart der Buchhaltung")
@@ -729,6 +739,40 @@ def imap_ordner_liste(verbindung):
     return namen
 
 
+ORDNER_AUSLASSEN = re.compile(r"papierkorb|trash|gel(?:ö|oe)scht|deleted|spam|junk|werbung|entw(?:ü|ue|&apw-)rf|draft|archive?\b|notes|notizen|kalender|calendar|kontakte|contacts|outbox|postausgang", re.I)
+
+
+def imap_ordner_mit_flags(verbindung):
+    """-> [(flags_text, name_wie_vom_server)]"""
+    status, daten = verbindung.list()
+    ergebnis = []
+    for zeile in daten or []:
+        if not zeile:
+            continue
+        text = zeile.decode("utf-8", "replace") if isinstance(zeile, bytes) else str(zeile)
+        m = re.match(r'\((?P<flags>[^)]*)\)\s+(?:"[^"]*"|NIL)\s+(?P<name>.+)$', text)
+        if m:
+            ergebnis.append((m.group("flags"), m.group("name").strip().strip('"')))
+    return ergebnis
+
+
+def ordner_fuer_quelle(verbindung, einstellung):
+    """'*' (oder leer) = alle sinnvollen Ordner: Posteingang, Unterordner, Gesendet – ohne Papierkorb, Spam, Entwürfe."""
+    wunsch = [o.strip() for o in (einstellung or "*").split(",") if o.strip()]
+    if wunsch and "*" not in wunsch:
+        return wunsch
+    alle = []
+    for flags, name in imap_ordner_mit_flags(verbindung):
+        f = flags.lower()
+        if "\\noselect" in f or "\\trash" in f or "\\junk" in f or "\\drafts" in f or "\\all" in f:
+            continue
+        if ORDNER_AUSLASSEN.search(name):
+            continue
+        alle.append(name)
+    alle.sort(key=lambda n: (n.upper() != "INBOX", n.lower()))
+    return alle or ["INBOX"]
+
+
 def quelle_testen(quelle_id):
     con = db()
     quelle = con.execute("SELECT * FROM quellen WHERE id=?", (quelle_id,)).fetchone()
@@ -737,13 +781,13 @@ def quelle_testen(quelle_id):
         return False, "Quelle nicht gefunden."
     try:
         v = imap_verbinden(quelle)
-        ordner = imap_ordner_liste(v)
+        ordner = ordner_fuer_quelle(v, quelle["ordner"])
         v.logout()
     except imaplib.IMAP4.error as exc:
         return False, f"Anmeldung abgelehnt – Benutzer oder Passwort prüfen. ({exc})"
     except Exception as exc:
         return False, f"Keine Verbindung: {exc}"
-    return True, "Verbindung klappt. Ordner: " + ", ".join(ordner[:40])
+    return True, "Verbindung klappt. Durchsucht werden diese Ordner: " + ", ".join(ordner[:40])
 
 
 def _mail_teile(nachricht):
@@ -777,8 +821,31 @@ def _portal_link(html, text):
 MAIL_HAKEN = []
 
 
-def mail_verarbeiten(con, quelle, nachricht):
-    """Eine Mail -> 0..n Belege. Gibt Anzahl neuer Belege zurück."""
+def _zip_auspacken(anhaenge):
+    """PDF/XML aus ZIP-Anhängen holen (manche Lieferanten schicken Rechnungen gezippt)."""
+    import zipfile
+    ergebnis = []
+    for name, typ, inhalt in anhaenge:
+        if name.lower().endswith(".zip") or typ in ("application/zip", "application/x-zip-compressed"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(inhalt)) as z:
+                    for info in z.infolist()[:30]:
+                        if info.file_size > 25 * 1024 * 1024:
+                            continue
+                        innen = os.path.basename(info.filename)
+                        if innen.lower().endswith((".pdf", ".xml")):
+                            ergebnis.append((innen, "application/pdf" if innen.lower().endswith(".pdf") else "application/xml", z.read(info)))
+            except Exception:
+                pass
+        else:
+            ergebnis.append((name, typ, inhalt))
+    return ergebnis
+
+
+def mail_verarbeiten(con, quelle, nachricht, bericht=None):
+    """Eine Mail -> 0..n Belege. Gibt Anzahl neuer Belege zurück.
+    bericht (Liste): bekommt je Anhang eine Zeile, was passiert ist."""
+    bericht = bericht if bericht is not None else []
     betreff = _dekodiere(nachricht.get("Subject", ""))
     von = _dekodiere(nachricht.get("From", ""))
     an = getaddresses([nachricht.get("To", "")])
@@ -793,9 +860,11 @@ def mail_verarbeiten(con, quelle, nachricht):
         "an": _dekodiere(nachricht.get("To", "")),
     }
     anhaenge, html, text = _mail_teile(nachricht)
+    anhaenge = _zip_auspacken(anhaenge)
     for haken in MAIL_HAKEN:
         try:
             if haken(mail, anhaenge, text):
+                bericht.append(("kasse", "Kassenbericht für den Tagesabschluss"))
                 return 0  # z. B. Kassenbericht – wurde woanders verarbeitet, ist kein Beleg
         except Exception:
             traceback.print_exc()
@@ -807,24 +876,47 @@ def mail_verarbeiten(con, quelle, nachricht):
     bilder = [a for a in anhaenge if a[1].startswith("image/") and len(a[2]) > 30000] if quelle["alles_ist_beleg"] else []
     neu = 0
     con.commit()
+    def merken(name, ergebnis):
+        beleg_id, ist_neu, grund = ergebnis
+        if ist_neu:
+            st = con.execute("SELECT status FROM belege WHERE id=?", (beleg_id,)).fetchone()
+            if st and st["status"] == "unsicher":
+                bericht.append(("unsicher", f"{name}: als „Rechnung?“ zum Prüfen abgelegt ({grund or 'nicht eindeutig'})", beleg_id))
+            elif st and st["status"] == "doppelt":
+                bericht.append(("doppelt", f"{name}: gleiche Rechnung schon vorhanden", beleg_id))
+            else:
+                bericht.append(("beleg", f"{name}: neuer Beleg", beleg_id))
+            return 1
+        if beleg_id:
+            bericht.append(("vorhanden", f"{name}: schon vorhanden", beleg_id))
+        else:
+            bericht.append(("keine", f"{name}: {grund}", None))
+        return 0
     if pdfs or xmls or bilder:
         xml_fuer_pdf = xmls[0][2] if (len(pdfs) == 1 and len(xmls) == 1) else None
         for name, typ, inhalt in pdfs:
-            beleg_id, ist_neu, _ = beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], bool(quelle["alles_ist_beleg"]), xml_dazu=xml_fuer_pdf)
-            neu += 1 if ist_neu else 0
+            neu += merken(name, beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], bool(quelle["alles_ist_beleg"]), xml_dazu=xml_fuer_pdf))
         if not xml_fuer_pdf:
             for name, typ, inhalt in xmls:
                 if e_rechnung_lesen(inhalt):
-                    beleg_id, ist_neu, _ = beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], True)
-                    neu += 1 if ist_neu else 0
+                    neu += merken(name, beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], True))
+                else:
+                    bericht.append(("keine", f"{name}: XML, aber keine E-Rechnung", None))
         for name, typ, inhalt in bilder:
-            beleg_id, ist_neu, _ = beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], True)
-            neu += 1 if ist_neu else 0
+            neu += merken(name, beleg_anlegen(inhalt, name, typ, quelle["name"], quelle["id"], mail, quelle["richtung"], True))
     elif RECHNUNGS_WORTE.search(betreff):
         link = _portal_link(html, text)
         if link and portal_hinweis_anlegen(con, quelle["name"], quelle["id"], mail, link):
             con.commit()
             neu += 1
+            bericht.append(("portal", "Rechnung liegt im Kundenportal – Link gespeichert", None))
+        elif link:
+            bericht.append(("vorhanden", "Portal-Hinweis schon vorhanden", None))
+        else:
+            bericht.append(("ohne", "Betreff klingt nach Rechnung, aber kein Anhang und kein Portal-Link", None))
+    else:
+        andere = [a[0] for a in anhaenge]
+        bericht.append(("ohne", ("nur Anhänge ohne Rechnung: " + ", ".join(andere)[:120]) if andere else "kein Anhang", None))
     return neu
 
 
@@ -844,7 +936,8 @@ def quelle_abholen(quelle_id, max_mails=1500):
         start = quelle["start_datum"] or (jetzt() - timedelta(days=60)).date().isoformat()
         d = datetime.strptime(start, "%Y-%m-%d")
         seit = f"{d.day:02d}-{['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.month - 1]}-{d.year}"
-        for ordner in [o.strip() for o in (quelle["ordner"] or "INBOX").split(",") if o.strip()]:
+        ordnerliste = ordner_fuer_quelle(v, quelle["ordner"])
+        for ordner in ordnerliste:
             status, _ = v.select(f'"{ordner}"', readonly=True)
             if status != "OK":
                 protokolliere(con, "fehler", f"Quelle {quelle['name']}: Ordner „{ordner}“ nicht gefunden")
@@ -866,6 +959,32 @@ def quelle_abholen(quelle_id, max_mails=1500):
                 if zahlen["gelesen"] >= max_mails:
                     zahlen["offen"] += 1
                     continue
+                if zahlen["gelesen"] % 20 == 0:
+                    LAUF.update({"meldung": f"{quelle['name']}: {zahlen['gelesen']} Mails gelesen, {zahlen['neu']} neue Belege …"})
+                # Erst nur Aufbau + Kopf holen: Mails ohne Anhang und ohne „Rechnung“ im Betreff nicht komplett laden
+                kopf = None
+                try:
+                    status, teile = v.uid("fetch", uid, "(BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+                    if status == "OK" and teile:
+                        roh = b" ".join(t[0] + b" " + t[1] if isinstance(t, tuple) else (t or b"") for t in teile)
+                        kopf = email.message_from_bytes(next((t[1] for t in teile if isinstance(t, tuple)), b""))
+                        struktur = roh.lower()
+                        hat_anhang = any(k in struktur for k in (b"application", b"attachment", b"filename", b'"name"', b"name=")) or (quelle["alles_ist_beleg"] and b'"image"' in struktur)
+                        if not hat_anhang and not RECHNUNGS_WORTE.search(_dekodiere(kopf.get("Subject", ""))):
+                            _protokoll_eintrag(con, quelle_id, ordner, uid, kopf, "ohne", "kein Anhang")
+                            con.execute("INSERT OR IGNORE INTO quellen_gesehen VALUES (?, ?, ?, ?)", schluessel)
+                            con.commit()
+                            zahlen["gelesen"] += 1
+                            continue
+                except (imaplib.IMAP4.abort, OSError):
+                    try:
+                        v.logout()
+                    except Exception:
+                        pass
+                    v = imap_verbinden(quelle)
+                    v.select(f'"{ordner}"', readonly=True)
+                except Exception:
+                    pass  # dann eben die ganze Mail laden
                 nachricht = None
                 for versuch in range(2):
                     try:
@@ -883,10 +1002,17 @@ def quelle_abholen(quelle_id, max_mails=1500):
                         v.select(f'"{ordner}"', readonly=True)
                 if nachricht is None:
                     zahlen["fehler"] += 1
+                    _protokoll_eintrag(con, quelle_id, ordner, uid, kopf, "fehler", "Mail konnte nicht geladen werden")
                     continue
+                bericht = []
                 try:
-                    zahlen["neu"] += mail_verarbeiten(con, quelle, nachricht)
+                    zahlen["neu"] += mail_verarbeiten(con, quelle, nachricht, bericht)
                     fertig = True
+                    if bericht:
+                        arten = [b[0] for b in bericht]
+                        haupt = next((a for a in ("beleg", "unsicher", "portal", "kasse", "doppelt", "vorhanden", "keine", "ohne") if a in arten), arten[0])
+                        _protokoll_eintrag(con, quelle_id, ordner, uid, nachricht, haupt, " · ".join(b[1] for b in bericht),
+                                           ",".join(str(b[2]) for b in bericht if len(b) > 2 and b[2]))
                 except Exception as exc:
                     fertig = False
                     zahlen["fehler"] += 1
@@ -894,6 +1020,7 @@ def quelle_abholen(quelle_id, max_mails=1500):
                                 (*schluessel, str(exc)[:300]))
                     versuche = con.execute("SELECT versuche FROM quellen_versuche WHERE quelle_id=? AND ordner=? AND uidvalidity=? AND uid=?", schluessel).fetchone()[0]
                     protokolliere(con, "fehler", f"Quelle {quelle['name']}, Mail „{_dekodiere(nachricht.get('Subject', ''))[:80]}“ (Versuch {versuche}): {exc}")
+                    _protokoll_eintrag(con, quelle_id, ordner, uid, nachricht, "fehler", f"Fehler (Versuch {versuche}): {exc}")
                     if versuche >= 3:
                         fertig = True  # aufgeben, sonst hängt diese Mail jeden Lauf
                 if fertig:
@@ -923,6 +1050,20 @@ def quelle_abholen(quelle_id, max_mails=1500):
     con.commit()
     con.close()
     return zahlen["neu"], meldung
+
+
+def _protokoll_eintrag(con, quelle_id, ordner, uid, nachricht, art, ergebnis, beleg_ids=""):
+    von = betreff = datum = ""
+    if nachricht is not None:
+        von = _dekodiere(nachricht.get("From", ""))
+        betreff = _dekodiere(nachricht.get("Subject", ""))
+        try:
+            datum = parsedate_to_datetime(nachricht.get("Date")).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            datum = ""
+    con.execute("INSERT INTO abhol_protokoll (quelle_id, zeit, ordner, uid, mail_datum, von, betreff, ergebnis, art, beleg_ids) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (quelle_id, jetzt_text(), ordner, uid, datum, von[:200], betreff[:200], ergebnis[:600], art, beleg_ids[:200]))
+    con.execute("DELETE FROM abhol_protokoll WHERE id <= (SELECT MAX(id) - 5000 FROM abhol_protokoll)")
 
 
 def quelle_neu_durchsuchen(quelle_id):
@@ -1960,7 +2101,7 @@ def alles_leeren(grund="Buchhaltung geleert"):
     os.remove(kopie)
     con = db()
     for tabelle in ("zuordnung", "buchungen", "importe", "konten", "belege", "positionen", "positionen_gelesen",
-                    "anforderungen", "monate", "quellen_gesehen", "quellen_versuche", "uebersprungen"):
+                    "anforderungen", "monate", "quellen_gesehen", "quellen_versuche", "uebersprungen", "abhol_protokoll"):
         con.execute(f"DELETE FROM {tabelle}")
     heute = jetzt().date().isoformat()
     con.execute("UPDATE quellen SET start_datum=?, gefunden=0, letzter_status='', letzter_fehler=0", (heute,))

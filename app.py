@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-ansicht"
+ASSET_VERSION = "2026-11-22-protokoll"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -4127,6 +4127,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_einstellungen(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/uebersprungen/datei":
             return self.show_bh_uebersprungen_datei(query=parse_qs(parsed.query))
+        if path == "/admin/buchhaltung/protokoll":
+            return self.show_bh_protokoll(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/vorschau":
             return self.show_bh_vorschau(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/lieferanten":
@@ -7487,7 +7489,7 @@ class App(BaseHTTPRequestHandler):
                 <label>E-Mail-Adresse / Benutzer *<input name="benutzer" required autocomplete="off" value="{esc(q.get('benutzer', ''))}"></label>
                 <label>Passwort {'(leer lassen = unverändert)' if q.get('id') else '*'}<span class="password-wrap"><input class="password-field" type="password" name="passwort" autocomplete="new-password" {'required' if not q.get('id') else ''}><button type="button" class="password-toggle">Anzeigen</button></span></label>
             </div>
-            <label>Ordner<input name="ordner" value="{esc(q.get('ordner') or 'INBOX')}"><small class="vw-klein-block">INBOX = Posteingang. Mehrere mit Komma, z. B. „INBOX, Gesendet“ (Gesendet = für Ausgangsrechnungen). Welche Ordner es gibt, zeigt „Verbindung testen“.</small></label>
+            <label>Ordner<input name="ordner" value="{esc(q.get('ordner') or '*')}"><small class="vw-klein-block"><b>*</b> = alle Ordner (Posteingang, Unterordner, Gesendet – ohne Papierkorb, Spam und Entwürfe). Nur bestimmte Ordner: Namen mit Komma, z. B. „INBOX, Rechnungen“. „Verbindung testen“ zeigt, welche Ordner durchsucht werden.</small></label>
             <div class="vw-zwei">
                 <label>Was ist es?<select name="richtung">{richtung}</select></label>
                 <label class="vw-schalter bh-schalter"><input type="checkbox" name="alles_ist_beleg" value="1" {'checked' if q.get('alles_ist_beleg') else ''}><span>Eigenes Belege-Postfach: jeder Anhang ist ein Beleg</span></label>
@@ -9056,6 +9058,7 @@ class App(BaseHTTPRequestHandler):
                     <small class="vw-klein-block">{esc(q['benutzer'])} · {esc(q['letzter_status'] or 'noch nie abgeholt')}{' · jeder Anhang ist ein Beleg' if q['alles_ist_beleg'] else ''}{(' · liest ab ' + esc(bh.datum_de(q['start_datum']))) if q['start_datum'] else ''}</small></div>
                 <div class="vw-knopfreihe">
                     {self.bh_abholen_knopf(q['id'], 'Abholen', 'button')}
+                    <a class="button" href="/admin/buchhaltung/protokoll?quelle={q['id']}">Protokoll</a>
                     <button type="button" class="button" data-dialog="quelle-{q['id']}">Bearbeiten</button>
                 </div>
             </div>""")
@@ -9249,6 +9252,53 @@ class App(BaseHTTPRequestHandler):
             bh.quelle_neu_durchsuchen(int(qid))
             bh.alle_abholen(int(qid))
         self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus("Das Postfach wird jetzt ab dem Startdatum komplett neu durchsucht. Doppelte Belege entstehen dabei nicht."))
+
+    def show_bh_protokoll(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        qid = self.query_text(query, "quelle")
+        filt = self.query_text(query, "filter") or "alle"
+        suche = self.query_text(query, "q")
+        con = bh.db()
+        quellen = con.execute("SELECT id, name FROM quellen ORDER BY name").fetchall()
+        if not qid.isdigit() and quellen:
+            qid = str(quellen[0]["id"])
+        quelle = next((q for q in quellen if str(q["id"]) == qid), None)
+        zeilen = con.execute("SELECT * FROM abhol_protokoll WHERE quelle_id=? ORDER BY id DESC LIMIT 1500", (int(qid) if qid.isdigit() else -1,)).fetchall()
+        con.close()
+        zahl = {}
+        for z in zeilen:
+            zahl[z["art"]] = zahl.get(z["art"], 0) + 1
+        gruppen = {"alle": None, "beleg": ("beleg",), "pruefen": ("unsicher", "portal"), "keine": ("keine", "doppelt", "vorhanden", "kasse"), "ohne": ("ohne",), "fehler": ("fehler",)}
+        if gruppen.get(filt):
+            zeilen = [z for z in zeilen if z["art"] in gruppen[filt]]
+        if suche:
+            s_ = bh.schluessel_text(suche)
+            zeilen = [z for z in zeilen if s_ in bh.schluessel_text(f"{z['von']} {z['betreff']} {z['ergebnis']}")]
+        chips = [("alle", "Alle"), ("beleg", f"Neue Belege {zahl.get('beleg', 0)}"), ("pruefen", f"Zum Prüfen {zahl.get('unsicher', 0) + zahl.get('portal', 0)}"),
+                 ("keine", f"Keine Rechnung / schon da {sum(zahl.get(a, 0) for a in ('keine', 'doppelt', 'vorhanden', 'kasse'))}"), ("ohne", f"Ohne Anhang {zahl.get('ohne', 0)}"), ("fehler", f"Fehler {zahl.get('fehler', 0)}")]
+        chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/protokoll?quelle={qid}&filter={k}">{esc(t)}</a>' for k, t in chips)
+        farbe = {"beleg": "da", "unsicher": "frage", "portal": "frage", "fehler": "fehlt", "keine": "grau", "ohne": "grau", "vorhanden": "grau", "doppelt": "grau", "kasse": "grau"}
+        text = {"beleg": "Beleg", "unsicher": "Rechnung?", "portal": "Portal", "fehler": "Fehler", "keine": "keine Rechnung", "ohne": "ohne Anhang", "vorhanden": "schon da", "doppelt": "doppelt", "kasse": "Kasse"}
+        tabelle = "".join(
+            f"""<tr><td>{esc((z['mail_datum'] or '')[:16])}<small class="vw-klein-block">{esc(z['ordner'])}</small></td>
+                <td><b>{esc(parseaddr(z['von'] or '')[0] or parseaddr(z['von'] or '')[1])}</b><small class="vw-klein-block">{esc(z['betreff'])}</small></td>
+                <td><span class="bh-status {farbe.get(z['art'], 'grau')}">{esc(text.get(z['art'], z['art']))}</span><small class="vw-klein-block">{esc(z['ergebnis'])}</small></td></tr>"""
+            for z in zeilen[:800])
+        auswahl = "".join(f'<a class="vw-chip" aria-pressed="{"true" if str(q["id"]) == qid else "false"}" href="/admin/buchhaltung/protokoll?quelle={q["id"]}">{esc(q["name"])}</a>' for q in quellen) if len(quellen) > 1 else ""
+        body = f"""
+        {admin_kopf('Abhol-Protokoll' + (' · ' + esc(quelle['name']) if quelle else ''), 'Jede gelesene Mail mit Ergebnis – so siehst du genau, warum eine Rechnung (nicht) übernommen wurde.', '<a class="button" href="/admin/buchhaltung/einstellungen">‹ Zurück</a>')}
+        {f'<div class="vw-chips">{auswahl}</div>' if auswahl else ''}
+        <form method="get" action="/admin/buchhaltung/protokoll" class="vw-werkzeug bh-filterleiste"><input type="hidden" name="quelle" value="{esc(qid)}"><input type="hidden" name="filter" value="{esc(filt)}">
+            <div class="vw-chips">{chips_html}</div>
+            <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Absender oder Betreff"></label></form>
+        <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+            <tr><th>Mail vom</th><th>Absender · Betreff</th><th>Ergebnis</th></tr>
+            {tabelle or '<tr><td colspan="3" class="vw-leer">Noch nichts protokolliert. Nach dem nächsten Abholen steht hier jede gelesene Mail.</td></tr>'}
+        </table></div>
+        <p class="vw-klein">„Keine Rechnung“-Anhänge findest du unter Belege → Aussortiert und kannst sie dort doch übernehmen.</p>"""
+        self.admin_seite("Abhol-Protokoll", body)
 
 
     def do_POST(self):
