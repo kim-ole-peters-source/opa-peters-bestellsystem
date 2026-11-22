@@ -3228,3 +3228,12 @@ tr.ist-gewaehlt td{background:#FDF3DF}
 .bh-ansicht iframe{flex:1;width:100%;border:1px solid var(--op-sand);border-radius:12px;background:#fff}
 @media (max-width:760px){.bh-kandidat-zeile>.button{display:none}}
 .bh-kandidat input[type=checkbox]{appearance:auto;-webkit-appearance:checkbox;width:20px;height:20px;min-height:0;padding:0;margin:0;border:0;box-shadow:none;background:none;accent-color:#C44D49;flex:none}
+
+.bh-frage-alle{display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;margin-bottom:4px}
+.bh-frage-alle .bh-haken{display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:14px;cursor:pointer}
+.bh-frage-zeile>.bh-haken{flex:0 0 auto;display:flex;align-items:center;padding-right:4px;cursor:pointer}
+.bh-frage-zeile.ist-gewaehlt{background:#FFF3DC;border-radius:12px}
+.bh-frage-alle{flex-direction:column;align-items:flex-start}
+.bh-frage-alle .bh-haken{flex-direction:row!important;width:auto!important;white-space:nowrap;margin:4px 0 0!important;gap:10px}
+.bh-frage-alle p{margin:0 0 6px}
+.bh-frage-zeile{gap:12px}

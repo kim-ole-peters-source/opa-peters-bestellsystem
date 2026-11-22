@@ -279,7 +279,7 @@
     zahl.textContent = n;
     leiste.hidden = n === 0;
     if (alle) { alle.checked = n > 0 && n === haken().length; alle.indeterminate = n > 0 && n < haken().length; }
-    haken().forEach(function (h) { var tr = h.closest('tr'); if (tr) tr.classList.toggle('ist-gewaehlt', h.checked); });
+    haken().forEach(function (h) { var tr = h.closest('tr, .bh-frage-zeile'); if (tr) tr.classList.toggle('ist-gewaehlt', h.checked); });
   }
   document.addEventListener('change', function (e) {
     if (e.target.matches('[data-sammel-haken]')) aktualisieren();

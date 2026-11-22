@@ -240,6 +240,18 @@ def init(data_dir):
         setze_einstellung(con, "aufgeraeumt_v1", jetzt_text())
         con.commit()
         con.close()
+    if not einstellung_lesen("erkennung_v2"):
+        # Neue, genauere Erkennung (Nov. 2026) einmal auf alle unbestätigten Belege anwenden
+        con = db()
+        setze_einstellung(con, "erkennung_v2", jetzt_text())
+        con.commit()
+        con.close()
+        if einstellung_lesen("aufgeraeumt_v1"):
+            ergebnis = belege_neu_pruefen()
+            con = db()
+            protokolliere(con, "aufraeumen", f"Erkennung v2: {ergebnis['aussortiert']} aussortiert, {ergebnis['unsicher']} zum Ansehen markiert")
+            con.commit()
+            con.close()
     if not einstellung_lesen("aufgeraeumt_v1"):
         ergebnis = belege_neu_pruefen()
         con = db()
@@ -1962,7 +1974,7 @@ def preisentwicklung(lieferant=None, schwelle=0.03):
 # Steht so etwas oben im Dokument (oder im Dateinamen), ist es keine Rechnung.
 SPERR_WORTE = [
     ("BWA", r"\bBWA\b|betriebswirtschaftliche\s+auswertung"),
-    ("Umsatzbericht", r"umsatz\s*-?\s*(?:bericht|übersicht|uebersicht|statistik|auswertung|liste|report)|sales\s+report"),
+    ("Umsatzbericht", r"umsatz\s*-?\s*(?:bericht|übersicht|uebersicht|statistik|auswertung|liste|report)|sales\s+report|business\s+report|daily\s+report|end\s+of\s+day|tagesbericht"),
     ("Auswertung", r"\bauswertung\b|\breport\b|\bstatistik\b|tagesabschluss|z\s*-?\s*bon|kassenbericht|x\s*-?\s*bericht"),
     ("Summen- und Saldenliste", r"summen\s*-?\s*(?:und|&)\s*saldenliste|susa\b|offene[\s-]+posten|op\s*-?\s*liste|kontenblatt"),
     ("Kontoauszug", r"konto\s*auszug|kontoauszug|account\s+statement|umsatzanzeige|kreditkarten\s*abrechnung|monatsabrechnung\s+kreditkarte"),
@@ -2063,6 +2075,11 @@ def _rechnungs_punkte(text, daten, rechnung_im_kopf):
     return punkte, merkmale
 
 
+def _name_lesbar(dateiname):
+    """business_report_day_2026.pdf -> 'business report day 2026 pdf' (damit Wortgrenzen greifen)"""
+    return re.sub(r"[_\-.]+", " ", os.path.basename(dateiname or ""))
+
+
 def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperren=False):
     """-> ('ja' | 'unsicher' | 'nein', Begründung). nur_sperren: eigenes Belege-Postfach (alles ist Beleg, außer klar keiner).
     Grundsatz: lieber einmal zu viel fragen („Rechnung?“) als eine echte Rechnung wegwerfen."""
@@ -2074,7 +2091,7 @@ def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperre
         return "nein", f"keine Rechnung ({wie})"
     if gelernt == "ja":
         return "ja", f"Rechnung ({wie})"
-    hinweis = " ".join([os.path.basename(dateiname or ""), mail.get("betreff", "")])
+    hinweis = " ".join([_name_lesbar(dateiname), mail.get("betreff", "")])
     if not (text or "").strip():
         # Scan ohne Text: Betreff/Dateiname entscheiden, im Zweifel ansehen lassen
         if any(m.search(hinweis) for n, m in SPERR_MUSTER if n in HARTE_SPERREN):
@@ -2088,7 +2105,7 @@ def rechnung_bewerten(con, text, dateiname="", mail=None, daten=None, nur_sperre
     # Sperrwörter zählen nur als Überschrift (kurze Zeile) oder im Dateinamen – nicht irgendwo im Fußtext
     for name, muster in SPERR_MUSTER:
         als_titel = any(len(z) <= 70 and muster.search(z) for z in zeilen[:12])
-        if not (als_titel or muster.search(os.path.basename(dateiname or ""))):
+        if not (als_titel or muster.search(_name_lesbar(dateiname))):
             continue
         if name in HARTE_SPERREN:
             if name == "Mahnung" or not (rechnung_im_kopf and stark):

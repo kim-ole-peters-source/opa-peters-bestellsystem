@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-protokoll"
+ASSET_VERSION = "2026-11-22-fragesammel"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -8802,13 +8802,20 @@ class App(BaseHTTPRequestHandler):
         frage_html = ""
         if unsicher:
             fragen = "".join(
-                f"""<div class="bh-punkt"><div class="bh-punkt-text"><b>{esc(b['original_name'] or 'Dokument')}</b> · {esc(b['lieferant'] or parseaddr(b['mail_von'] or '')[1] or '')}{(' · ' + esc(bh.betrag_text(b['betrag']))) if b['betrag'] is not None else ''}<small>{esc(b['notiz'] or '')}</small></div>
+                f"""<div class="bh-punkt bh-frage-zeile"><label class="bh-haken"><input type="checkbox" name="b_{b['id']}" value="1" form="bhFrageSammel" data-sammel-haken aria-label="Dokument auswählen"></label><div class="bh-punkt-text"><b>{esc(b['original_name'] or 'Dokument')}</b> · {esc(b['lieferant'] or parseaddr(b['mail_von'] or '')[1] or '')}{(' · ' + esc(bh.betrag_text(b['betrag']))) if b['betrag'] is not None else ''}<small>{esc(b['notiz'] or '')}</small></div>
                 <button type="button" class="button" data-bh-beleg="{b['id']}">Ansehen</button>
                 <form method="post" action="/admin/buchhaltung/beleg/urteil" class="vw-inline-form"><input type="hidden" name="id" value="{b['id']}">
                 <button class="primary" type="submit" name="urteil" value="ja">Ja, Rechnung</button><button class="button" type="submit" name="urteil" value="nein">Keine Rechnung</button></form></div>"""
                 for b in unsicher)
             frage_html = f"""<section class="vw-karte bh-frage-karte" id="rechnung-frage"><div class="vw-karte-kopf"><h3>Ist das eine Rechnung? ({len(unsicher)})</h3></div>
-                <p class="vw-klein">Deine Antwort merkt sich das System für ähnliche Dokumente vom selben Absender.</p>{fragen}</section>"""
+                <div class="bh-frage-alle"><label class="bh-haken"><input type="checkbox" data-sammel-alle aria-label="Alle auswählen"> Alle auswählen</label>
+                <p class="vw-klein">Deine Antwort merkt sich das System für ähnliche Dokumente vom selben Absender. Mit den Häkchen kannst du mehrere auf einmal beantworten.</p></div>{fragen}
+                <form method="post" action="/admin/buchhaltung/beleg/urteil-sammel" id="bhFrageSammel" class="bh-sammelleiste" data-sammel-leiste hidden>
+                    <b><span data-sammel-zahl>0</span> ausgewählt</b>
+                    <button class="primary" type="submit" name="urteil" value="ja">Ja, alles Rechnungen</button>
+                    <button class="button" type="submit" name="urteil" value="nein">Keine Rechnungen</button>
+                    <button class="vw-leise" type="button" data-sammel-aufheben>Auswahl aufheben</button>
+                </form></section>"""
         kacheln = []
         for b in zeilen:
             if b["status"] == "portal":
@@ -9255,6 +9262,24 @@ class App(BaseHTTPRequestHandler):
         beleg_id, text = bh.uebersprungen_uebernehmen(int(eid))
         self.redirect("/admin/buchhaltung/belege?filter=ignoriert&" + ("msg=" if beleg_id else "error=") + quote_plus(text))
 
+    def handle_bh_urteil_sammel(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        urteil = self.form_value(form, "urteil")
+        ids = [int(k[2:]) for k, v in form.items() if k.startswith("b_") and v and k[2:].isdigit()]
+        if urteil not in ("ja", "nein") or not ids:
+            return self.redirect("/admin/buchhaltung/belege#rechnung-frage")
+        for bid in ids:
+            bh.beleg_aendern(bid, {"status": "neu" if urteil == "ja" else "ignoriert", "notiz": "" if urteil == "ja" else "Keine Rechnung (von dir aussortiert)"})
+            try:
+                bh.lernen(bid, urteil)
+            except Exception:
+                pass
+        bh.abgleichen()
+        text = f"{len(ids)} Dokument(e) als Rechnung übernommen." if urteil == "ja" else f"{len(ids)} Dokument(e) aussortiert."
+        self.redirect("/admin/buchhaltung/belege?msg=" + quote_plus(text + " Gemerkt für ähnliche Dokumente."))
+
     def handle_bh_neu_durchsuchen(self):
         if not self.is_admin():
             return self.redirect("/admin/login")
@@ -9439,6 +9464,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_beleg_speichern()
             if path == "/admin/buchhaltung/beleg/urteil":
                 return self.handle_bh_beleg_urteil()
+            if path == "/admin/buchhaltung/beleg/urteil-sammel":
+                return self.handle_bh_urteil_sammel()
             if path == "/admin/buchhaltung/erkennung/neu-pruefen":
                 return self.handle_bh_erkennung("neu-pruefen")
             if path == "/admin/buchhaltung/erkennung/regel-loeschen":
