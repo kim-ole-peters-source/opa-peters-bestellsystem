@@ -203,6 +203,14 @@ def init(data_dir):
             absender TEXT, titel TEXT, urteil TEXT, beispiel TEXT DEFAULT '', erstellt TEXT,
             PRIMARY KEY (absender, titel)
         );
+        CREATE TABLE IF NOT EXISTS uebersprungen (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT UNIQUE, dateiname TEXT, datei TEXT, quelle TEXT, quelle_id INTEGER,
+            absender TEXT, betreff TEXT, mail_datum TEXT, grund TEXT, erstellt TEXT, uebernommen INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS quellen_versuche (
+            quelle_id INTEGER, ordner TEXT, uidvalidity TEXT, uid TEXT, versuche INTEGER DEFAULT 0, fehler TEXT,
+            PRIMARY KEY (quelle_id, ordner, uidvalidity, uid)
+        );
         CREATE TABLE IF NOT EXISTS einstellungen (
             schluessel TEXT PRIMARY KEY, wert TEXT
         );
@@ -552,7 +560,10 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
             endung = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "application/xml": ".xml", "text/xml": ".xml"}.get(mime, ".bin")
         text, xml = "", None
         if endung == ".pdf":
-            text, xml = pdf_lesen(inhalt)
+            try:
+                text, xml = pdf_lesen(inhalt)
+            except Exception:
+                text, xml = "", None
         elif endung == ".xml":
             xml = inhalt
         xml = xml_dazu or xml
@@ -570,6 +581,7 @@ def beleg_anlegen(inhalt, dateiname, mime="", quelle="Upload", quelle_id=None, m
             urteil, grund = rechnung_bewerten(con, text, dateiname, mail, daten, nur_sperren=alles_ist_beleg)
             if urteil == "nein":
                 protokolliere(con, "uebersprungen", f"{dateiname} ({mail.get('von_adresse') or quelle}): {grund}")
+                uebersprungen_merken(con, sha, inhalt, dateiname, endung, quelle, quelle_id, mail, grund)
                 con.commit()
                 return None, False, grund
             if urteil == "unsicher":
@@ -787,7 +799,10 @@ def mail_verarbeiten(con, quelle, nachricht):
                 return 0  # z. B. Kassenbericht – wurde woanders verarbeitet, ist kein Beleg
         except Exception:
             traceback.print_exc()
-    pdfs = [a for a in anhaenge if a[0].lower().endswith(".pdf") or a[1] == "application/pdf"]
+    pdfs = []
+    for name, typ, inhalt in anhaenge:
+        if name.lower().endswith(".pdf") or typ == "application/pdf" or inhalt[:5] == b"%PDF-":
+            pdfs.append((name if name.lower().endswith(".pdf") else (os.path.splitext(name)[0] or "anhang") + ".pdf", "application/pdf", inhalt))
     xmls = [a for a in anhaenge if a[0].lower().endswith(".xml") or a[1] in ("application/xml", "text/xml")]
     bilder = [a for a in anhaenge if a[1].startswith("image/") and len(a[2]) > 30000] if quelle["alles_ist_beleg"] else []
     neu = 0
@@ -813,23 +828,27 @@ def mail_verarbeiten(con, quelle, nachricht):
     return neu
 
 
-def quelle_abholen(quelle_id, max_mails=400):
+def quelle_abholen(quelle_id, max_mails=1500):
+    """Liest ein Postfach. Jede Mail wird genau einmal verarbeitet (gemerkt über UID).
+    Fehlgeschlagene Mails werden beim nächsten Lauf erneut versucht (höchstens 3-mal)."""
     con = db()
     quelle = con.execute("SELECT * FROM quellen WHERE id=?", (quelle_id,)).fetchone()
     if not quelle or not quelle["aktiv"]:
         con.close()
         return 0, "pausiert"
-    neu, gelesen = 0, 0
+    zahlen = {"gelesen": 0, "neu": 0, "uebersprungen": 0, "fehler": 0, "offen": 0}
+    vorher_uebersprungen = con.execute("SELECT COUNT(*) FROM uebersprungen").fetchone()[0]
+    v = None
     try:
         v = imap_verbinden(quelle)
         start = quelle["start_datum"] or (jetzt() - timedelta(days=60)).date().isoformat()
-        if quelle["letzter_lauf"] and not quelle["letzter_fehler"]:
-            start = max(start, (datetime.strptime(quelle["letzter_lauf"][:10], "%Y-%m-%d") - timedelta(days=3)).date().isoformat())
         d = datetime.strptime(start, "%Y-%m-%d")
         seit = f"{d.day:02d}-{['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.month - 1]}-{d.year}"
         for ordner in [o.strip() for o in (quelle["ordner"] or "INBOX").split(",") if o.strip()]:
             status, _ = v.select(f'"{ordner}"', readonly=True)
             if status != "OK":
+                protokolliere(con, "fehler", f"Quelle {quelle['name']}: Ordner „{ordner}“ nicht gefunden")
+                zahlen["fehler"] += 1
                 continue
             uidvalidity = ""
             try:
@@ -841,34 +860,132 @@ def quelle_abholen(quelle_id, max_mails=400):
             uids = (daten[0] or b"").split() if status == "OK" and daten else []
             for uid in uids:
                 uid = uid.decode()
-                if con.execute("SELECT 1 FROM quellen_gesehen WHERE quelle_id=? AND ordner=? AND uidvalidity=? AND uid=?", (quelle_id, ordner, uidvalidity, uid)).fetchone():
+                schluessel = (quelle_id, ordner, uidvalidity, uid)
+                if con.execute("SELECT 1 FROM quellen_gesehen WHERE quelle_id=? AND ordner=? AND uidvalidity=? AND uid=?", schluessel).fetchone():
                     continue
-                if gelesen >= max_mails:
-                    break
-                status, teile = v.uid("fetch", uid, "(BODY.PEEK[])")
-                if status != "OK" or not teile or not isinstance(teile[0], tuple):
+                if zahlen["gelesen"] >= max_mails:
+                    zahlen["offen"] += 1
                     continue
-                nachricht = email.message_from_bytes(teile[0][1])
+                nachricht = None
+                for versuch in range(2):
+                    try:
+                        status, teile = v.uid("fetch", uid, "(BODY.PEEK[])")
+                        if status == "OK" and teile and isinstance(teile[0], tuple):
+                            nachricht = email.message_from_bytes(teile[0][1])
+                        break
+                    except (imaplib.IMAP4.abort, OSError):
+                        # Verbindung abgerissen -> neu verbinden und weitermachen
+                        try:
+                            v.logout()
+                        except Exception:
+                            pass
+                        v = imap_verbinden(quelle)
+                        v.select(f'"{ordner}"', readonly=True)
+                if nachricht is None:
+                    zahlen["fehler"] += 1
+                    continue
                 try:
-                    neu += mail_verarbeiten(con, quelle, nachricht)
+                    zahlen["neu"] += mail_verarbeiten(con, quelle, nachricht)
+                    fertig = True
                 except Exception as exc:
-                    protokolliere(con, "fehler", f"Quelle {quelle['name']}, Mail {uid}: {exc}")
-                con.execute("INSERT OR IGNORE INTO quellen_gesehen VALUES (?, ?, ?, ?)", (quelle_id, ordner, uidvalidity, uid))
+                    fertig = False
+                    zahlen["fehler"] += 1
+                    con.execute("INSERT INTO quellen_versuche VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT DO UPDATE SET versuche=versuche+1, fehler=excluded.fehler",
+                                (*schluessel, str(exc)[:300]))
+                    versuche = con.execute("SELECT versuche FROM quellen_versuche WHERE quelle_id=? AND ordner=? AND uidvalidity=? AND uid=?", schluessel).fetchone()[0]
+                    protokolliere(con, "fehler", f"Quelle {quelle['name']}, Mail „{_dekodiere(nachricht.get('Subject', ''))[:80]}“ (Versuch {versuche}): {exc}")
+                    if versuche >= 3:
+                        fertig = True  # aufgeben, sonst hängt diese Mail jeden Lauf
+                if fertig:
+                    con.execute("INSERT OR IGNORE INTO quellen_gesehen VALUES (?, ?, ?, ?)", schluessel)
                 con.commit()
-                gelesen += 1
-        v.logout()
-        meldung = f"{gelesen} Mails gelesen, {neu} neue Belege" + (" (weitere beim nächsten Lauf)" if gelesen >= max_mails else "")
-        con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=0, gefunden=gefunden+? WHERE id=?", (jetzt_text(), meldung, neu, quelle_id))
+                zahlen["gelesen"] += 1
+        try:
+            v.logout()
+        except Exception:
+            pass
+        zahlen["uebersprungen"] = con.execute("SELECT COUNT(*) FROM uebersprungen").fetchone()[0] - vorher_uebersprungen
+        meldung = f"{zahlen['gelesen']} Mails gelesen · {zahlen['neu']} neue Belege"
+        if zahlen["uebersprungen"]:
+            meldung += f" · {zahlen['uebersprungen']} keine Rechnung"
+        if zahlen["fehler"]:
+            meldung += f" · {zahlen['fehler']} Mail(s) mit Fehler"
+        if zahlen["offen"]:
+            meldung += f" · {zahlen['offen']} weitere beim nächsten Lauf"
+        con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=0, gefunden=gefunden+? WHERE id=?", (jetzt_text(), meldung, zahlen["neu"], quelle_id))
     except imaplib.IMAP4.error as exc:
         meldung = f"Anmeldung abgelehnt – Passwort prüfen ({exc})"
         con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=1 WHERE id=?", (jetzt_text(), meldung, quelle_id))
     except Exception as exc:
-        meldung = f"Fehler: {exc}"
+        meldung = f"Abgebrochen: {exc}. Bisher gelesene Mails sind gespeichert, der Rest kommt beim nächsten Lauf."
         protokolliere(con, "fehler", traceback.format_exc())
         con.execute("UPDATE quellen SET letzter_lauf=?, letzter_status=?, letzter_fehler=1 WHERE id=?", (jetzt_text(), meldung, quelle_id))
     con.commit()
     con.close()
-    return neu, meldung
+    return zahlen["neu"], meldung
+
+
+def quelle_neu_durchsuchen(quelle_id):
+    """Vergisst, welche Mails schon gelesen wurden – das Postfach wird ab dem Startdatum komplett neu durchsucht.
+    Doppelte Belege entstehen nicht (gleiche Datei wird erkannt)."""
+    con = db()
+    con.execute("DELETE FROM quellen_gesehen WHERE quelle_id=?", (quelle_id,))
+    con.execute("DELETE FROM quellen_versuche WHERE quelle_id=?", (quelle_id,))
+    con.execute("DELETE FROM uebersprungen WHERE quelle_id=? AND uebernommen=0", (quelle_id,))
+    protokolliere(con, "quelle", f"Quelle {quelle_id}: wird komplett neu durchsucht")
+    con.commit()
+    con.close()
+
+
+def uebersprungen_merken(con, sha, inhalt, dateiname, endung, quelle, quelle_id, mail, grund):
+    """Hebt ein aussortiertes Dokument 90 Tage auf, damit man es bei Bedarf doch übernehmen kann."""
+    if con.execute("SELECT 1 FROM uebersprungen WHERE sha256=?", (sha,)).fetchone():
+        return
+    ordner = os.path.join(BASIS, "uebersprungen")
+    os.makedirs(ordner, exist_ok=True)
+    rel = f"{sha[:16]}{endung}"
+    with open(os.path.join(ordner, rel), "wb") as f:
+        f.write(inhalt)
+    con.execute("INSERT INTO uebersprungen (sha256, dateiname, datei, quelle, quelle_id, absender, betreff, mail_datum, grund, erstellt) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sha, (dateiname or "")[:200], rel, quelle[:80], quelle_id, (mail.get("von") or "")[:200], (mail.get("betreff") or "")[:200],
+                 mail.get("datum", ""), grund[:200], jetzt_text()))
+    grenze = (jetzt() - timedelta(days=90)).strftime("%Y-%m-%d")
+    for alt in con.execute("SELECT id, datei FROM uebersprungen WHERE erstellt < ?", (grenze,)).fetchall():
+        try:
+            os.remove(os.path.join(ordner, alt["datei"]))
+        except OSError:
+            pass
+        con.execute("DELETE FROM uebersprungen WHERE id=?", (alt["id"],))
+
+
+def uebersprungen_pfad(eintrag):
+    pfad = os.path.realpath(os.path.join(BASIS, "uebersprungen", eintrag["datei"] or ""))
+    basis = os.path.realpath(os.path.join(BASIS, "uebersprungen"))
+    return pfad if pfad.startswith(basis + os.sep) and os.path.exists(pfad) else ""
+
+
+def uebersprungen_uebernehmen(eintrag_id):
+    """Ein übersprungenes Dokument doch als Beleg anlegen und für den Absender merken. -> (beleg_id, meldung)"""
+    con = db()
+    e = con.execute("SELECT * FROM uebersprungen WHERE id=?", (eintrag_id,)).fetchone()
+    con.close()
+    if not e:
+        return None, "Nicht gefunden."
+    pfad = uebersprungen_pfad(e)
+    if not pfad:
+        return None, "Die Datei ist nicht mehr vorhanden."
+    with open(pfad, "rb") as f:
+        inhalt = f.read()
+    mail = {"von": e["absender"], "von_adresse": parseaddr(e["absender"] or "")[1].lower(), "betreff": e["betreff"], "datum": e["mail_datum"]}
+    beleg_id, neu, grund = beleg_anlegen(inhalt, e["dateiname"], "", e["quelle"] or "Postfach", e["quelle_id"], mail, "auto", True, vorgaben={"ohne_pruefung": True})
+    if beleg_id:
+        lernen(beleg_id, "ja")
+        con = db()
+        con.execute("UPDATE uebersprungen SET uebernommen=1 WHERE id=?", (eintrag_id,))
+        con.commit()
+        con.close()
+        abgleichen()
+    return beleg_id, ("Als Beleg übernommen. Ähnliche Dokumente von diesem Absender werden künftig übernommen." if neu else "War schon als Beleg vorhanden.")
 
 
 def alle_abholen(nur_quelle=None):
@@ -881,16 +998,18 @@ def alle_abholen(nur_quelle=None):
             con = db()
             ids = [r["id"] for r in con.execute("SELECT id FROM quellen WHERE aktiv=1" + (" AND id=?" if nur_quelle else ""), ((nur_quelle,) if nur_quelle else ())).fetchall()]
             con.close()
-            neu = 0
+            neu, meldungen = 0, []
             for qid in ids:
-                n, _ = quelle_abholen(qid)
+                LAUF.update({"meldung": f"Postfach {len(meldungen) + 1} von {len(ids)} …"})
+                n, text = quelle_abholen(qid)
                 neu += n
+                meldungen.append(text)
             abgleichen()
             con = db()
             setze_einstellung(con, "letzter_lauf", jetzt_text())
             con.commit()
             con.close()
-            LAUF.update({"meldung": f"fertig: {neu} neue Belege", "neu": neu})
+            LAUF.update({"meldung": f"fertig: {neu} neue Belege", "neu": neu, "details": meldungen})
         except Exception as exc:
             LAUF.update({"meldung": f"Fehler: {exc}"})
         finally:
@@ -1776,7 +1895,7 @@ def alles_leeren(grund="Buchhaltung geleert"):
     os.remove(kopie)
     con = db()
     for tabelle in ("zuordnung", "buchungen", "importe", "konten", "belege", "positionen", "positionen_gelesen",
-                    "anforderungen", "monate", "quellen_gesehen"):
+                    "anforderungen", "monate", "quellen_gesehen", "quellen_versuche", "uebersprungen"):
         con.execute(f"DELETE FROM {tabelle}")
     heute = jetzt().date().isoformat()
     con.execute("UPDATE quellen SET start_datum=?, gefunden=0, letzter_status='', letzter_fehler=0", (heute,))
@@ -1788,6 +1907,7 @@ def alles_leeren(grund="Buchhaltung geleert"):
     con.close()
     import shutil
     shutil.rmtree(os.path.join(BASIS, "vorschau"), ignore_errors=True)
+    shutil.rmtree(os.path.join(BASIS, "uebersprungen"), ignore_errors=True)
     for wurzel, ordner, dateien in os.walk(ARCHIV, topdown=False):
         for name in dateien:
             try:

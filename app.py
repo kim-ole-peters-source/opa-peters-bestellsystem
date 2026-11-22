@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-vorschau"
+ASSET_VERSION = "2026-11-22-abholen"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -3409,7 +3409,10 @@ def kasse_mail_haken(mail, anhaenge, text):
             kasse_nach_import(sorted({d for _, d in alle}))
         except Exception as fehler:
             print(f"Tagesabschluss nach Import fehlgeschlagen: {fehler}")
-    return True
+    # Nur dann "erledigt", wenn es wirklich ein Kassenbericht war. Eine PDF-Rechnung von Lightspeed
+    # (z. B. die monatliche Abo-Rechnung) soll ganz normal als Beleg in der Buchhaltung landen.
+    tabellen = [a for a in dateien if os.path.splitext(a[0])[1].lower() in (".csv", ".xls", ".xlsx", ".txt")]
+    return bool(alle) or bool(tabellen)
 
 
 def kasse_nach_import(daten_liste):
@@ -4122,6 +4125,8 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_status(query=parse_qs(parsed.query))
         if path in ("/admin/buchhaltung/quellen", "/admin/buchhaltung/einstellungen"):
             return self.show_bh_einstellungen(query=parse_qs(parsed.query))
+        if path == "/admin/buchhaltung/uebersprungen/datei":
+            return self.show_bh_uebersprungen_datei(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/vorschau":
             return self.show_bh_vorschau(query=parse_qs(parsed.query))
         if path == "/admin/buchhaltung/lieferanten":
@@ -8606,8 +8611,8 @@ class App(BaseHTTPRequestHandler):
         quellen_status = ""
         if quellen:
             fehler = [q for q in quellen if q["letzter_fehler"]]
-            quellen_status = (f'{len(quellen)} Postfach/Postfächer verbunden · zuletzt abgeholt {esc(letzter[:16]) if letzter else "noch nie"}'
-                              + (f'<br><span class="minus">Problem bei: {esc(", ".join(q["name"] for q in fehler))}</span>' if fehler else ""))
+            quellen_status = (f'Zuletzt abgeholt: {esc(letzter[:16]) if letzter else "noch nie"}'
+                              + "".join(f'<span class="bh-quelle-status {"minus" if q["letzter_fehler"] else ""}"><b>{esc(q["name"])}</b>: {esc(q["letzter_status"] or "noch nie abgeholt")}</span>' for q in quellen))
         else:
             quellen_status = "Noch kein Postfach verbunden."
         body = f"""
@@ -8756,6 +8761,7 @@ class App(BaseHTTPRequestHandler):
         portal = con.execute("SELECT * FROM belege WHERE status='portal' ORDER BY id DESC").fetchall()
         im_monat = con.execute("SELECT * FROM belege WHERE substr(COALESCE(NULLIF(datum,''), erstellt),1,7)=? AND status NOT IN ('unsicher','portal') ORDER BY COALESCE(NULLIF(datum,''), erstellt) DESC, id DESC", (monat,)).fetchall()
         aussortiert_alle = con.execute("SELECT * FROM belege WHERE status IN ('ignoriert','doppelt') ORDER BY id DESC LIMIT 300").fetchall()
+        uebersprungen = con.execute("SELECT * FROM uebersprungen WHERE uebernommen=0 ORDER BY id DESC LIMIT 200").fetchall() if filt == "ignoriert" else []
         con.close()
         gueltig = [b for b in im_monat if b["status"] not in ("ignoriert", "doppelt")]
         gruppen = {
@@ -8826,6 +8832,7 @@ class App(BaseHTTPRequestHandler):
             <div class="vw-chips">{chips_html}</div>
             <label class="vw-suche"><span class="sr-only">Suchen</span><input type="search" name="q" value="{esc(suche)}" placeholder="Lieferant, Nummer, Betrag"></label></form>
         {'<p class="vw-klein">Alles, was keine Rechnung ist – automatisch oder von dir aussortiert. Nichts wird gelöscht; ein Klick auf das Dokument und „Wieder aufnehmen“ holt es zurück.</p>' if filt == 'ignoriert' else ''}
+        {self.bh_uebersprungen_html(uebersprungen) if filt == 'ignoriert' else ''}
         <div class="bh-kacheln">{''.join(kacheln) or '<p class="vw-leer">Hier ist gerade nichts.</p>'}</div>
         {self.bh_upload_dialog()}
         <dialog class="vw-dialog vw-seitenfenster bh-panel" id="bhBelegPanel"><div id="bhBelegPanelInhalt"></div></dialog>
@@ -9055,6 +9062,7 @@ class App(BaseHTTPRequestHandler):
                     <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div></form>
                 <div class="vw-knopfreihe">
                     <form method="post" action="/admin/buchhaltung/quelle/testen"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="button" type="submit">Verbindung testen</button></form>
+                    <form method="post" action="/admin/buchhaltung/quelle/neu-durchsuchen" data-vw-confirm="Postfach ab {esc(bh.datum_de(q['start_datum']) or 'den letzten 60 Tagen')} komplett neu durchsuchen? Schon vorhandene Belege werden nicht doppelt angelegt."><input type="hidden" name="quelle_id" value="{q['id']}"><button class="button" type="submit">Komplett neu durchsuchen</button></form>
                     <form method="post" action="/admin/buchhaltung/quelle/aktiv"><input type="hidden" name="quelle_id" value="{q['id']}"><button class="vw-leise" type="submit">{'Pausieren' if q['aktiv'] else 'Wieder aktivieren'}</button></form>
                 </div>
                 <form method="post" action="/admin/buchhaltung/quelle/loeschen" class="vw-gefahrzone" data-vw-confirm="Postfach „{esc(q['name'])}“ entfernen? Bereits gefundene Belege bleiben erhalten.">
@@ -9191,6 +9199,52 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(daten)
 
+    def bh_uebersprungen_html(self, eintraege):
+        if not eintraege:
+            return ""
+        zeilen = "".join(
+            f"""<div class="bh-punkt"><div class="bh-punkt-text"><b>{esc(e['dateiname'] or 'Dokument')}</b> · {esc(parseaddr(e['absender'] or '')[1] or e['quelle'] or '')}
+                <small>{esc((e['mail_datum'] or e['erstellt'] or '')[:10])} · {esc(e['betreff'] or '')[:70]} · {esc(e['grund'])}</small></div>
+                <a class="button" href="/admin/buchhaltung/uebersprungen/datei?id={e['id']}" target="_blank" rel="noopener">Ansehen</a>
+                <form method="post" action="/admin/buchhaltung/uebersprungen/uebernehmen" class="vw-inline-form"><input type="hidden" name="id" value="{e['id']}"><button class="button" type="submit">Doch übernehmen</button></form></div>"""
+            for e in eintraege)
+        return f"""<section class="vw-karte"><div class="vw-karte-kopf"><h3>Beim Abholen übersprungen ({len(eintraege)})</h3></div>
+            <p class="vw-klein">Diese Anhänge hat das System als „keine Rechnung“ erkannt (z. B. BWA, AGB, Mahnung). Sie werden 90 Tage aufgehoben. Falsch aussortiert? „Doch übernehmen“ – dann merkt sich das System den Absender.</p>{zeilen}</section>"""
+
+    def show_bh_uebersprungen_datei(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        eid = self.query_text(query or {}, "id")
+        con = bh.db()
+        e = con.execute("SELECT * FROM uebersprungen WHERE id=?", (eid,)).fetchone() if eid.isdigit() else None
+        con.close()
+        pfad = bh.uebersprungen_pfad(e) if e else ""
+        if not pfad:
+            return self.send_html("<p>Datei nicht mehr vorhanden.</p>".encode("utf-8"), 404)
+        typ = {".pdf": "application/pdf", ".xml": "application/xml", ".png": "image/png"}.get(os.path.splitext(pfad)[1].lower(), "application/octet-stream")
+        with open(pfad, "rb") as f:
+            self.send_bytes(f.read(), typ, e["dateiname"] or os.path.basename(pfad))
+
+    def handle_bh_uebersprungen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        eid = self.form_value(form, "id")
+        if not eid.isdigit():
+            return self.redirect("/admin/buchhaltung/belege?filter=ignoriert")
+        beleg_id, text = bh.uebersprungen_uebernehmen(int(eid))
+        self.redirect("/admin/buchhaltung/belege?filter=ignoriert&" + ("msg=" if beleg_id else "error=") + quote_plus(text))
+
+    def handle_bh_neu_durchsuchen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        qid = self.form_value(form, "quelle_id")
+        if qid.isdigit():
+            bh.quelle_neu_durchsuchen(int(qid))
+            bh.alle_abholen(int(qid))
+        self.redirect("/admin/buchhaltung/einstellungen?msg=" + quote_plus("Das Postfach wird jetzt ab dem Startdatum komplett neu durchsucht. Doppelte Belege entstehen dabei nicht."))
+
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -9305,6 +9359,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_leeren()
             if path == "/admin/buchhaltung/buchung/sammel":
                 return self.handle_bh_sammel()
+            if path == "/admin/buchhaltung/uebersprungen/uebernehmen":
+                return self.handle_bh_uebersprungen()
+            if path == "/admin/buchhaltung/quelle/neu-durchsuchen":
+                return self.handle_bh_neu_durchsuchen()
             if path == "/admin/buchhaltung/beleg/upload":
                 return self.handle_bh_beleg_upload()
             if path == "/admin/buchhaltung/beleg/speichern":
