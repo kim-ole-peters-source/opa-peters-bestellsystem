@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-abholen"
+ASSET_VERSION = "2026-11-22-ansicht"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -7804,13 +7804,18 @@ class App(BaseHTTPRequestHandler):
         con.close()
         monat = (bu["datum"] or "")[:7]
         zugeordnet = "".join(
-            f'<li><a href="/admin/buchhaltung/datei?id={b["id"]}" target="_blank" rel="noopener">{esc(bh.beleg_dateiname(b))}</a>'
+            f'<li><a href="/admin/buchhaltung/datei?id={b["id"]}" target="_blank" rel="noopener" data-bh-ansehen="{b["id"]}">{esc(bh.beleg_dateiname(b))}</a>'
             f'<form method="post" action="/admin/buchhaltung/buchung/loesen" class="vw-inline-form"><input type="hidden" name="buchung_id" value="{bu["id"]}"><input type="hidden" name="beleg_id" value="{b["id"]}"><input type="hidden" name="monat" value="{monat}"><button class="vw-leise" type="submit">lösen</button></form></li>'
             for b in belege
         )
         kand_html = "".join(
-            f'<label class="bh-kandidat"><input type="checkbox" name="beleg_{b["id"]}" value="1"><span><b>{esc(b["lieferant"] or "Unbekannt")}</b> · {esc(bh.betrag_text(b["betrag"], b["waehrung"]))}<small>{esc(bh.datum_de(b["datum"]))} · {esc(b["rechnungsnr"] or "ohne Nr.")} · {esc(bh.ARTEN.get(b["art"], ""))}</small></span>'
-            f'<span class="vw-marke {"gruen" if p >= 75 else ("honig" if p >= 40 else "grau")}">{"passt gut" if p >= 75 else ("möglich" if p >= 40 else "")}</span></label>'
+            f'<div class="bh-kandidat-zeile">'
+            f'<button type="button" class="bh-kandidat-bild" data-bh-ansehen="{b["id"]}" aria-label="Dokument ansehen">'
+            + (f'<img src="/admin/buchhaltung/vorschau?id={b["id"]}" alt="" loading="lazy">' if not (b["datei"] or "").endswith(".xml") else '<span>XML</span>')
+            + f'</button>'
+            f'<label class="bh-kandidat"><input type="checkbox" name="beleg_{b["id"]}" value="1"><span><b>{esc(b["lieferant"] or "Unbekannt")}</b> · {esc(bh.betrag_text(b["betrag"], b["waehrung"])) if b["betrag"] is not None else "Betrag unbekannt"}<small>{esc(bh.datum_de(b["datum"]))} · {esc(b["rechnungsnr"] or "ohne Nr.")} · {esc(bh.ARTEN.get(b["art"], ""))}</small></span>'
+            + (f'<span class="vw-marke {"gruen" if p >= 80 else "honig"}">{"passt gut" if p >= 80 else "möglich"}</span>' if p >= 40 else "") + '</label>'
+            f'<button type="button" class="button bh-klein" data-bh-ansehen="{b["id"]}">Ansehen</button></div>'
             for p, b in kand
         )
         vorschlag_muster = (bu["gegenpartei"] or "").strip()[:60]
@@ -10574,6 +10579,7 @@ class App(BaseHTTPRequestHandler):
 def main():
     init_db()
     bh.init(DATA_DIR)
+    threading_start = __import__('threading').Thread(target=bh.abgleichen, daemon=True).start()  # nach Updates offene Zahlungen neu bewerten
     bh.nachtlauf_starten(taeglich=bh_monatserinnerung)
     tagesmail_uhr_starten()
     kasse_init()

@@ -291,3 +291,31 @@
   }, true);
   aktualisieren();
 })();
+
+/* Buchhaltung: Original-Dokument als Popup ansehen (z. B. bei vorgeschlagenen Belegen) */
+(function () {
+  function ansicht() {
+    var d = document.getElementById('bhAnsicht');
+    if (d) return d;
+    d = document.createElement('dialog');
+    d.id = 'bhAnsicht';
+    d.className = 'vw-dialog bh-ansicht';
+    d.innerHTML = '<div class="vw-dialog-kopf"><h3>Dokument</h3><a class="button bh-klein" target="_blank" rel="noopener" data-bh-ansicht-neu>In neuem Tab öffnen</a><button type="button" class="vw-zu" aria-label="Schließen">×</button></div><iframe title="Dokument" data-bh-ansicht-rahmen></iframe>';
+    document.body.appendChild(d);
+    d.querySelector('.vw-zu').addEventListener('click', function () { d.close(); });
+    d.addEventListener('click', function (e) { if (e.target === d) d.close(); });
+    d.addEventListener('close', function () { d.querySelector('iframe').src = 'about:blank'; });
+    return d;
+  }
+  document.addEventListener('click', function (e) {
+    var knopf = e.target.closest('[data-bh-ansehen]');
+    if (!knopf) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var url = '/admin/buchhaltung/datei?id=' + knopf.getAttribute('data-bh-ansehen');
+    var d = ansicht();
+    d.querySelector('iframe').src = url;
+    d.querySelector('[data-bh-ansicht-neu]').href = url;
+    if (!d.open) d.showModal();
+  }, true);
+})();

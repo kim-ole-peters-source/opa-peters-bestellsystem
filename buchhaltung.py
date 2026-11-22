@@ -448,7 +448,7 @@ NR_MUSTER = re.compile(
 DATUM_MUSTER = re.compile(r"(?:Rechnungsdatum|Belegdatum|Invoice\s*date|Datum|Date)\s*[:.]?\s*(\d{1,2}\.\s?\d{1,2}\.\s?\d{2,4}|\d{4}-\d{2}-\d{2})", re.I)
 SUMME_MUSTER = re.compile(
     r"(?:Gesamtbetrag|Rechnungsbetrag|Endbetrag|Gesamtsumme|Zahlbetrag|zu\s+zahlen(?:der\s+Betrag)?|zahlbarer\s+Betrag|Bruttobetrag|Summe\s+brutto|Brutto\s*gesamt|Gesamt\s*brutto|Total\s*(?:amount|due)?|Amount\s+due|Gesamt)"
-    r"[^\d\n-]{0,40}" + BETRAG_MUSTER, re.I)
+    r"[^\d-]{0,60}?" + BETRAG_MUSTER, re.I)
 
 
 def text_auslesen(text):
@@ -475,7 +475,7 @@ def text_auslesen(text):
     if summen:
         daten["betrag"] = max(summen, key=abs)
     else:
-        euro = [cent(x.replace(" ", "")) for x in re.findall(BETRAG_MUSTER + r"\s*(?:€|EUR)", text)]
+        euro = [cent(x.replace(" ", "")) for x in re.findall(BETRAG_MUSTER + r"\s*(?:€|EUR)", text) + re.findall(r"(?:€|EUR)\s*" + BETRAG_MUSTER, text)]
         euro = [e for e in euro if e is not None]
         if euro:
             daten["betrag"] = max(euro, key=abs)
@@ -1221,37 +1221,93 @@ def kontoauszug_importieren(inhalt, dateiname, konto_name=""):
 
 # ---------------------------------------------------------------- Abgleich
 
+FUELLWOERTER = {"gmbh", "mbh", "und", "co", "kg", "ag", "ug", "ohg", "gbr", "ev", "the", "der", "die", "das", "rechnung", "rechnungsstelle",
+                "kundennummer", "kunde", "vielen", "dank", "sepa", "lastschrift", "ueberweisung", "eref", "mref", "cred", "svwz", "end", "to",
+                "notprovided", "zahlung", "payment", "online", "deutschland", "germany", "europe", "service", "services", "www", "com", "de"}
+
+
 def _woerter(text):
-    return {w for w in schluessel_text(text).split() if len(w) >= 4 and w not in ("gmbh", "rechnung", "kundennummer", "vielen", "dank", "sepa", "lastschrift", "ueberweisung")}
+    return {w for w in schluessel_text(text).split() if len(w) >= 3 and not w.isdigit() and w not in FUELLWOERTER}
 
 
-def punkte(buchung, beleg):
-    if beleg["betrag"] is None:
+def _nur_zeichen(text):
+    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+
+
+def _nummer_passt(rechnungsnr, zweck):
+    """Steht die Rechnungsnummer im Verwendungszweck? Leerzeichen, Striche usw. egal ("DRP 161388076" = "DRP161388076")."""
+    nr = _nur_zeichen(rechnungsnr)
+    if len(nr) < 4 or not re.search(r"\d", nr):
         return 0
-    zahl = abs(buchung["betrag"])
-    soll = abs(beleg["betrag"])
+    z = _nur_zeichen(zweck)
+    if nr in z:
+        return 45
+    ziffern = re.sub(r"\D", "", nr)
+    if len(ziffern) >= 6 and ziffern in re.sub(r"\D", "", zweck or ""):
+        return 35
+    return 0
+
+
+def punkte(buchung, beleg, bekannt=None):
+    """Wie gut passt ein Beleg zu einer Zahlung? 0 = gar nicht.
+    bekannt: {gegenpartei/IBAN-Schlüssel: {lieferant-wörter}} aus früheren Zuordnungen (das System lernt mit)."""
+    zahl = abs(buchung["betrag"] or 0)
+    soll = abs(beleg["betrag"]) if beleg["betrag"] is not None else None
+    zweck = (buchung["zweck"] or "") + " " + (buchung["gegenpartei"] or "")
     p = 0
-    if zahl == soll:
+    nummer = _nummer_passt(beleg["rechnungsnr"], zweck)
+    p += nummer
+    if not nummer:
+        # Steht im Verwendungszweck eine ANDERE Nummer im selben Format (z. B. DRP… für einen anderen Monat)? -> passt nicht
+        nr = _nur_zeichen(beleg["rechnungsnr"])
+        m = re.match(r"^([A-Z]{2,})(\d{4,})$", nr)
+        if m and re.search(rf"{m.group(1)}\d{{{max(4, len(m.group(2)) - 1)},{len(m.group(2)) + 1}}}", _nur_zeichen(zweck)):
+            p -= 40
+    if soll is None:
+        betrag_ok = None
+    elif zahl == soll:
         p += 50
-    elif soll and 0.95 * soll <= zahl < soll:
+        betrag_ok = True
+    elif soll and 0.96 * soll <= zahl < soll:
         p += 30  # Skonto
+        betrag_ok = True
     else:
-        return 0
-    text = schluessel_text(buchung["zweck"] + " " + buchung["gegenpartei"])
-    nr = schluessel_text(beleg["rechnungsnr"])
-    if nr and len(nr.replace(" ", "")) >= 3 and nr.replace(" ", "") in text.replace(" ", ""):
-        p += 40
-    if _woerter(beleg["lieferant"]) & _woerter(buchung["gegenpartei"] + " " + buchung["zweck"]):
+        betrag_ok = False
+    if betrag_ok is False and not nummer:
+        return 0  # anderer Betrag und keine passende Nummer -> sicher nicht
+    if betrag_ok is False:
+        p -= 30  # Nummer passt, Betrag nicht (z. B. Teilzahlung) -> nur Vorschlag
+    lief = _woerter(beleg["lieferant"])
+    if lief & _woerter(zweck):
         p += 25
+    elif bekannt:
+        for key in (schluessel_text(buchung["iban_gegen"] or ""), schluessel_text(buchung["gegenpartei"] or "")):
+            if key and lief & bekannt.get(key, set()):
+                p += 20
+                break
     try:
         tage = (datetime.strptime(buchung["datum"], "%Y-%m-%d") - datetime.strptime(beleg["datum"], "%Y-%m-%d")).days
-        if -7 <= tage <= 60:
-            p += 15 if tage <= 30 else 8
-        else:
-            p -= 20
+        if -5 <= tage <= 21:
+            p += 15
+        elif -10 <= tage <= 45:
+            p += 8
+        elif tage > 90 or tage < -20:
+            p -= 25
     except (ValueError, TypeError):
         pass
-    return p
+    if soll is None and not nummer:
+        return 0  # ohne Betrag nur über die Rechnungsnummer
+    return max(p, 0)
+
+
+def bekannte_zuordnungen(con):
+    """Gelernt: Welche Lieferanten gehörten bisher zu welchem Zahlungsempfänger / welcher IBAN?"""
+    bekannt = {}
+    for r in con.execute("SELECT bu.gegenpartei, bu.iban_gegen, b.lieferant FROM zuordnung z JOIN buchungen bu ON bu.id=z.buchung_id JOIN belege b ON b.id=z.beleg_id WHERE z.art IN ('hand','auto')"):
+        for key in (schluessel_text(r["iban_gegen"] or ""), schluessel_text(r["gegenpartei"] or "")):
+            if key:
+                bekannt.setdefault(key, set()).update(_woerter(r["lieferant"]))
+    return bekannt
 
 
 def _passende_art(buchung, beleg):
@@ -1262,17 +1318,18 @@ def _passende_art(buchung, beleg):
 
 def kandidaten(con, buchung, limit=8, suche=""):
     belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
+    bekannt = bekannte_zuordnungen(con)
     liste = []
     zeilen = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal', 'unsicher') AND dauer=0").fetchall()
     for b in zeilen:
         if suche:
-            if schluessel_text(suche) not in schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], betrag_text(b["betrag"]), b["original_name"]])):
+            if schluessel_text(suche) not in schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], betrag_text(b["betrag"]), b["original_name"], b["mail_von"] or ""])):
                 continue
-            p = punkte(buchung, b)
+            p = punkte(buchung, b, bekannt)
         else:
             if b["id"] in belegt or not _passende_art(buchung, b):
                 continue
-            p = punkte(buchung, b)
+            p = punkte(buchung, b, bekannt)
             if p < 40:
                 continue
         liste.append((p, b))
@@ -1295,6 +1352,7 @@ def abgleichen():
     belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
     belege = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal', 'unsicher')").fetchall()
     dauer = [b for b in belege if b["dauer"] and b["dauer_muster"]]
+    bekannt = bekannte_zuordnungen(con)
     normal = [b for b in belege if not b["dauer"]]
     zugeordnet = 0
     for buchung in con.execute("SELECT * FROM buchungen WHERE status IN ('offen', 'vorschlag')").fetchall():
@@ -1310,13 +1368,16 @@ def abgleichen():
             zugeordnet += 1
             continue
         bewertet = sorted(
-            ((punkte(buchung, b), b) for b in normal if b["id"] not in belegt and _passende_art(buchung, b)),
+            ((punkte(buchung, b, bekannt), b) for b in normal if b["id"] not in belegt and _passende_art(buchung, b)),
             key=lambda x: -x[0],
         )
         bewertet = [x for x in bewertet if x[0] >= 40]
-        if bewertet and bewertet[0][0] >= 75 and (len(bewertet) == 1 or bewertet[1][0] <= bewertet[0][0] - 20):
+        if bewertet and bewertet[0][0] >= 80 and (len(bewertet) == 1 or bewertet[1][0] <= bewertet[0][0] - 20):
             p, b = bewertet[0]
             con.execute("INSERT OR IGNORE INTO zuordnung VALUES (?, ?, 'auto', ?, ?)", (buchung["id"], b["id"], p, jetzt_text()))
+            if b["betrag"] is None:
+                # Betrag war auf der Rechnung nicht lesbar -> aus der Zahlung übernehmen
+                con.execute("UPDATE belege SET betrag=?, notiz=TRIM(notiz || ' Betrag aus der Zahlung übernommen.') WHERE id=?", (abs(buchung["betrag"]), b["id"]))
             con.execute("UPDATE buchungen SET status='zugeordnet', vorschlag_id=NULL WHERE id=?", (buchung["id"],))
             belegt.add(b["id"])
             zugeordnet += 1
@@ -1331,6 +1392,10 @@ def abgleichen():
 
 def zuordnen(buchung_id, beleg_ids, art="hand"):
     con = db()
+    if len(beleg_ids) == 1:
+        bu = con.execute("SELECT betrag FROM buchungen WHERE id=?", (buchung_id,)).fetchone()
+        if bu:
+            con.execute("UPDATE belege SET betrag=? WHERE id=? AND betrag IS NULL", (abs(bu["betrag"]), beleg_ids[0]))
     for beleg_id in beleg_ids:
         con.execute("INSERT OR IGNORE INTO zuordnung VALUES (?, ?, ?, 100, ?)", (buchung_id, beleg_id, art, jetzt_text()))
         con.execute("UPDATE belege SET status='geprueft' WHERE id=? AND status='neu'", (beleg_id,))
