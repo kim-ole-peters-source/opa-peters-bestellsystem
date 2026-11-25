@@ -3353,3 +3353,26 @@ tr.ist-gewaehlt td{background:#FDF3DF}
   .vw-tabelle-wrap{border:0!important;box-shadow:none!important}
   main{padding:0!important;max-width:none!important}
 }
+
+/* ===== Handy-Darstellung: nichts darf breiter als der Bildschirm werden ===== */
+/* Einspaltige Raster dürfen nicht durch breite Inhalte (Tabellen) aufgeblasen werden */
+@media (max-width: 980px) { .vw-raster-3, .vw-raster-2 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 1000px) { .vw-raster-zeiten { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 560px) { .vw-zwei { grid-template-columns: minmax(0, 1fr); } }
+.vw-karte, .vw-raster-2 > *, .vw-raster-3 > *, .vw-raster-zeiten > *, .vw-chat > *, .vw-zwei > *, .vw-drei > *, .vw-formular > * { min-width: 0; }
+.vw-formular input, .vw-formular select, .vw-formular textarea { max-width: 100%; }
+/* Tabellen ohne eigenen Scroll-Rahmen: auf dem Handy seitlich wischbar statt abgeschnitten */
+@media (max-width: 760px) {
+  main table:not(.vw-tabelle-wrap table):not(.bh-buchungen):not(.inv-tabelle) { display: block; max-width: 100%; min-width: 0 !important; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  main button, main .button { max-width: 100%; white-space: normal; }
+  .vw-tabelle-wrap { max-width: 100%; }
+  .vw-tabelle-wrap, main table { scrollbar-width: thin; }
+}
+nav a[href="/inventur"]::before { content: "📋"; }
+@media (max-width: 760px) {
+  .bh-buchungen tr { background: #fff; }
+  .bh-buchungen tr:nth-child(even) { background: #FCF9F5; }
+  .bh-buchungen td { background: transparent !important; }
+  /* Mitarbeiter-Menü unten: 6 Punkte passen nebeneinander */
+  body:not(.vw) .topbar nav a { min-width: 0; font-size: 11px; }
+}
