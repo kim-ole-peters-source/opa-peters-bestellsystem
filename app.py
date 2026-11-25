@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-kalkulation"
+ASSET_VERSION = "2026-11-25-navi"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2640,6 +2640,7 @@ ADMIN_NAV = [
     ("/admin/messages", "Nachrichten", "✉️", ["/admin/messages"], False),
     ("/admin/products", "Sortiment", "📦", ["/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import"], True),
     ("/admin/time", "Team", "👥", ["/admin/time", "/admin/employees", "/admin/aufgaben", "/admin/cockpit-content", "/admin/task-report"], False),
+    ("/admin/kalkulation", "Kalkulation", "🧮", ["/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise"], True),
     ("/admin/buchhaltung", "Buchhaltung", "📒", ["/admin/buchhaltung"], True),
     ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility"], True),
     ("/admin/settings", "Einstellungen", "⚙️", ["/admin/settings", "/admin/mehr"], True),
