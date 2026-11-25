@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-haendler"
+ASSET_VERSION = "2026-11-25-inventurpreis"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -4000,12 +4000,20 @@ def inventur_produkte(location_id):
 
 
 def inventur_posten(inventur_id, location_id=None):
+    """Solange die Inventur laeuft, gilt der aktuelle Einkaufspreis aus dem Sortiment.
+    Erst beim Abschliessen wird der Preis in den Posten festgeschrieben."""
     con = db()
+    status = con.execute("SELECT status FROM inventuren WHERE id=?", (inventur_id,)).fetchone()
+    offen = not (status and status["status"] == "abgeschlossen")
+    preis = ("COALESCE(p.einkaufspreis, ip.einkaufspreis)" if offen else "ip.einkaufspreis")
+    rumpf = (f"SELECT ip.id, ip.inventur_id, ip.location_id, ip.product_id, ip.name, ip.gebinde, ip.kategorie, "
+             f"ip.menge, {preis} AS einkaufspreis, ip.gezaehlt_von, ip.geaendert "
+             f"FROM inventur_posten ip LEFT JOIN products p ON p.id = ip.product_id WHERE ip.inventur_id=?")
     if location_id:
-        zeilen = con.execute("SELECT * FROM inventur_posten WHERE inventur_id=? AND location_id=? ORDER BY kategorie COLLATE NOCASE, name COLLATE NOCASE",
+        zeilen = con.execute(rumpf + " AND ip.location_id=? ORDER BY ip.kategorie COLLATE NOCASE, ip.name COLLATE NOCASE",
                              (inventur_id, location_id)).fetchall()
     else:
-        zeilen = con.execute("SELECT * FROM inventur_posten WHERE inventur_id=? ORDER BY location_id, kategorie COLLATE NOCASE, name COLLATE NOCASE",
+        zeilen = con.execute(rumpf + " ORDER BY ip.location_id, ip.kategorie COLLATE NOCASE, ip.name COLLATE NOCASE",
                              (inventur_id,)).fetchall()
     con.close()
     return zeilen
