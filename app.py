@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-navi"
+ASSET_VERSION = "2026-11-25-inventur"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2642,9 +2642,9 @@ ADMIN_NAV = [
     ("/admin/time", "Team", "👥", ["/admin/time", "/admin/employees", "/admin/aufgaben", "/admin/cockpit-content", "/admin/task-report"], False),
     ("/admin/kalkulation", "Kalkulation", "🧮", ["/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise"], True),
     ("/admin/buchhaltung", "Buchhaltung", "📒", ["/admin/buchhaltung"], True),
-    ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility"], True),
+    ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility", "/admin/inventur"], True),
     ("/admin/settings", "Einstellungen", "⚙️", ["/admin/settings", "/admin/mehr"], True),
-    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/settings"], None),
+    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/inventur", "/admin/settings"], None),
 ]
 
 
@@ -2725,6 +2725,11 @@ def page(title, body, admin=False, buyer_key=None):
         if location_can_order(location):
             nav_links.append('<a href="/">Bestellen</a>')
         nav_links.append('<a href="/cockpit">Mein Tag</a>')
+        try:
+            if inventur_offen_fuer(buyer_key):
+                nav_links.append('<a class="nav-with-dot" href="/inventur">Inventur<span class="nav-dot" aria-label="Inventur läuft"></span></a>')
+        except Exception:
+            pass
         if location_can_time(location):
             nav_links.append('<a href="/time">Zeiten</a>')
         unread_messages = count_unread_messages("location", buyer_key)
@@ -3601,6 +3606,173 @@ def stunden_kurz(minutes, mit_vorzeichen=False):
     return stunden_text(minutes, mit_vorzeichen).replace(" Std.", "")
 
 
+
+# ====================================================================== Inventur
+# Admin startet eine Inventur (Stichtag + Standorte). Jeder Standort zählt sein Sortiment am Handy,
+# jede Eingabe wird sofort gespeichert. Im Adminbereich entsteht daraus ein Inventurdokument je Standort.
+
+def inventur_init():
+    con = db()
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS inventuren (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titel TEXT NOT NULL,
+            stichtag TEXT NOT NULL,
+            standorte TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'offen',
+            notiz TEXT NOT NULL DEFAULT '',
+            erstellt TEXT NOT NULL,
+            abgeschlossen TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS inventur_posten (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventur_id INTEGER NOT NULL,
+            location_id TEXT NOT NULL,
+            product_id INTEGER,
+            name TEXT NOT NULL,
+            gebinde TEXT NOT NULL DEFAULT '',
+            kategorie TEXT NOT NULL DEFAULT '',
+            menge REAL,
+            einkaufspreis REAL,
+            gezaehlt_von TEXT NOT NULL DEFAULT '',
+            geaendert TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS inventur_posten_produkt ON inventur_posten(inventur_id, location_id, product_id) WHERE product_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS inventur_meldungen (
+            inventur_id INTEGER NOT NULL,
+            location_id TEXT NOT NULL,
+            von TEXT NOT NULL DEFAULT '',
+            zeit TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (inventur_id, location_id)
+        );
+        """
+    )
+    con.commit()
+    con.close()
+
+
+def inventur_jetzt():
+    return berlin_now().strftime("%Y-%m-%d %H:%M")
+
+
+def inventur_zahl(text):
+    """'2,5' / '2.5' / '' -> 2.5 / None"""
+    t = (text or "").strip().replace(" ", "")
+    if not t:
+        return None
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        wert = float(t)
+    except ValueError:
+        return None
+    if wert < 0 or wert > 100000:
+        return None
+    return round(wert, 3)
+
+
+def inventur_menge_text(wert):
+    if wert is None:
+        return ""
+    text = f"{float(wert):.3f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
+
+
+def inventur_euro(wert):
+    if wert is None:
+        return "–"
+    return f"{wert:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def inventur_holen(inventur_id):
+    con = db()
+    zeile = con.execute("SELECT * FROM inventuren WHERE id=?", (inventur_id,)).fetchone()
+    con.close()
+    return zeile
+
+
+def inventur_standort_ids(inventur):
+    return [s for s in (inventur["standorte"] or "").split(",") if s]
+
+
+def inventur_offen_fuer(location_id):
+    """Neueste offene Inventur, an der dieser Standort teilnimmt."""
+    con = db()
+    zeilen = con.execute("SELECT * FROM inventuren WHERE status='offen' ORDER BY stichtag DESC, id DESC").fetchall()
+    con.close()
+    for z in zeilen:
+        if location_id in inventur_standort_ids(z):
+            return z
+    return None
+
+
+def inventur_produkte(location_id):
+    """Was der Standort zählt: sein aktives Sortiment."""
+    return get_products(True, buyer_key=location_id, sort="category")
+
+
+def inventur_posten(inventur_id, location_id=None):
+    con = db()
+    if location_id:
+        zeilen = con.execute("SELECT * FROM inventur_posten WHERE inventur_id=? AND location_id=? ORDER BY kategorie COLLATE NOCASE, name COLLATE NOCASE",
+                             (inventur_id, location_id)).fetchall()
+    else:
+        zeilen = con.execute("SELECT * FROM inventur_posten WHERE inventur_id=? ORDER BY location_id, kategorie COLLATE NOCASE, name COLLATE NOCASE",
+                             (inventur_id,)).fetchall()
+    con.close()
+    return zeilen
+
+
+def inventur_menge_speichern(inventur_id, location_id, product_id, menge, von):
+    """Speichert eine gezählte Menge (None = Feld geleert -> wieder 'nicht gezählt')."""
+    con = db()
+    produkt = con.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    if not produkt:
+        con.close()
+        return False
+    alt = con.execute("SELECT id FROM inventur_posten WHERE inventur_id=? AND location_id=? AND product_id=?",
+                      (inventur_id, location_id, product_id)).fetchone()
+    if menge is None:
+        if alt:
+            con.execute("DELETE FROM inventur_posten WHERE id=?", (alt["id"],))
+    else:
+        ek = produkt["einkaufspreis"] if "einkaufspreis" in produkt.keys() else None
+        kategorie = (product_categories(produkt) or ["Allgemein"])[0]
+        if alt:
+            con.execute("UPDATE inventur_posten SET menge=?, einkaufspreis=?, name=?, gebinde=?, kategorie=?, gezaehlt_von=?, geaendert=? WHERE id=?",
+                        (menge, ek, produkt["name"], produkt["package_size"] or "", kategorie, (von or "")[:60], inventur_jetzt(), alt["id"]))
+        else:
+            con.execute("INSERT INTO inventur_posten (inventur_id, location_id, product_id, name, gebinde, kategorie, menge, einkaufspreis, gezaehlt_von, geaendert) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (inventur_id, location_id, product_id, produkt["name"], produkt["package_size"] or "", kategorie, menge, ek, (von or "")[:60], inventur_jetzt()))
+    con.commit()
+    con.close()
+    return True
+
+
+def inventur_zusammenfassung(inventur):
+    """-> {location_id: {posten, gezaehlt, sortiment, wert, ohne_preis, meldung}}"""
+    con = db()
+    meldungen = {m["location_id"]: m for m in con.execute("SELECT * FROM inventur_meldungen WHERE inventur_id=?", (inventur["id"],)).fetchall()}
+    con.close()
+    alle_posten = inventur_posten(inventur["id"])
+    ergebnis = {}
+    for lid in inventur_standort_ids(inventur):
+        posten = [p for p in alle_posten if p["location_id"] == lid]
+        mit_menge = [p for p in posten if (p["menge"] or 0) > 0]
+        wert = sum((p["menge"] or 0) * (p["einkaufspreis"] or 0) for p in mit_menge)
+        ergebnis[lid] = {
+            "posten": posten,
+            "gezaehlt": len([p for p in posten if p["product_id"] is not None]),
+            "sortiment": len(inventur_produkte(lid)),
+            "wert": wert,
+            "ohne_preis": [p for p in mit_menge if p["einkaufspreis"] is None],
+            "meldung": meldungen.get(lid),
+        }
+    return ergebnis
+
+
 class App(BaseHTTPRequestHandler):
     def is_admin(self):
         c = cookies.SimpleCookie(self.headers.get("Cookie"))
@@ -3832,6 +4004,16 @@ class App(BaseHTTPRequestHandler):
             return self.show_order_form(query=parse_qs(parsed.query))
         if path == "/cockpit":
             return self.show_location_cockpit(query=parse_qs(parsed.query))
+        if path == "/inventur":
+            return self.show_inventur(query=parse_qs(parsed.query))
+        if path == "/admin/inventur":
+            return self.show_admin_inventur(query=parse_qs(parsed.query))
+        if path == "/admin/inventur/ansicht":
+            return self.show_admin_inventur_ansicht(query=parse_qs(parsed.query))
+        if path == "/admin/inventur/zaehlen":
+            return self.show_admin_inventur_zaehlen(query=parse_qs(parsed.query))
+        if path == "/admin/inventur/export.csv":
+            return self.show_admin_inventur_csv(query=parse_qs(parsed.query))
         if path == "/messages/select":
             return self.show_location_message_select(query=parse_qs(parsed.query))
         if path == "/messages":
@@ -4140,6 +4322,16 @@ class App(BaseHTTPRequestHandler):
         states = get_cockpit_states(buyer_key)
         state_details = get_cockpit_state_details(buyer_key)
         employee_names = get_time_employee_names(True)
+        laufende_inventur = inventur_offen_fuer(buyer_key)
+        inventur_banner = ""
+        if laufende_inventur:
+            con_inv = db()
+            gemeldet = con_inv.execute("SELECT von, zeit FROM inventur_meldungen WHERE inventur_id=? AND location_id=?", (laufende_inventur["id"], buyer_key)).fetchone()
+            con_inv.close()
+            inventur_banner = (f'<a class="box inv-banner{" ist-fertig" if gemeldet else ""}" href="/inventur"><span>📋</span><span><b>{esc(laufende_inventur["titel"])}</b>'
+                               f'<small>{("Fertig gemeldet von " + esc(gemeldet["von"]) + " – Änderungen sind noch möglich.") if gemeldet else "Bitte das Sortiment zählen. Jetzt starten ›"}</small></span></a>')
+        msg_banner = f'<div class="success box narrow">{esc(msg)}</div>' if msg else ""
+        inventur_banner = msg_banner + inventur_banner
         employee_options = "".join(f'<option value="{esc(name)}">{esc(name)}</option>' for name in employee_names)
         tasks = []
         for task in normalize_cockpit_tasks(location.get("cockpit_tasks", [])):
@@ -4391,6 +4583,7 @@ class App(BaseHTTPRequestHandler):
                 </div>
             </div>
         </div>
+        {inventur_banner}
         <section class="box cockpit-hero">
             <div>
                 <h2>Cockpit {esc(location['name'])}</h2>
@@ -5478,6 +5671,7 @@ class App(BaseHTTPRequestHandler):
             ("/admin/kalkulation", "🧮", "Kalkulation", "Einkaufspreise, Rezepte, Zielmarge"),
             ("/admin/buchhaltung", "📒", "Buchhaltung", "Belege, Kontoauszüge, Monatsexport"),
             ("/admin/locations", "📍", "Standorte", "Zugänge, Sortiment je Standort, Mindestbestand"),
+            ("/admin/inventur", "📋", "Inventur", "Zählen je Standort, Inventurdokument"),
             ("/admin/settings", "⚙️", "Einstellungen", "E-Mail, PIN, Push, Sicherung"),
             ("/admin/logout", "↩", "Abmelden", "Verwaltung verlassen"),
         ]
@@ -6814,7 +7008,7 @@ class App(BaseHTTPRequestHandler):
             </a>""")
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
-        {admin_kopf('Standorte', 'Zugang, Sortiment, Mindestbestand und Zeiterfassung – je Standort an einem Platz.', '<button type="button" class="primary" data-dialog="neuerStandort">+ Neuer Standort</button>')}
+        {admin_kopf('Standorte', 'Zugang, Sortiment, Mindestbestand und Zeiterfassung – je Standort an einem Platz.', '<a class="button" href="/admin/inventur">📋 Inventur</a><button type="button" class="primary" data-dialog="neuerStandort">+ Neuer Standort</button>')}
         <div class="vw-raster-3">{''.join(karten) or '<p class="vw-leer">Noch keine Standorte.</p>'}</div>
         <dialog class="vw-dialog" id="neuerStandort">
             <div class="vw-dialog-kopf"><h3>Neuer Standort</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
@@ -9343,6 +9537,485 @@ class App(BaseHTTPRequestHandler):
         self.admin_seite("Abhol-Protokoll", body)
 
 
+    # ------------------------------------------------------------------ Inventur
+    def inventur_zaehl_html(self, inventur, location, admin=False):
+        """Zählliste eines Standorts – gleiche Ansicht für Mitarbeiter und Admin (Korrektur)."""
+        lid = location["id"]
+        produkte = inventur_produkte(lid)
+        posten = inventur_posten(inventur["id"], lid)
+        mengen = {p["product_id"]: p for p in posten if p["product_id"] is not None}
+        freie = [p for p in posten if p["product_id"] is None]
+        gezaehlt = sum(1 for p in produkte if p["id"] in mengen)
+        gruppen = {}
+        for p in produkte:
+            gruppen.setdefault((product_categories(p) or ["Allgemein"])[0], []).append(p)
+        bloecke = []
+        for gruppe in sorted(gruppen, key=str.lower):
+            zeilen = []
+            for p in gruppen[gruppe]:
+                eintrag = mengen.get(p["id"])
+                wert = inventur_menge_text(eintrag["menge"]) if eintrag else ""
+                zeilen.append(f"""
+                <div class="inv-zeile{' ist-gezaehlt' if eintrag else ''}" data-inv-zeile data-suche="{esc((p['name'] + ' ' + (p['package_size'] or '')).lower())}">
+                    <div class="inv-name"><b>{esc(p['name'])}</b><small>{esc(p['package_size'] or '')}</small></div>
+                    <div class="inv-eingabe">
+                        <button type="button" class="inv-knopf" data-inv-minus aria-label="Eins weniger">−</button>
+                        <input type="text" inputmode="decimal" autocomplete="off" class="inv-feld" data-inv-produkt="{p['id']}" value="{esc(wert)}" placeholder="–" aria-label="Menge {esc(p['name'])}">
+                        <button type="button" class="inv-knopf" data-inv-plus aria-label="Eins mehr">+</button>
+                        <span class="inv-status" aria-live="polite"></span>
+                    </div>
+                </div>""")
+            fertig_in_gruppe = sum(1 for p in gruppen[gruppe] if p["id"] in mengen)
+            bloecke.append(f"""
+            <details class="inv-gruppe" open>
+                <summary><span>{esc(gruppe)}</span><small data-inv-gruppenzahl>{fertig_in_gruppe} / {len(gruppen[gruppe])}</small></summary>
+                {''.join(zeilen)}
+            </details>""")
+        ziel = "/admin/inventur/zaehlen" if admin else "/inventur"
+        verstecke = f'<input type="hidden" name="inventur_id" value="{inventur["id"]}"><input type="hidden" name="location_id" value="{esc(lid)}">'
+        freie_html = "".join(f"""
+            <div class="inv-zeile ist-gezaehlt">
+                <div class="inv-name"><b>{esc(f['name'])}</b><small>{esc(f['gebinde'])}{(' · ' + esc(f['gezaehlt_von'])) if f['gezaehlt_von'] else ''}</small></div>
+                <div class="inv-eingabe"><span class="inv-frei-menge">{esc(inventur_menge_text(f['menge']))}</span>
+                    <form method="post" action="/inventur/frei-loeschen" class="inv-inline">{verstecke}<input type="hidden" name="posten_id" value="{f['id']}"><input type="hidden" name="zurueck" value="{ziel}"><button type="submit" class="inv-knopf" aria-label="Entfernen">×</button></form>
+                </div>
+            </div>""" for f in freie)
+        namen = get_time_employee_names(True)
+        namen_optionen = '<option value="">Name wählen</option>' + "".join(f'<option value="{esc(n)}">{esc(n)}</option>' for n in namen)
+        stichtag = datetime.strptime(inventur["stichtag"], "%Y-%m-%d").strftime("%d.%m.%Y")
+        hinweis = f'<p class="inv-hinweis">{esc(inventur["notiz"])}</p>' if inventur["notiz"] else ""
+        return f"""
+        <section class="box inv-kopf">
+            <div class="section-head"><div>
+                <h2>{esc(inventur['titel'])}</h2>
+                <p class="muted">{esc(location['name'])} · Stichtag {stichtag}</p>
+            </div><span class="pill" data-inv-fortschritt>{gezaehlt} / {len(produkte)}</span></div>
+            {hinweis}
+            <div class="inv-wer">
+                <label>Wer zählt?{f'<select data-inv-von>{namen_optionen}</select>' if namen else '<input data-inv-von placeholder="Dein Name">'}</label>
+                <label>Artikel suchen<input type="search" data-inv-suche placeholder="z. B. Waffel"></label>
+            </div>
+            <p class="muted inv-erklaerung">Zähle in <b>Gebinden</b> (z. B. Karton, Eimer, Sack). Angebrochenes mit Komma: <b>0,5</b>. Leer lassen = noch nicht gezählt, <b>0</b> = nichts mehr da. Jede Eingabe wird sofort gespeichert.</p>
+        </section>
+        <div class="inv-liste" data-inv-liste data-inventur="{inventur['id']}" data-standort="{esc(lid)}" data-ziel="{'/admin/inventur/menge' if admin else '/inventur/menge'}">
+            {''.join(bloecke) or '<p class="muted box">Für diesen Standort ist kein Sortiment hinterlegt. Unten kannst du Artikel frei eintragen.</p>'}
+        </div>
+        <section class="box">
+            <h2>Weitere Artikel</h2>
+            <p class="muted">Etwas gefunden, das nicht in der Liste steht? Hier frei eintragen.</p>
+            <div class="inv-liste">{freie_html}</div>
+            <form method="post" action="/inventur/frei" class="inv-frei-form" data-inv-frei>{verstecke}<input type="hidden" name="zurueck" value="{ziel}"><input type="hidden" name="von" value="">
+                <label>Artikel *<input name="name" required maxlength="120" placeholder="z. B. Schokostreusel"></label>
+                <label>Gebinde<input name="gebinde" maxlength="60" placeholder="z. B. 1 kg Beutel"></label>
+                <label>Menge *<input name="menge" required inputmode="decimal" placeholder="z. B. 3"></label>
+                <button class="button" type="submit">+ Hinzufügen</button>
+            </form>
+        </section>
+        {'' if admin else f'''<section class="box inv-fertig">
+            <form method="post" action="/inventur/fertig" data-inv-fertig>{verstecke}<input type="hidden" name="von" value="">
+                <p class="muted">Alles gezählt? Dann hier fertig melden. Du kannst danach trotzdem noch Mengen ändern, solange die Inventur offen ist.</p>
+                <button class="primary" type="submit">Inventur für {esc(location['name'])} fertig melden</button>
+            </form>
+        </section>'''}
+        <script>
+        (function () {{
+          var liste = document.querySelector('[data-inv-liste]');
+          if (!liste) return;
+          var ziel = liste.getAttribute('data-ziel');
+          var vonFeld = document.querySelector('[data-inv-von]');
+          try {{ var gemerkt = localStorage.getItem('invVon'); if (gemerkt && vonFeld) vonFeld.value = gemerkt; }} catch (e) {{}}
+          if (vonFeld) vonFeld.addEventListener('change', function () {{ try {{ localStorage.setItem('invVon', vonFeld.value); }} catch (e) {{}} }});
+          function von() {{ return vonFeld ? vonFeld.value : ''; }}
+          function zahl(t) {{ t = (t || '').trim().replace(/\\s/g, ''); if (!t) return null; if (t.indexOf(',') >= 0) t = t.replace(/\\./g, '').replace(',', '.'); var z = parseFloat(t); return isNaN(z) ? NaN : z; }}
+          function text(z) {{ return (Math.round(z * 1000) / 1000).toString().replace('.', ','); }}
+          function zaehlen() {{
+            var alle = liste.querySelectorAll('[data-inv-zeile]'), n = 0;
+            alle.forEach(function (z) {{ if (z.classList.contains('ist-gezaehlt')) n++; }});
+            var f = document.querySelector('[data-inv-fortschritt]'); if (f) f.textContent = n + ' / ' + alle.length;
+            liste.querySelectorAll('.inv-gruppe').forEach(function (g) {{
+              var zz = g.querySelectorAll('[data-inv-zeile]'), m = 0; zz.forEach(function (z) {{ if (z.classList.contains('ist-gezaehlt')) m++; }});
+              var s = g.querySelector('[data-inv-gruppenzahl]'); if (s) s.textContent = m + ' / ' + zz.length;
+            }});
+          }}
+          function speichern(feld, versuch) {{
+            var zeile = feld.closest('[data-inv-zeile]'), status = zeile.querySelector('.inv-status');
+            var wert = zahl(feld.value);
+            if (wert !== null && (isNaN(wert) || wert < 0)) {{ status.textContent = '!'; status.className = 'inv-status fehler'; status.title = 'Bitte eine Zahl eingeben'; return; }}
+            status.textContent = '…'; status.className = 'inv-status';
+            var daten = new URLSearchParams({{ inventur_id: liste.getAttribute('data-inventur'), location_id: liste.getAttribute('data-standort'), product_id: feld.getAttribute('data-inv-produkt'), menge: feld.value, von: von() }});
+            fetch(ziel, {{ method: 'POST', body: daten, headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, credentials: 'same-origin' }})
+              .then(function (r) {{ return r.json(); }})
+              .then(function (j) {{
+                if (!j.ok) throw new Error(j.fehler || 'Fehler');
+                status.textContent = '✓'; status.className = 'inv-status ok'; status.title = 'gespeichert';
+                zeile.classList.toggle('ist-gezaehlt', wert !== null); zaehlen();
+              }})
+              .catch(function (e) {{
+                status.textContent = '!'; status.className = 'inv-status fehler'; status.title = 'Nicht gespeichert: ' + e.message;
+                if (!versuch) setTimeout(function () {{ speichern(feld, 1); }}, 4000);
+              }});
+          }}
+          liste.addEventListener('change', function (e) {{ if (e.target.matches('[data-inv-produkt]')) speichern(e.target); }});
+          liste.addEventListener('keydown', function (e) {{ if (e.key === 'Enter' && e.target.matches('[data-inv-produkt]')) {{ e.preventDefault(); e.target.blur(); }} }});
+          liste.addEventListener('click', function (e) {{
+            var k = e.target.closest('[data-inv-plus],[data-inv-minus]'); if (!k) return;
+            var feld = k.parentNode.querySelector('[data-inv-produkt]'), z = zahl(feld.value);
+            if (z === null || isNaN(z)) z = 0;
+            z = k.hasAttribute('data-inv-plus') ? z + 1 : Math.max(0, z - 1);
+            feld.value = text(z); speichern(feld);
+          }});
+          var suche = document.querySelector('[data-inv-suche]');
+          if (suche) suche.addEventListener('input', function () {{
+            var q = suche.value.trim().toLowerCase();
+            liste.querySelectorAll('[data-inv-zeile]').forEach(function (z) {{ z.hidden = !!q && z.getAttribute('data-suche').indexOf(q) < 0; }});
+            liste.querySelectorAll('.inv-gruppe').forEach(function (g) {{ g.hidden = !!q && !g.querySelector('[data-inv-zeile]:not([hidden])'); if (q) g.open = true; }});
+          }});
+          document.querySelectorAll('[data-inv-frei],[data-inv-fertig]').forEach(function (f) {{
+            f.addEventListener('submit', function (e) {{
+              var v = von(); f.querySelector('[name=von]').value = v;
+              if (f.hasAttribute('data-inv-fertig')) {{
+                if (!v) {{ e.preventDefault(); alert('Bitte oben eintragen, wer gezählt hat.'); if (vonFeld) vonFeld.focus(); return; }}
+                var offen = liste.querySelectorAll('[data-inv-zeile]:not(.ist-gezaehlt)').length;
+                if (offen && !confirm(offen + ' Artikel sind noch nicht gezählt. Trotzdem fertig melden?')) e.preventDefault();
+              }}
+            }});
+          }});
+        }})();
+        </script>"""
+
+    def show_inventur(self, query=None):
+        buyer_key = self.current_buyer_key()
+        if not buyer_key:
+            return self.redirect("/login")
+        location = find_location(buyer_key)
+        if not location:
+            return self.redirect("/login")
+        query = query or {}
+        msg = (query.get("msg", [""])[0] or "").strip()
+        inventur = inventur_offen_fuer(buyer_key)
+        if not inventur:
+            body = '<section class="box narrow"><h2>Inventur</h2><p class="muted">Gerade läuft keine Inventur für diesen Standort.</p><a class="button" href="/cockpit">Zurück</a></section>'
+            return self.send_html(page("Inventur", body, buyer_key=buyer_key))
+        body = (f'<div class="success box narrow">{esc(msg)}</div>' if msg else "") + self.inventur_zaehl_html(inventur, location)
+        self.send_html(page("Inventur", body, buyer_key=buyer_key))
+
+    def inventur_recht(self, form):
+        """-> (inventur, location_id, ist_admin) wenn der Aufrufer hier zählen darf, sonst None"""
+        iid = self.form_value(form, "inventur_id").strip()
+        lid = self.form_value(form, "location_id").strip()
+        if not iid.isdigit():
+            return None
+        inventur = inventur_holen(int(iid))
+        if not inventur or lid not in inventur_standort_ids(inventur):
+            return None
+        if self.is_admin():
+            return inventur, lid, True
+        if self.current_buyer_key() == lid and inventur["status"] == "offen":
+            return inventur, lid, False
+        return None
+
+    def handle_inventur_menge(self):
+        form = self.read_form()
+        recht = self.inventur_recht(form)
+        if not recht:
+            return self.send_json({"ok": False, "fehler": "Keine Berechtigung oder Inventur abgeschlossen"}, 403)
+        inventur, lid, _ = recht
+        pid = self.form_value(form, "product_id").strip()
+        roh = self.form_value(form, "menge")
+        menge = inventur_zahl(roh)
+        if roh.strip() and menge is None:
+            return self.send_json({"ok": False, "fehler": "Bitte eine Zahl eingeben"}, 400)
+        if not pid.isdigit() or not inventur_menge_speichern(inventur["id"], lid, int(pid), menge, self.form_value(form, "von")):
+            return self.send_json({"ok": False, "fehler": "Artikel nicht gefunden"}, 400)
+        return self.send_json({"ok": True})
+
+    def handle_inventur_frei(self, loeschen=False):
+        form = self.read_form()
+        recht = self.inventur_recht(form)
+        zurueck = self.form_value(form, "zurueck")
+        if not recht:
+            return self.redirect("/inventur" if zurueck != "/admin/inventur/zaehlen" else "/admin/inventur")
+        inventur, lid, ist_admin = recht
+        ziel = f"/admin/inventur/zaehlen?id={inventur['id']}&standort={quote_plus(lid)}" if ist_admin and zurueck == "/admin/inventur/zaehlen" else "/inventur"
+        con = db()
+        if loeschen:
+            pid = self.form_value(form, "posten_id").strip()
+            if pid.isdigit():
+                con.execute("DELETE FROM inventur_posten WHERE id=? AND inventur_id=? AND location_id=? AND product_id IS NULL", (int(pid), inventur["id"], lid))
+        else:
+            name = self.form_value(form, "name").strip()[:120]
+            menge = inventur_zahl(self.form_value(form, "menge"))
+            if not name or menge is None:
+                con.close()
+                trenner = "&" if "?" in ziel else "?"
+                return self.redirect(ziel + trenner + "msg=" + quote_plus("Bitte Artikel und Menge (Zahl) eintragen."))
+            con.execute("INSERT INTO inventur_posten (inventur_id, location_id, product_id, name, gebinde, kategorie, menge, einkaufspreis, gezaehlt_von, geaendert) "
+                        "VALUES (?, ?, NULL, ?, ?, 'Weitere Artikel', ?, NULL, ?, ?)",
+                        (inventur["id"], lid, name, self.form_value(form, "gebinde").strip()[:60], menge, self.form_value(form, "von").strip()[:60], inventur_jetzt()))
+        con.commit()
+        con.close()
+        self.redirect(ziel + "#weitere")
+
+    def handle_inventur_fertig(self):
+        form = self.read_form()
+        recht = self.inventur_recht(form)
+        if not recht:
+            return self.redirect("/inventur")
+        inventur, lid, _ = recht
+        von = self.form_value(form, "von").strip()[:60]
+        con = db()
+        con.execute("INSERT OR REPLACE INTO inventur_meldungen (inventur_id, location_id, von, zeit) VALUES (?, ?, ?, ?)", (inventur["id"], lid, von, inventur_jetzt()))
+        con.commit()
+        con.close()
+        try:
+            __import__("threading").Thread(target=send_push_notification, args=({"title": f"Inventur {location_label(lid)} fertig",
+                             "body": f"{von or 'Das Team'} hat „{inventur['titel']}“ fertig gemeldet.", "url": f"/admin/inventur/ansicht?id={inventur['id']}"},), daemon=True).start()
+        except Exception:
+            pass
+        self.redirect("/cockpit?msg=" + quote_plus("Danke! Die Inventur ist fertig gemeldet."))
+
+    # ---------------------------------------------------------- Inventur (Admin)
+    def show_admin_inventur(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        con = db()
+        inventuren = con.execute("SELECT * FROM inventuren ORDER BY stichtag DESC, id DESC").fetchall()
+        con.close()
+        locations = get_locations()
+        karten = []
+        for inv in inventuren:
+            zusammen = inventur_zusammenfassung(inv)
+            orte = "".join(
+                f'<span class="vw-marke {"gruen" if z["meldung"] else ("honig" if z["gezaehlt"] else "grau")}">{esc(location_label(lid))} {z["gezaehlt"]}/{z["sortiment"]}{" ✓" if z["meldung"] else ""}</span>'
+                for lid, z in zusammen.items())
+            wert = sum(z["wert"] for z in zusammen.values())
+            karten.append(f"""
+            <a class="vw-karte vw-standort-karte" href="/admin/inventur/ansicht?id={inv['id']}">
+                <span class="vw-karte-kopf"><h3>{esc(inv['titel'])}</h3><span class="vw-marke {'gruen' if inv['status'] == 'abgeschlossen' else 'blau'}">{'abgeschlossen' if inv['status'] == 'abgeschlossen' else 'läuft'}</span></span>
+                <span class="vw-klein">Stichtag {datetime.strptime(inv['stichtag'], '%Y-%m-%d').strftime('%d.%m.%Y')} · Warenwert {inventur_euro(wert)}</span>
+                <span class="vw-merkmale">{orte}</span>
+            </a>""")
+        heute = berlin_now()
+        monate = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
+        orte_haken = "".join(
+            f'<label class="vw-schalter"><input type="checkbox" name="standort_{esc(l["id"])}" value="1" checked><span>{esc(l["name"])}</span></label>' for l in locations)
+        laeuft = [i for i in inventuren if i["status"] == "offen"]
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Inventur', 'Das Team zählt an jedem Standort am Handy – hier entsteht daraus das Inventurdokument.', '<a class="button" href="/admin/locations">‹ Standorte</a><button type="button" class="primary" data-dialog="neueInventur">+ Neue Inventur</button>')}
+        <div class="vw-raster-3">{''.join(karten) or '<p class="vw-leer">Noch keine Inventur. Starte die erste mit „+ Neue Inventur“.</p>'}</div>
+        <dialog class="vw-dialog" id="neueInventur">
+            <div class="vw-dialog-kopf"><h3>Neue Inventur starten</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
+            <form method="post" action="/admin/inventur/neu" class="vw-formular">
+                <div class="vw-zwei">
+                    <label>Bezeichnung *<input name="titel" required maxlength="80" value="Inventur {monate[heute.month - 1]} {heute.year}"></label>
+                    <label>Stichtag *<input type="date" name="stichtag" required value="{heute.strftime('%Y-%m-%d')}"></label>
+                </div>
+                <fieldset class="vw-feldgruppe"><legend>Welche Standorte zählen?</legend><div class="vw-schalter-raster">{orte_haken}</div></fieldset>
+                <label>Hinweis fürs Team (optional)<textarea name="notiz" rows="2" maxlength="400" placeholder="z. B. Bitte auch Lager im Keller zählen."></textarea></label>
+                {'<p class="vw-klein">Achtung: Es läuft schon eine Inventur. Die Standorte sehen dann nur die neueste.</p>' if laeuft else ''}
+                <p class="vw-klein">Die Standorte sehen sofort einen Hinweis „Inventur“ und können loszählen. Gezählt wird ihr Sortiment.</p>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Inventur starten</button></div>
+            </form>
+        </dialog>
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite("Inventur", body)
+
+    def show_admin_inventur_ansicht(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        iid = self.query_text(query, "id")
+        inventur = inventur_holen(int(iid)) if iid.isdigit() else None
+        if not inventur:
+            return self.redirect("/admin/inventur?error=" + quote_plus("Inventur nicht gefunden."))
+        zusammen = inventur_zusammenfassung(inventur)
+        offen = inventur["status"] == "offen"
+        stichtag = datetime.strptime(inventur["stichtag"], "%Y-%m-%d").strftime("%d.%m.%Y")
+        gesamt = sum(z["wert"] for z in zusammen.values())
+        # Status je Standort
+        status_karten = []
+        for lid, z in zusammen.items():
+            m = z["meldung"]
+            stand = (f'<span class="vw-marke gruen">fertig gemeldet</span><small>{esc(m["von"] or "")} · {esc(m["zeit"])}</small>' if m else
+                     (f'<span class="vw-marke honig">wird gezählt</span>' if z["gezaehlt"] or z["posten"] else '<span class="vw-marke grau">noch nicht begonnen</span>'))
+            status_karten.append(f"""
+            <section class="vw-karte inv-status-karte">
+                <div class="vw-karte-kopf"><h3>{esc(location_label(lid))}</h3><b>{inventur_euro(z['wert'])}</b></div>
+                <div class="inv-balken"><span style="width:{(100 * z['gezaehlt'] // z['sortiment']) if z['sortiment'] else 0}%"></span></div>
+                <p class="vw-klein">{z['gezaehlt']} von {z['sortiment']} Artikeln gezählt{f" · {len([p for p in z['posten'] if p['product_id'] is None])} weitere" if any(p['product_id'] is None for p in z['posten']) else ''}</p>
+                <div class="inv-stand">{stand}</div>
+                <a class="button inv-nicht-drucken" href="/admin/inventur/zaehlen?id={inventur['id']}&standort={quote_plus(lid)}">Mengen ansehen / korrigieren</a>
+            </section>""")
+        # Dokument je Standort
+        abschnitte = []
+        for lid, z in zusammen.items():
+            posten = [p for p in z["posten"] if (p["menge"] or 0) > 0]
+            gruppen = {}
+            for p in posten:
+                gruppen.setdefault(p["kategorie"] or "Allgemein", []).append(p)
+            zeilen = []
+            for g in sorted(gruppen, key=lambda x: (x == "Weitere Artikel", x.lower())):
+                summe = sum((p["menge"] or 0) * (p["einkaufspreis"] or 0) for p in gruppen[g])
+                zeilen.append(f'<tr class="inv-gruppen-zeile"><th colspan="5">{esc(g)}</th><th class="zahl">{inventur_euro(summe)}</th></tr>')
+                for p in gruppen[g]:
+                    wert = (p["menge"] or 0) * p["einkaufspreis"] if p["einkaufspreis"] is not None else None
+                    zeilen.append(
+                        f'<tr><td>{esc(p["name"])}</td><td>{esc(p["gebinde"])}</td><td class="zahl"><b>{esc(inventur_menge_text(p["menge"]))}</b></td>'
+                        f'<td class="zahl">{inventur_euro(p["einkaufspreis"]) if p["einkaufspreis"] is not None else "<span class=inv-ohne-preis>kein Preis</span>"}</td>'
+                        f'<td class="inv-klein">{esc(p["gezaehlt_von"])}</td><td class="zahl">{inventur_euro(wert) if wert is not None else "–"}</td></tr>')
+            produkte = inventur_produkte(lid)
+            gezaehlte_ids = {p["product_id"] for p in z["posten"]}
+            fehlen = [p for p in produkte if p["id"] not in gezaehlte_ids]
+            fehlen_html = (f'<details class="vw-aufklapp inv-nicht-drucken"><summary>{len(fehlen)} Artikel nicht gezählt</summary><p class="vw-klein">'
+                           + ", ".join(esc(p["name"]) for p in fehlen) + '</p></details>') if fehlen else ""
+            ohne_preis = (f'<p class="vw-klein inv-nicht-drucken">⚠ {len(z["ohne_preis"])} Artikel ohne Einkaufspreis – diese zählen nicht zum Warenwert. '
+                          f'Preise kannst du unter <a href="/admin/kalkulation/preise">Kalkulation → Einkaufspreise</a> nachtragen.</p>') if z["ohne_preis"] else ""
+            abschnitte.append(f"""
+            <section class="vw-karte inv-abschnitt">
+                <div class="vw-karte-kopf"><h3>{esc(location_label(lid))}</h3><b>{inventur_euro(z['wert'])}</b></div>
+                {ohne_preis}
+                <div class="vw-tabelle-wrap"><table class="vw-tabelle inv-tabelle">
+                    <tr><th>Artikel</th><th>Gebinde</th><th class="zahl">Menge</th><th class="zahl">EK je Gebinde</th><th>gezählt von</th><th class="zahl">Wert</th></tr>
+                    {''.join(zeilen) or '<tr><td colspan="6" class="vw-leer">Noch nichts gezählt.</td></tr>'}
+                    <tr class="inv-summe"><th colspan="5">Summe {esc(location_label(lid))}</th><th class="zahl">{inventur_euro(z['wert'])}</th></tr>
+                </table></div>
+                {fehlen_html}
+            </section>""")
+        uebersicht = "".join(f'<tr><td>{esc(location_label(lid))}</td><td class="zahl">{len([p for p in z["posten"] if (p["menge"] or 0) > 0])}</td><td class="zahl">{inventur_euro(z["wert"])}</td></tr>' for lid, z in zusammen.items())
+        aktionen = (f'<a class="button" href="/admin/inventur">‹ Alle Inventuren</a>'
+                    f'<button type="button" class="button" onclick="window.print()">Drucken / PDF</button>'
+                    f'<a class="button" href="/admin/inventur/export.csv?id={inventur["id"]}">Excel (CSV)</a>')
+        status_form = f"""
+        <section class="vw-karte inv-nicht-drucken">
+            <div class="vw-knopfreihe">
+                <form method="post" action="/admin/inventur/status" class="vw-inline-form"><input type="hidden" name="inventur_id" value="{inventur['id']}">
+                    {'<input type="hidden" name="aktion" value="abschliessen"><button class="primary" type="submit" data-vw-confirm="Inventur abschließen? Das Team kann danach nichts mehr ändern. Die Einkaufspreise werden auf den heutigen Stand festgeschrieben.">Inventur abschließen</button>' if offen else '<input type="hidden" name="aktion" value="oeffnen"><button class="button" type="submit">Wieder öffnen</button>'}
+                </form>
+                <form method="post" action="/admin/inventur/status" class="vw-inline-form" data-vw-confirm="Inventur „{esc(inventur['titel'])}“ mit allen gezählten Mengen löschen?"><input type="hidden" name="inventur_id" value="{inventur['id']}"><input type="hidden" name="aktion" value="loeschen"><button class="danger" type="submit">Löschen</button></form>
+            </div>
+            <p class="vw-klein">{'Solange die Inventur läuft, sieht das Team sie im Bereich „Mein Tag“ und kann zählen.' if offen else f'Abgeschlossen am {esc(inventur["abgeschlossen"])}. Das Team kann nichts mehr ändern.'}</p>
+        </section>"""
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf(inventur['titel'], f"Stichtag {stichtag} · {'läuft' if offen else 'abgeschlossen'}", aktionen)}
+        <div class="vw-raster-3 inv-nicht-drucken">{''.join(status_karten)}</div>
+        {status_form}
+        <section class="vw-karte inv-dokument-kopf">
+            <div class="inv-druck-titel"><h2>Inventurdokument – {esc(inventur['titel'])}</h2><p>Opa Peters · Stichtag {stichtag}{'' if offen else ' · abgeschlossen ' + esc(inventur['abgeschlossen'])}</p></div>
+            <h3>Zusammenfassung</h3>
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle inv-tabelle">
+                <tr><th>Standort</th><th class="zahl">Positionen</th><th class="zahl">Warenwert (EK netto)</th></tr>
+                {uebersicht}
+                <tr class="inv-summe"><th>Gesamt</th><th></th><th class="zahl">{inventur_euro(gesamt)}</th></tr>
+            </table></div>
+            <p class="vw-klein">Warenwert = gezählte Menge × Einkaufspreis je Gebinde aus der Kalkulation{'' if not offen else ' (aktueller Stand – wird beim Abschließen festgeschrieben)'}.</p>
+        </section>
+        {''.join(abschnitte)}
+        <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""
+        self.admin_seite(inventur["titel"], body)
+
+    def show_admin_inventur_zaehlen(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        iid = self.query_text(query, "id")
+        inventur = inventur_holen(int(iid)) if iid.isdigit() else None
+        location = find_location(self.query_text(query, "standort"))
+        if not inventur or not location or location["id"] not in inventur_standort_ids(inventur):
+            return self.redirect("/admin/inventur?error=" + quote_plus("Inventur oder Standort nicht gefunden."))
+        kopf = admin_kopf(f"{location['name']} – Mengen", f"{esc(inventur['titel'])} · Änderungen werden sofort gespeichert",
+                          f'<a class="button" href="/admin/inventur/ansicht?id={inventur["id"]}">‹ Zum Inventurdokument</a>')
+        body = f'{admin_meldungen(self.query_text(query, "msg"), self.query_text(query, "error"))}{kopf}<div class="inv-admin">{self.inventur_zaehl_html(inventur, location, admin=True)}</div>'
+        self.admin_seite("Inventur korrigieren", body)
+
+    def handle_admin_inventur_neu(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        titel = self.form_value(form, "titel").strip()[:80] or "Inventur"
+        stichtag = self.form_value(form, "stichtag").strip()
+        try:
+            datetime.strptime(stichtag, "%Y-%m-%d")
+        except ValueError:
+            stichtag = berlin_now().strftime("%Y-%m-%d")
+        orte = [l["id"] for l in get_locations() if self.form_value(form, f"standort_{l['id']}")]
+        if not orte:
+            return self.redirect("/admin/inventur?error=" + quote_plus("Bitte mindestens einen Standort auswählen."))
+        con = db()
+        iid = con.execute("INSERT INTO inventuren (titel, stichtag, standorte, notiz, erstellt) VALUES (?, ?, ?, ?, ?)",
+                          (titel, stichtag, ",".join(orte), self.form_value(form, "notiz").strip()[:400], inventur_jetzt())).lastrowid
+        con.commit()
+        con.close()
+        self.redirect(f"/admin/inventur/ansicht?id={iid}&msg=" + quote_plus("Inventur gestartet. Die Standorte sehen jetzt „Inventur“ und können zählen."))
+
+    def handle_admin_inventur_status(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        iid = self.form_value(form, "inventur_id").strip()
+        aktion = self.form_value(form, "aktion")
+        if not iid.isdigit():
+            return self.redirect("/admin/inventur")
+        con = db()
+        if aktion == "loeschen":
+            con.execute("DELETE FROM inventur_posten WHERE inventur_id=?", (int(iid),))
+            con.execute("DELETE FROM inventur_meldungen WHERE inventur_id=?", (int(iid),))
+            con.execute("DELETE FROM inventuren WHERE id=?", (int(iid),))
+            con.commit()
+            con.close()
+            return self.redirect("/admin/inventur?msg=" + quote_plus("Inventur gelöscht."))
+        if aktion == "abschliessen":
+            # Einkaufspreise auf den heutigen Stand festschreiben
+            con.execute("UPDATE inventur_posten SET einkaufspreis=(SELECT einkaufspreis FROM products WHERE products.id=inventur_posten.product_id) "
+                        "WHERE inventur_id=? AND product_id IS NOT NULL", (int(iid),))
+            con.execute("UPDATE inventuren SET status='abgeschlossen', abgeschlossen=? WHERE id=?", (inventur_jetzt(), int(iid)))
+            text = "Inventur abgeschlossen."
+        else:
+            con.execute("UPDATE inventuren SET status='offen', abgeschlossen='' WHERE id=?", (int(iid),))
+            text = "Inventur wieder geöffnet – das Team kann wieder zählen."
+        con.commit()
+        con.close()
+        self.redirect(f"/admin/inventur/ansicht?id={iid}&msg=" + quote_plus(text))
+
+    def show_admin_inventur_csv(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        iid = self.query_text(query, "id")
+        inventur = inventur_holen(int(iid)) if iid.isdigit() else None
+        if not inventur:
+            return self.redirect("/admin/inventur")
+        import csv
+        import io as _io
+        puffer = _io.StringIO()
+        w = csv.writer(puffer, delimiter=";")
+        w.writerow(["Inventur", inventur["titel"], "Stichtag", datetime.strptime(inventur["stichtag"], "%Y-%m-%d").strftime("%d.%m.%Y")])
+        w.writerow([])
+        w.writerow(["Standort", "Warengruppe", "Artikel", "Gebinde", "Menge", "EK je Gebinde", "Wert", "gezählt von", "geändert"])
+
+        def de(z):
+            return "" if z is None else f"{z:.2f}".replace(".", ",")
+        gesamt = 0
+        for lid, z in inventur_zusammenfassung(inventur).items():
+            for p in z["posten"]:
+                if not (p["menge"] or 0) > 0:
+                    continue
+                wert = (p["menge"] or 0) * p["einkaufspreis"] if p["einkaufspreis"] is not None else None
+                w.writerow([location_label(lid), p["kategorie"], p["name"], p["gebinde"], inventur_menge_text(p["menge"]), de(p["einkaufspreis"]), de(wert), p["gezaehlt_von"], p["geaendert"]])
+            w.writerow([f"Summe {location_label(lid)}", "", "", "", "", "", de(z["wert"])])
+            gesamt += z["wert"]
+        w.writerow(["Gesamt", "", "", "", "", "", de(gesamt)])
+        daten = ("﻿" + puffer.getvalue()).encode("utf-8")
+        name = re.sub(r"[^A-Za-z0-9_-]+", "_", f"Inventur_{inventur['stichtag']}_{inventur['titel']}")[:80] + ".csv"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(daten)
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -9370,6 +10043,18 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_order()
             if path == "/time":
                 return self.handle_time_entry()
+            if path in ("/inventur/menge", "/admin/inventur/menge"):
+                return self.handle_inventur_menge()
+            if path == "/inventur/frei":
+                return self.handle_inventur_frei()
+            if path == "/inventur/frei-loeschen":
+                return self.handle_inventur_frei(loeschen=True)
+            if path == "/inventur/fertig":
+                return self.handle_inventur_fertig()
+            if path == "/admin/inventur/neu":
+                return self.handle_admin_inventur_neu()
+            if path == "/admin/inventur/status":
+                return self.handle_admin_inventur_status()
             if path == "/admin/login":
                 return self.handle_admin_login()
             if path == "/admin/push/test":
@@ -10685,6 +11370,7 @@ def main():
     bh.nachtlauf_starten(taeglich=bh_monatserinnerung)
     tagesmail_uhr_starten()
     kalk_init()
+    inventur_init()
     seed_demo_products()
     print(f"Internes Bestellsystem läuft auf http://localhost:{PORT}")
     print(f"Admin-PIN: {ADMIN_PIN} (vor Onlinebetrieb ändern)")
