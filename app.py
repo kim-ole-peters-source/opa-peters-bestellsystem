@@ -20,6 +20,7 @@ from email.message import EmailMessage
 from http import cookies
 from urllib.parse import parse_qs, urlparse, quote, quote_plus, urlencode
 import buchhaltung as bh
+from difflib import SequenceMatcher
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from email.utils import parseaddr
@@ -127,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-sortiment"
+ASSET_VERSION = "2026-11-25-haendler"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2651,7 +2652,7 @@ ADMIN_NAV = [
     ("/admin", "Übersicht", "🏠", ["/admin"], False),
     ("/admin/orders", "Bestellungen", "🧾", ["/admin/orders", "/admin/einkauf"], False),
     ("/admin/messages", "Nachrichten", "✉️", ["/admin/messages"], False),
-    ("/admin/products", "Sortiment", "📦", ["/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import"], True),
+    ("/admin/products", "Sortiment", "📦", ["/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/preisliste"], True),
     ("/admin/time", "Team", "👥", ["/admin/time", "/admin/employees", "/admin/aufgaben", "/admin/cockpit-content", "/admin/task-report"], False),
     ("/admin/kalkulation", "Kalkulation", "🧮", ["/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise"], True),
     ("/admin/buchhaltung", "Buchhaltung", "📒", ["/admin/buchhaltung"], True),
@@ -2712,6 +2713,7 @@ def admin_kopf(titel, unter="", aktionen="", reiter=None, aktiv=""):
 
 SORTIMENT_REITER = [
     ("produkte", "Produkte", "/admin/products"),
+    ("preisliste", "Preisliste", "/admin/preisliste"),
     ("kategorien", "Warengruppen", "/admin/categories"),
     ("import", "Import", "/admin/import"),
 ]
@@ -3382,6 +3384,278 @@ def einheit_auswahl(feldname, aktuell):
         f'<option value="{wert}"{" selected" if wert == aktuell else ""}>{esc(label)}</option>'
         for wert, label in EINHEIT_AUSWAHL)
     return f'<select name="{feldname}" aria-label="Einheit">{optionen}</select>'
+
+# =================================================================
+#   HÄNDLER, ARTIKELNUMMERN UND PREISLISTEN-IMPORT
+# =================================================================
+# Jedes Produkt hat eine eigene Hausnummer (OP-xxxxxx), die sich nie ändert.
+# Die Artikelnummern der Händler stehen in produkt_haendler – je Händler eine
+# Zeile mit Nummer, Preis und Gebinde. Gerechnet wird mit dem günstigsten.
+IMPORT_DIR = os.path.join(DATA_DIR, "importe")
+HAUSNUMMER_PRAEFIX = "OP-"
+AEHNLICH_AB = 0.55          # darunter gilt ein Name als unbekannt
+AEHNLICH_VORSCHLAEGE = 3    # so viele Kandidaten je Rückfrage
+
+
+def hausnummer_erzeugen(con):
+    """Zufällige, im System noch nicht vorhandene Hausnummer."""
+    for _ in range(200):
+        nummer = HAUSNUMMER_PRAEFIX + str(100000 + uuid.uuid4().int % 900000)
+        if not con.execute("SELECT 1 FROM products WHERE artikelnummer=?", (nummer,)).fetchone():
+            return nummer
+    return HAUSNUMMER_PRAEFIX + uuid.uuid4().hex[:8].upper()
+
+
+def ist_hausnummer(nummer):
+    return str(nummer or "").upper().startswith(HAUSNUMMER_PRAEFIX)
+
+
+def haendler_init():
+    os.makedirs(IMPORT_DIR, exist_ok=True)
+    con = db()
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS produkt_haendler (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            haendler TEXT NOT NULL,
+            artikelnummer TEXT,
+            einkaufspreis REAL,
+            inhalt_menge REAL,
+            inhalt_einheit TEXT,
+            preis_stand TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ph_produkt ON produkt_haendler(product_id);
+        CREATE INDEX IF NOT EXISTS idx_ph_nummer ON produkt_haendler(haendler, artikelnummer);
+        """
+    )
+    # Einmalige Umstellung: vorhandene Nummern sind Händlernummern und wandern um
+    offen = con.execute(
+        "SELECT id, source, artikelnummer, einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand "
+        "FROM products WHERE artikelnummer IS NULL OR artikelnummer NOT LIKE ?",
+        (HAUSNUMMER_PRAEFIX + "%",),
+    ).fetchall()
+    for p in offen:
+        hat_zeile = con.execute("SELECT 1 FROM produkt_haendler WHERE product_id=?", (p["id"],)).fetchone()
+        if not hat_zeile and (p["artikelnummer"] or p["einkaufspreis"] is not None):
+            con.execute(
+                "INSERT INTO produkt_haendler (product_id, haendler, artikelnummer, einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (p["id"], (p["source"] or "Unbekannt").strip(), (p["artikelnummer"] or "").strip() or None,
+                 p["einkaufspreis"], p["inhalt_menge"], p["inhalt_einheit"], p["preis_stand"]),
+            )
+        con.execute("UPDATE products SET artikelnummer=? WHERE id=?", (hausnummer_erzeugen(con), p["id"]))
+    con.commit()
+    con.close()
+
+
+# ---------------------------------------------------------------- Preis je Produkt
+def haendler_zeilen(product_id):
+    con = db()
+    zeilen = con.execute(
+        "SELECT * FROM produkt_haendler WHERE product_id=? ORDER BY haendler COLLATE NOCASE", (product_id,)
+    ).fetchall()
+    con.close()
+    return zeilen
+
+
+def zeile_je_basis(zeile):
+    """Preis je kg/l/Stück einer Händlerzeile -> (preis, basis) oder (None, None)."""
+    preis = zeile["einkaufspreis"]
+    menge = zeile["inhalt_menge"] or 0
+    basis = (zeile["inhalt_einheit"] or "").lower() or None
+    if preis is None or menge <= 0 or not basis:
+        return (None, None)
+    return (preis / menge, basis)
+
+
+def produkt_preis_neu_berechnen(con, product_id):
+    """Schreibt den günstigsten Händlerpreis als wirksamen Preis ins Produkt."""
+    zeilen = con.execute(
+        "SELECT * FROM produkt_haendler WHERE product_id=? AND einkaufspreis IS NOT NULL", (product_id,)
+    ).fetchall()
+    bester, bester_wert = None, None
+    for z in zeilen:
+        wert, basis = zeile_je_basis(z)
+        if wert is None:
+            continue
+        if bester_wert is None or wert < bester_wert:
+            bester, bester_wert = z, wert
+    if bester is None:
+        if zeilen:
+            z = zeilen[0]
+            con.execute("UPDATE products SET einkaufspreis=?, preis_stand=? WHERE id=?",
+                        (z["einkaufspreis"], z["preis_stand"], product_id))
+        return None
+    con.execute(
+        "UPDATE products SET einkaufspreis=?, inhalt_menge=?, inhalt_einheit=?, preis_stand=? WHERE id=?",
+        (bester["einkaufspreis"], bester["inhalt_menge"], bester["inhalt_einheit"], bester["preis_stand"], product_id),
+    )
+    return bester
+
+
+def haendlerpreis_setzen(con, product_id, haendler, artikelnummer=None, preis=None,
+                         inhalt_menge=None, inhalt_einheit=None, stand=None):
+    """Legt die Händlerzeile an oder frischt sie auf; danach gilt wieder der günstigste Preis."""
+    haendler = (haendler or "Unbekannt").strip()
+    nummer = (str(artikelnummer).strip() if artikelnummer not in (None, "") else None)
+    stand = stand or berlin_now().date().isoformat()
+    zeile = None
+    if nummer:
+        zeile = con.execute("SELECT * FROM produkt_haendler WHERE haendler=? AND artikelnummer=?",
+                            (haendler, nummer)).fetchone()
+    if not zeile:
+        zeile = con.execute("SELECT * FROM produkt_haendler WHERE product_id=? AND haendler=?",
+                            (product_id, haendler)).fetchone()
+    if zeile:
+        con.execute(
+            "UPDATE produkt_haendler SET product_id=?, artikelnummer=COALESCE(?, artikelnummer), einkaufspreis=COALESCE(?, einkaufspreis), "
+            "inhalt_menge=COALESCE(?, inhalt_menge), inhalt_einheit=COALESCE(?, inhalt_einheit), preis_stand=? WHERE id=?",
+            (product_id, nummer, preis, inhalt_menge, inhalt_einheit, stand, zeile["id"]),
+        )
+    else:
+        con.execute(
+            "INSERT INTO produkt_haendler (product_id, haendler, artikelnummer, einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (product_id, haendler, nummer, preis, inhalt_menge, inhalt_einheit, stand),
+        )
+    produkt_preis_neu_berechnen(con, product_id)
+
+
+# ---------------------------------------------------------------- Namensvergleich
+WORT_MUELL = {"kg", "g", "gr", "l", "li", "ltr", "ml", "st", "stk", "stueck", "kt", "pg", "ei", "sa", "ds", "bt",
+              "fl", "ka", "ki", "karton", "packung", "beutel", "eimer", "dose", "sack", "inkl", "lizenzierte",
+              "serviceverpackung", "ewk", "gebuehr", "und", "mit", "ohne", "fuer", "je", "der", "die", "das"}
+
+
+def namens_schluessel(text):
+    return normalize_text_key(text)
+
+
+def namens_woerter(text):
+    roh = normalize_text_key_mit_leerzeichen(text)
+    return {w for w in roh.split() if len(w) > 1 and w not in WORT_MUELL}
+
+
+def normalize_text_key_mit_leerzeichen(text):
+    text = (text or "").strip().lower()
+    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        text = text.replace(alt, neu)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def zahlen_aus(text):
+    return set(re.findall(r"\d+(?:[.,]\d+)?", normalize_text_key_mit_leerzeichen(text).replace(" ", "")))
+
+
+def aehnlichkeit(a, b):
+    """0 bis 1. Wortüberschneidung und Zeichenfolge zusammen, Zahlen zählen extra."""
+    wa, wb = namens_woerter(a), namens_woerter(b)
+    if not wa or not wb:
+        return 0.0
+    gemeinsam = len(wa & wb)
+    dice = (2 * gemeinsam) / (len(wa) + len(wb))
+    folge = SequenceMatcher(None, normalize_text_key(a), normalize_text_key(b)).ratio()
+    wert = 0.65 * dice + 0.35 * folge
+    za, zb = zahlen_aus(a), zahlen_aus(b)
+    if za and zb and not (za & zb):
+        wert -= 0.15          # andere Größe oder Sorte -> eher nicht dasselbe
+    return max(0.0, min(1.0, wert))
+
+
+# ---------------------------------------------------------------- Import vorbereiten
+def preisliste_pruefen(zeilen, haendler):
+    """Ordnet jede Zeile der Datei zu. -> Liste von Vorgängen für die Vorschau."""
+    if not zeilen:
+        raise RuntimeError("Die Datei enthält keine Zeilen.")
+    kopf = list(zeilen[0].keys())
+    sp_nr = spalte_finden(kopf, ["artikelnummer", "artikelnr", "artnr", "artikelno", "nummer", "nr"])
+    sp_preis = spalte_finden(kopf, ["einkaufspreis", "ekpreis", "preis", "einkauf", "netto", "betrag"], (sp_nr,))
+    sp_inhalt = spalte_finden(kopf, ["inhalt", "gebinde", "vpe", "menge"], (sp_nr, sp_preis))
+    sp_name = spalte_finden(kopf, ["artikelbezeichnung", "produktname", "bezeichnung", "produkt", "name", "artikel"],
+                            (sp_nr, sp_preis, sp_inhalt))
+    if not sp_name and not sp_nr:
+        raise RuntimeError("In der Datei fehlt eine Spalte mit Produktname oder Artikelnummer.")
+    if not sp_preis:
+        raise RuntimeError("In der Datei fehlt eine Preisspalte.")
+
+    con = db()
+    produkte = con.execute(
+        "SELECT id, name, package_size, source, artikelnummer FROM products WHERE deleted_at IS NULL"
+    ).fetchall()
+    nach_haus = {p["artikelnummer"]: p for p in produkte if p["artikelnummer"]}
+    nach_name = {}
+    for p in produkte:
+        nach_name.setdefault(namens_schluessel(p["name"]), p)
+    haendler_nummern = {
+        (z["artikelnummer"] or ""): z["product_id"]
+        for z in con.execute("SELECT artikelnummer, product_id FROM produkt_haendler WHERE haendler=?", (haendler,))
+        if z["artikelnummer"]
+    }
+    con.close()
+
+    vorgaenge = []
+    for index, zeile in enumerate(zeilen):
+        preis = parse_decimal(zeile.get(sp_preis), 0.0)
+        nummer = str(zeile.get(sp_nr) or "").strip() if sp_nr else ""
+        name = str(zeile.get(sp_name) or "").strip() if sp_name else ""
+        gebinde = str(zeile.get(sp_inhalt) or "").strip() if sp_inhalt else ""
+        if preis <= 0 or not (name or nummer):
+            continue
+        menge, einheit = gebinde_aus_text(gebinde or name)
+        vorgang = {
+            "nr": index, "artikelnummer": nummer, "name": name or f"Artikel {nummer}",
+            "gebinde": gebinde, "menge": menge, "einheit": einheit, "preis": preis,
+            "art": "neu", "product_id": None, "treffer": "", "kandidaten": [],
+        }
+        pid = haendler_nummern.get(nummer) if nummer else None
+        if not pid and nummer and ist_hausnummer(nummer):
+            treffer = nach_haus.get(nummer.upper())
+            pid = treffer["id"] if treffer else None
+        if pid:
+            produkt = next((p for p in produkte if p["id"] == pid), None)
+            vorgang.update(art="preis", product_id=pid, treffer=produkt["name"] if produkt else "")
+        else:
+            gleich = nach_name.get(namens_schluessel(name)) if name else None
+            if gleich:
+                vorgang.update(art="verknuepfen", product_id=gleich["id"], treffer=gleich["name"])
+            else:
+                bewertet = sorted(
+                    ((aehnlichkeit(name, p["name"]), p) for p in produkte), key=lambda x: x[0], reverse=True
+                )[:AEHNLICH_VORSCHLAEGE]
+                kandidaten = [{"id": p["id"], "name": p["name"], "gebinde": p["package_size"],
+                               "wert": round(w, 2)} for w, p in bewertet if w >= AEHNLICH_AB]
+                if kandidaten:
+                    vorgang.update(art="frage", kandidaten=kandidaten)
+        vorgaenge.append(vorgang)
+    return vorgaenge
+
+
+def import_speichern(daten):
+    token = uuid.uuid4().hex[:12]
+    os.makedirs(IMPORT_DIR, exist_ok=True)
+    with open(os.path.join(IMPORT_DIR, f"{token}.json"), "w", encoding="utf-8") as f:
+        json.dump(daten, f, ensure_ascii=False)
+    # alte Zwischenstände aufräumen
+    grenze = datetime.now().timestamp() - 24 * 3600
+    for datei in os.listdir(IMPORT_DIR):
+        pfad = os.path.join(IMPORT_DIR, datei)
+        if os.path.isfile(pfad) and os.path.getmtime(pfad) < grenze:
+            try:
+                os.remove(pfad)
+            except OSError:
+                pass
+    return token
+
+
+def import_laden(token):
+    pfad = os.path.join(IMPORT_DIR, f"{os.path.basename(str(token or ''))}.json")
+    if not os.path.exists(pfad):
+        return None
+    with open(pfad, encoding="utf-8") as f:
+        return json.load(f)
+
 
 # =====================================================================
 #   VERWALTUNG NEU (November 2026) – gemeinsame Hilfsfunktionen
@@ -4085,6 +4359,10 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_export_zip(query=parse_qs(parsed.query))
         if path == "/beleg":
             return self.show_beleg_foto(query=parse_qs(parsed.query))
+        if path == "/admin/preisliste":
+            return self.show_preisliste(query=parse_qs(parsed.query))
+        if path == "/admin/preisliste/vorschau":
+            return self.show_preisliste_vorschau(query=parse_qs(parsed.query))
         if path == "/admin/kalkulation":
             return self.show_kalkulation(query=parse_qs(parsed.query))
         if path == "/admin/kalkulation/rezept":
@@ -5892,6 +6170,25 @@ class App(BaseHTTPRequestHandler):
             if product["image_filename"] else '<p class="vw-klein">Noch kein Bild hinterlegt.</p>'
         )
         quelle_liste = "".join(f'<option value="{esc(h)}"></option>' for h in get_source_names())
+        zeilen_haendler = haendler_zeilen(product["id"])
+        eigene = next((z for z in zeilen_haendler if (z["haendler"] or "").strip().lower() == (product["source"] or "").strip().lower()), None)
+        eigener_preis = eigene["einkaufspreis"] if eigene else None
+        if len(zeilen_haendler) > 1:
+            reihen = []
+            for z in zeilen_haendler:
+                je_wert, je_basis = zeile_je_basis(z)
+                nummer = f'<small class="vw-klein-block">Nr. {esc(z["artikelnummer"])}</small>' if z["artikelnummer"] else ""
+                je_text = f'{geld(je_wert)}/{BASIS_NAME.get(je_basis, "?")}' if je_wert is not None else "–"
+                reihen.append(
+                    f'<tr><td>{esc(z["haendler"])}{nummer}</td>'
+                    f'<td class="zahl">{geld(z["einkaufspreis"]) if z["einkaufspreis"] is not None else "–"}</td>'
+                    f'<td class="zahl">{je_text}</td></tr>')
+            haendler_tabelle = ('<div class="vw-tabelle-wrap"><table class="vw-tabelle"><thead><tr><th>Händler</th>'
+                                '<th class="zahl">je Gebinde</th><th class="zahl">je Einheit</th></tr></thead>'
+                                f'<tbody>{"".join(reihen)}</tbody></table></div>'
+                                '<p class="vw-klein">Gerechnet wird mit dem günstigsten dieser Preise.</p>')
+        else:
+            haendler_tabelle = ""
         basis_preis, basis = produkt_basispreis(product)
         preis_hinweis = (f"Daraus rechnet das System <b>{geld(basis_preis)} je {BASIS_NAME.get(basis, basis)}</b>"
                          + (f" · Preisstand {esc(product['preis_stand'])}" if product['preis_stand'] else "")
@@ -5911,15 +6208,14 @@ class App(BaseHTTPRequestHandler):
             </div>
             <fieldset class="vw-feldgruppe"><legend>Warengruppe *</legend><div class="vw-schalter-raster">{category_checkboxes('category', product_categories(product))}</div></fieldset>
             <fieldset class="vw-feldgruppe"><legend>Einkauf</legend>
-                <div class="vw-zwei">
-                    <label>Artikelnummer beim Händler<input name="artikelnummer" value="{esc(product['artikelnummer'] or '')}" placeholder="optional"></label>
-                    <label>Einkaufspreis je Gebinde (€)<input name="einkaufspreis" inputmode="decimal" value="{zahl_kurz(product['einkaufspreis']) if product['einkaufspreis'] is not None else ''}" placeholder="z. B. 14,05"></label>
-                </div>
+                <p class="vw-klein">Hausnummer <b>{esc(product['artikelnummer'] or '–')}</b> · wird vom System vergeben und ändert sich nie.</p>
+                <label>Einkaufspreis je Gebinde bei {esc(product['source'])} (€)<input name="einkaufspreis" inputmode="decimal" value="{zahl_kurz(eigener_preis) if eigener_preis is not None else ''}" placeholder="z. B. 14,05"></label>
                 <div class="vw-zwei">
                     <label>Inhalt je Gebinde<input name="inhalt_menge" inputmode="decimal" value="{zahl_kurz(product['inhalt_menge']) if product['inhalt_menge'] else ''}" placeholder="z. B. 5"></label>
                     <label>Einheit{einheit_auswahl('inhalt_einheit', product['inhalt_einheit'] or 'kg')}</label>
                 </div>
                 <p class="vw-klein">{preis_hinweis}</p>
+                {haendler_tabelle}
             </fieldset>
             <label>Im Bestellbereich<select name="active"><option value="1" {"selected" if product["active"] else ""}>sichtbar</option><option value="0" {"selected" if not product["active"] else ""}>ausgeblendet</option></select></label>
             <div class="vw-zwei vw-bildfeld"><div>{bild}</div><label>Neues Bild<input type="file" name="image" accept="image/*"></label></div>
@@ -8532,11 +8828,10 @@ class App(BaseHTTPRequestHandler):
         {self.kalk_kopf('Einkaufspreise', f'{len(ohne_preis)} von {len(produkte) if not nur_ohne else len(ohne_preis)} angezeigten Produkten haben noch keinen Preis.', '', 'preise')}
         <section class="vw-karte vw-schmal">
             <h3>Preisliste hochladen</h3>
-            <form method="post" action="/admin/kalkulation/preise/import" enctype="multipart/form-data" class="vw-inline-form">
-                <label class="vw-wachsen">CSV- oder Excel-Datei<input type="file" name="datei" accept=".csv,.xlsx" required></label>
-                <button class="primary" type="submit">Preise übernehmen</button>
-            </form>
-            <p><a class="button" href="/admin/kalkulation/preise/vorlage.csv">⬇ Musterdatei herunterladen</a></p>
+            <p>Das läuft jetzt über <a href="/admin/preisliste"><b>Sortiment → Preisliste</b></a>: Dort wählst du den Händler,
+            bekannte Artikel bekommen den neuen Preis, unbekannte kannst du direkt anlegen.</p>
+            <p><a class="button primary" href="/admin/preisliste">Preisliste einlesen</a>
+            <a class="button" href="/admin/kalkulation/preise/vorlage.csv">⬇ Musterdatei herunterladen</a></p>
             <p class="vw-klein">Die Datei braucht eine Spalte mit dem Preis und eine mit Artikelnummer oder Produktname –
             wie die Spalten heißen, ist egal (Preis, EK, Einkaufspreis … / Artikelnummer, Artikel-Nr, Bezeichnung …).
             Zugeordnet wird zuerst über die Artikelnummer, sonst über den Produktnamen. Eine Spalte Inhalt oder Gebinde wird mitgenommen.</p>
@@ -8686,14 +8981,191 @@ class App(BaseHTTPRequestHandler):
             neu_preis = preis if preis else None
             if (neu_preis != alt["einkaufspreis"] or (inhalt and inhalt != alt["inhalt_menge"])
                     or einheit != (alt["inhalt_einheit"] or "") or nummer != (alt["artikelnummer"] or "")):
-                con.execute(
-                    "UPDATE products SET einkaufspreis=?, inhalt_menge=?, inhalt_einheit=?, artikelnummer=?, preis_stand=? WHERE id=?",
-                    (neu_preis, inhalt or alt["inhalt_menge"], einheit, nummer or None,
-                     heute if neu_preis != alt["einkaufspreis"] else alt["preis_stand"], pid))
+                produkt = con.execute("SELECT source FROM products WHERE id=?", (pid,)).fetchone()
+                haendlerpreis_setzen(con, pid, produkt["source"] if produkt else "Unbekannt", nummer or None,
+                                     neu_preis, inhalt or alt["inhalt_menge"], einheit, heute)
                 geaendert += 1
         con.commit()
         con.close()
         self.redirect("/admin/kalkulation/preise?msg=" + quote_plus(f"{geaendert} Produkte aktualisiert."))
+
+    # =================================================================
+    #   PREISLISTE EINES HÄNDLERS EINLESEN
+    # =================================================================
+    def show_preisliste(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        haendler_liste = "".join(f'<option value="{esc(h)}"></option>' for h in get_source_names())
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf('Preisliste einlesen',
+                    'Datei vom Händler hochladen: bekannte Artikel bekommen den neuen Preis, unbekannte legst du mit einem Klick an.',
+                    '<a class="button" href="/admin/products">Zum Sortiment</a>')}
+        <section class="vw-karte vw-schmal">
+            <form method="post" action="/admin/preisliste/pruefen" enctype="multipart/form-data" class="vw-formular">
+                <datalist id="haendlerListe">{haendler_liste}</datalist>
+                <label>Händler *<input name="haendler" list="haendlerListe" required placeholder="z. B. Backring Nord – neuer Name legt einen neuen Händler an"></label>
+                <label>CSV- oder Excel-Datei *<input type="file" name="datei" accept=".csv,.xlsx" required></label>
+                <label class="vw-schalter"><input type="checkbox" name="neue_anlegen" value="1" checked><span>Unbekannte Artikel zum Anlegen vorschlagen</span></label>
+                <div class="vw-dialog-fuss"><button class="primary" type="submit">Datei prüfen</button></div>
+            </form>
+            <p><a class="button" href="/admin/kalkulation/preise/vorlage.csv">⬇ Musterdatei herunterladen</a></p>
+            <p class="vw-klein">Erkannt werden Spalten für Artikelnummer, Bezeichnung, Inhalt und Preis – egal wie sie genau heißen.
+            Gespeichert wird nichts, bevor du die Vorschau bestätigt hast.</p>
+        </section>
+        """
+        self.admin_seite("Preisliste einlesen", body)
+
+    def handle_preisliste_pruefen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        haendler = self.form_value(form, "haendler").strip()
+        datei = form.get("datei")
+        datei = datei[0] if isinstance(datei, list) else datei
+        if not haendler:
+            return self.redirect("/admin/preisliste?error=" + quote_plus("Bitte den Händler angeben."))
+        if not isinstance(datei, UploadedFile) or not datei.content:
+            return self.redirect("/admin/preisliste?error=" + quote_plus("Bitte eine Datei auswählen."))
+        try:
+            zeilen = preisliste_zeilen_lesen(datei)
+            vorgaenge = preisliste_pruefen(zeilen, haendler)
+        except Exception as fehler:
+            return self.redirect("/admin/preisliste?error=" + quote_plus(str(fehler)[:200]))
+        if not vorgaenge:
+            return self.redirect("/admin/preisliste?error=" + quote_plus("In der Datei stand keine verwertbare Zeile."))
+        token = import_speichern({
+            "haendler": haendler,
+            "dateiname": datei.filename or "preisliste",
+            "neue_anlegen": bool(self.form_value(form, "neue_anlegen")),
+            "vorgaenge": vorgaenge,
+        })
+        self.redirect(f"/admin/preisliste/vorschau?token={token}")
+
+    def show_preisliste_vorschau(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        daten = import_laden(self.query_text(query, "token"))
+        if not daten:
+            return self.redirect("/admin/preisliste?error=" + quote_plus("Die Vorschau ist abgelaufen. Bitte die Datei noch einmal hochladen."))
+        token = self.query_text(query, "token")
+        haendler = daten["haendler"]
+        vorgaenge = daten["vorgaenge"]
+        sicher = [v for v in vorgaenge if v["art"] in ("preis", "verknuepfen")]
+        fragen = [v for v in vorgaenge if v["art"] == "frage"]
+        neue = [v for v in vorgaenge if v["art"] == "neu"]
+
+        def zeile_text(v):
+            return (f'<b>{esc(v["name"])}</b>'
+                    + (f'<small class="vw-klein-block">Artikelnr. {esc(v["artikelnummer"])}</small>' if v["artikelnummer"] else "")
+                    + f'<small class="vw-klein-block">{zahl_kurz(v["menge"])} {esc(v["einheit"])} · {geld(v["preis"])}</small>')
+
+        sicher_zeilen = "".join(
+            f'<tr><td>{zeile_text(v)}</td><td>{"Preis aktualisieren" if v["art"] == "preis" else "neu verknüpfen"}'
+            f'<small class="vw-klein-block">{esc(v["treffer"])}</small></td></tr>' for v in sicher)
+
+        frage_zeilen = []
+        for v in fragen:
+            optionen = "".join(
+                f'<option value="{k["id"]}">{esc(k["name"])} · {esc(k["gebinde"] or "")} ({int(k["wert"] * 100)} % ähnlich)</option>'
+                for k in v["kandidaten"])
+            frage_zeilen.append(f"""
+            <tr>
+                <td>{zeile_text(v)}</td>
+                <td>
+                    <select name="wahl_{v['nr']}" class="vw-wachsen">
+                        <option value="neu">→ als neues Produkt anlegen</option>
+                        {optionen}
+                        <option value="skip">→ überspringen</option>
+                    </select>
+                </td>
+            </tr>""")
+
+        neu_zeilen = "".join(
+            f'<tr><td><label class="vw-haken-zeile"><input type="checkbox" name="neu_{v["nr"]}" value="1" checked> {zeile_text(v)}</label></td></tr>'
+            for v in neue)
+
+        body = f"""
+        {admin_kopf(f'Vorschau · {esc(haendler)}',
+                    f'{esc(daten["dateiname"])} · {len(vorgaenge)} Zeilen gelesen. Gespeichert wird erst beim Übernehmen.')}
+        <form method="post" action="/admin/preisliste/uebernehmen">
+            <input type="hidden" name="token" value="{esc(token)}">
+            <section class="vw-karte">
+                <h3>{len(sicher)} eindeutig zugeordnet</h3>
+                {f'<div class="vw-tabelle-wrap"><table class="vw-tabelle"><thead><tr><th>Aus der Datei</th><th>Im System</th></tr></thead><tbody>{sicher_zeilen}</tbody></table></div>' if sicher else '<p class="vw-leer">Nichts dabei.</p>'}
+            </section>
+            <section class="vw-karte">
+                <h3>{len(fragen)} Rückfragen</h3>
+                <p class="vw-klein">Ähnlicher Name gefunden – aber nicht gleich genug, um es selbst zu entscheiden. Deine Antwort merkt sich das System über die Artikelnummer, die Frage kommt also nur einmal.</p>
+                {f'<div class="vw-tabelle-wrap"><table class="vw-tabelle"><thead><tr><th>Aus der Datei</th><th>Ist das …</th></tr></thead><tbody>{"".join(frage_zeilen)}</tbody></table></div>' if fragen else '<p class="vw-leer">Keine offenen Fragen.</p>'}
+            </section>
+            <section class="vw-karte">
+                <h3>{len(neue)} neu anlegen</h3>
+                <p class="vw-klein">Diese Artikel kennt das System noch nicht. Sie bekommen eine Hausnummer und sind zunächst nur für Standorte mit Vollsortiment sichtbar.</p>
+                {f'<div class="vw-tabelle-wrap"><table class="vw-tabelle"><tbody>{neu_zeilen}</tbody></table></div>' if neue else '<p class="vw-leer">Alles schon im Sortiment.</p>'}
+            </section>
+            <div class="vw-knopfreihe vw-klebend">
+                <button class="primary" type="submit">Jetzt übernehmen</button>
+                <a class="button" href="/admin/preisliste">Abbrechen</a>
+            </div>
+        </form>
+        """
+        self.admin_seite("Vorschau Preisliste", body)
+
+    def handle_preisliste_uebernehmen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        token = self.form_value(form, "token").strip()
+        daten = import_laden(token)
+        if not daten:
+            return self.redirect("/admin/preisliste?error=" + quote_plus("Die Vorschau ist abgelaufen. Bitte noch einmal hochladen."))
+        haendler = daten["haendler"]
+        heute = berlin_now().date().isoformat()
+        con = db()
+        aktualisiert = verknuepft = angelegt = uebersprungen = 0
+        for v in daten["vorgaenge"]:
+            art, pid = v["art"], v["product_id"]
+            if art == "frage":
+                wahl = self.form_value(form, f"wahl_{v['nr']}", "neu")
+                if wahl == "skip":
+                    uebersprungen += 1
+                    continue
+                if wahl.isdigit():
+                    pid, art = int(wahl), "verknuepfen"
+                else:
+                    art = "neu"
+            if art == "neu":
+                if not daten.get("neue_anlegen") or not self.form_value(form, f"neu_{v['nr']}"):
+                    uebersprungen += 1
+                    continue
+                gebinde = v["gebinde"] or f'{zahl_kurz(v["menge"])} {v["einheit"].upper()}'
+                cur = con.execute(
+                    "INSERT INTO products (name, package_size, category, source, visible_to, created_at, artikelnummer, "
+                    "inhalt_menge, inhalt_einheit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (v["name"], gebinde, "Allgemein", haendler, NO_LOCATIONS_KEY,
+                     berlin_now().isoformat(timespec="seconds"), hausnummer_erzeugen(con), v["menge"], v["einheit"]),
+                )
+                pid = cur.lastrowid
+                angelegt += 1
+            elif art == "verknuepfen":
+                verknuepft += 1
+            else:
+                aktualisiert += 1
+            if pid:
+                haendlerpreis_setzen(con, pid, haendler, v["artikelnummer"], v["preis"], v["menge"], v["einheit"], heute)
+        con.commit()
+        con.close()
+        try:
+            os.remove(os.path.join(IMPORT_DIR, f"{os.path.basename(token)}.json"))
+        except OSError:
+            pass
+        ensure_category("Allgemein")
+        meldung = (f"{aktualisiert} Preise aktualisiert, {verknuepft} Artikel neu verknüpft, "
+                   f"{angelegt} Produkte angelegt" + (f", {uebersprungen} übersprungen" if uebersprungen else "") + ".")
+        self.redirect("/admin/products?msg=" + quote_plus(meldung))
 
     # =================================================================
     #   BUCHHALTUNG (neu): Übersicht · Bank · Belege · Lieferanten · Export · Einstellungen
@@ -10262,6 +10734,10 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_monat("oeffnen")
             if path == "/beleg":
                 return self.handle_beleg_foto()
+            if path == "/admin/preisliste/pruefen":
+                return self.handle_preisliste_pruefen()
+            if path == "/admin/preisliste/uebernehmen":
+                return self.handle_preisliste_uebernehmen()
             if path == "/admin/kalkulation/einstellungen":
                 return self.handle_kalk_einstellungen()
             if path == "/admin/kalkulation/rezept/neu":
@@ -10500,10 +10976,10 @@ class App(BaseHTTPRequestHandler):
                 con.execute(
                     """
                     INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at,
-                                          inhalt_menge, inhalt_einheit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                          inhalt_menge, inhalt_einheit, artikelnummer)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, package_size, category, source, visible_to_text, None, now, menge, einheit),
+                    (name, package_size, category, source, visible_to_text, None, now, menge, einheit, hausnummer_erzeugen(con)),
                 )
             con.commit()
             con.close()
@@ -10537,13 +11013,16 @@ class App(BaseHTTPRequestHandler):
             con.execute(
                 """
                 INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at,
-                                      einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand, artikelnummer)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (name, package_size, category, source, visible_to_text, image_filename, datetime.now().isoformat(timespec="seconds"),
                  einkaufspreis, inhalt_menge, inhalt_einheit or "kg",
-                 berlin_now().date().isoformat() if einkaufspreis is not None else None),
+                 berlin_now().date().isoformat() if einkaufspreis is not None else None, hausnummer_erzeugen(con)),
             )
+            neue_id = con.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            if einkaufspreis is not None:
+                haendlerpreis_setzen(con, neue_id, source, None, einkaufspreis, inhalt_menge, inhalt_einheit or "kg")
             con.commit()
             con.close()
             self.redirect("/admin/products?msg=" + quote_plus("Produkt gespeichert."))
@@ -10601,12 +11080,10 @@ class App(BaseHTTPRequestHandler):
         einkaufspreis = parse_decimal(preis_roh, 0) or None if preis_roh else None
         inhalt_menge = parse_decimal(self.form_value(form, "inhalt_menge"), 0) or product["inhalt_menge"]
         inhalt_einheit = self.form_value(form, "inhalt_einheit").strip() or product["inhalt_einheit"] or "kg"
-        artikelnummer = self.form_value(form, "artikelnummer").strip() or None
-        preis_stand = berlin_now().date().isoformat() if einkaufspreis != product["einkaufspreis"] else product["preis_stand"]
         con = db()
-        con.execute(
-            "UPDATE products SET einkaufspreis=?, inhalt_menge=?, inhalt_einheit=?, artikelnummer=?, preis_stand=? WHERE id=?",
-            (einkaufspreis, inhalt_menge, inhalt_einheit, artikelnummer, preis_stand, product_id))
+        if einkaufspreis is not None or inhalt_menge:
+            haendlerpreis_setzen(con, product["id"], source or product["source"], None,
+                                 einkaufspreis, inhalt_menge, inhalt_einheit)
         con.execute(
             """
             UPDATE products
@@ -11477,6 +11954,7 @@ def main():
     kalk_init()
     inventur_init()
     seed_demo_products()
+    haendler_init()
     print(f"Internes Bestellsystem läuft auf http://localhost:{PORT}")
     print(f"Admin-PIN: {ADMIN_PIN} (vor Onlinebetrieb ändern)")
     print("Standort-Zugänge werden im Adminbereich unter Standorte gepflegt.")
