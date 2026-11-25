@@ -3376,3 +3376,5 @@ nav a[href="/inventur"]::before { content: "📋"; }
   /* Mitarbeiter-Menü unten: 6 Punkte passen nebeneinander */
   body:not(.vw) .topbar nav a { min-width: 0; font-size: 11px; }
 }
+.vw-produkt-preis { font-size: 0.82rem; color: #475569; white-space: nowrap; }
+.vw-produkt-preis.vw-grau { color: #94a3b8; }

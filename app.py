@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-handy"
+ASSET_VERSION = "2026-11-25-sortiment"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -472,6 +472,11 @@ def normalize_locations(raw_locations):
             cockpit_orders = normalize_cockpit_orders(item.get("cockpit_orders", []))
             cockpit_infos = normalize_cockpit_infos(item.get("cockpit_infos", []))
             production_jobs = normalize_production_jobs(item.get("production_jobs", []))
+            if "full_assortment" in item:
+                full_assortment = bool(item.get("full_assortment"))
+            else:
+                # Herstellung/Produktion sieht beim ersten Start automatisch das ganze Sortiment
+                full_assortment = bool(re.search(r"herstell|produktion", normalize_text_key(name)))
             raw_id = str(item.get("id") or "").strip()
         else:
             name = str(item or "").strip()
@@ -486,6 +491,7 @@ def normalize_locations(raw_locations):
             cockpit_orders = []
             cockpit_infos = []
             production_jobs = []
+            full_assortment = bool(re.search(r"herstell|produktion", normalize_text_key(name)))
             raw_id = ""
         if not name:
             continue
@@ -506,6 +512,7 @@ def normalize_locations(raw_locations):
             "time_tracking_max_end": time_tracking_max_end if is_valid_hhmm(time_tracking_max_end) else "",
             "min_stock_enabled": min_stock_enabled,
             "min_stock_items": min_stock_items,
+            "full_assortment": full_assortment,
             "cockpit_tasks": cockpit_tasks,
             "cockpit_orders": cockpit_orders,
             "cockpit_infos": cockpit_infos,
@@ -1037,6 +1044,12 @@ def admin_orders_return_url(message="", error="", pdf="", open_location="", open
     return url
 
 
+def location_full_assortment(location_id):
+    """Standorte mit Vollsortiment sehen immer alle Produkte – auch neu angelegte."""
+    location = next((l for l in get_locations() if l["id"] == location_id), None)
+    return bool(location and location.get("full_assortment"))
+
+
 def parse_visible_to(value):
     raw = (value or "").strip()
     if not raw or normalize_text_key(raw) in ["alle", "all", "jeder"]:
@@ -1099,7 +1112,7 @@ def get_products(active_only=True, buyer_key=None, sort="name_az", category_filt
     rows = list(con.execute(q, params).fetchall())
     con.close()
 
-    if buyer_key:
+    if buyer_key and not location_full_assortment(buyer_key):
         rows = [p for p in rows if buyer_key in product_visible_location_keys(p["visible_to"])]
 
     if category_filter:
@@ -4106,6 +4119,10 @@ class App(BaseHTTPRequestHandler):
             return self.show_categories(query=parse_qs(parsed.query))
         if path == "/admin/import":
             return self.show_import(query=parse_qs(parsed.query))
+        if path == "/admin/kalkulation/preise/vorlage.csv":
+            return self.serve_preis_vorlage()
+        if path == "/admin/buchhaltung/bank/vorlage.csv":
+            return self.serve_auszug_vorlage()
         if path == "/admin/import-template.csv":
             return self.serve_import_template()
         if path == "/admin/settings":
@@ -4252,6 +4269,34 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         with open(filepath, "rb") as f:
             self.wfile.write(f.read())
+
+    def sende_vorlage(self, dateiname, zeilen):
+        inhalt = "\n".join(zeilen).encode("utf-8-sig")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f"attachment; filename={dateiname}")
+        self.send_header("Content-Length", str(len(inhalt)))
+        self.end_headers()
+        self.wfile.write(inhalt)
+
+    def serve_preis_vorlage(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        self.sende_vorlage("musterdatei_einkaufspreise.csv", [
+            "Artikelnummer;Artikelbezeichnung;Inhalt;Einkaufspreis",
+            "000100;Konditor Schlagsahne 33%;5 KG;14,05",
+            "000409;H-Milch 3,5% 12x1L;12 ST;9,00",
+            ";Zimt gemahlen Cassia;1 KG;6,49",
+        ])
+
+    def serve_auszug_vorlage(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        self.sende_vorlage("musterdatei_kontoauszug.csv", [
+            "Buchungstag;Betrag;Beguenstigter/Zahlungspflichtiger;IBAN;Verwendungszweck",
+            "02.01.2026;-248,35;Hefe van Haag GmbH & Co. KG;DE12500105170648489890;Rechnung 123456",
+            "03.01.2026;1.420,00;Kartenzahlung;;Gutschrift Kasse Schwarzenbek",
+        ])
 
     def serve_import_template(self):
         if not self.is_admin():
@@ -5708,6 +5753,9 @@ class App(BaseHTTPRequestHandler):
                 f'<span>{esc((p["name"] or "?")[:1].upper())}</span><img src="/uploads/{esc(p["image_filename"])}" alt="" loading="lazy" onerror="this.remove()">'
                 if p["image_filename"] else f'<span>{esc((p["name"] or "?")[:1].upper())}</span>'
             )
+            basis_preis, basis_einheit = produkt_basispreis(p)
+            preis_text = (f'<span class="vw-produkt-preis">{geld(basis_preis)}/{BASIS_NAME.get(basis_einheit, basis_einheit or "?")}</span>'
+                          if basis_preis is not None else '<span class="vw-produkt-preis vw-grau">kein Preis</span>')
             suche = normalize_text_key(" ".join([p["name"] or "", p["package_size"] or "", p["source"] or "", " ".join(kategorien)]))
             status = "" if p["active"] else '<span class="vw-marke grau">ausgeblendet</span>'
             zeilen.append(f"""
@@ -5718,6 +5766,7 @@ class App(BaseHTTPRequestHandler):
                     <span class="vw-bild">{bild}</span>
                     <span class="vw-produkt-text"><b>{esc(p['name'])}</b><small>{esc(p['package_size'])} · {esc(category_text(kategorien))}</small></span>
                     <span class="vw-produkt-haendler">{esc(p['source'])}</span>
+                    {preis_text}
                     <span class="vw-produkt-sicht">{esc(sichtbar_text)}</span>
                     <span class="vw-produkt-status">{status}</span>
                 </button>
@@ -5788,6 +5837,11 @@ class App(BaseHTTPRequestHandler):
                     <label>Händler *<input name="source" list="sourceSuggestions" required placeholder="aus der Liste wählen"></label>
                 </div>
                 <fieldset class="vw-feldgruppe"><legend>Warengruppe *</legend><div class="vw-schalter-raster">{category_checkboxes('category')}</div></fieldset>
+                <div class="vw-zwei">
+                    <label>Einkaufspreis je Gebinde (€)<input name="einkaufspreis" inputmode="decimal" placeholder="optional"></label>
+                    <label>Inhalt je Gebinde<input name="inhalt_menge" inputmode="decimal" placeholder="z. B. 5"></label>
+                </div>
+                <label>Einheit des Inhalts{einheit_auswahl('inhalt_einheit', 'kg')}</label>
                 <label>Bild (optional)<input type="file" name="image" accept="image/*"></label>
                 <p class="vw-klein">Neue Produkte sind für alle Standorte sichtbar. Einschränken kannst du das beim jeweiligen Standort unter „Sortiment“.</p>
                 <div class="vw-dialog-fuss"><button class="primary" type="submit">Produkt speichern</button></div>
@@ -5838,6 +5892,12 @@ class App(BaseHTTPRequestHandler):
             if product["image_filename"] else '<p class="vw-klein">Noch kein Bild hinterlegt.</p>'
         )
         quelle_liste = "".join(f'<option value="{esc(h)}"></option>' for h in get_source_names())
+        basis_preis, basis = produkt_basispreis(product)
+        preis_hinweis = (f"Daraus rechnet das System <b>{geld(basis_preis)} je {BASIS_NAME.get(basis, basis)}</b>"
+                         + (f" · Preisstand {esc(product['preis_stand'])}" if product['preis_stand'] else "")
+                         + ". Dieser Preis gilt für Kalkulation und Inventur."
+                         if basis_preis is not None
+                         else "Trag Preis und Inhalt ein, dann rechnet das System den Preis je kg, Liter oder Stück – für Kalkulation und Inventur.")
         return f"""
         <div class="vw-dialog-kopf"><h3>{esc(product['name'])}</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
         <form method="post" action="/admin/update-product" enctype="multipart/form-data" class="vw-formular">
@@ -5850,6 +5910,17 @@ class App(BaseHTTPRequestHandler):
                 <label>Händler *<input name="source" list="sourceSuggestionsPanel" required value="{esc(product['source'])}"></label>
             </div>
             <fieldset class="vw-feldgruppe"><legend>Warengruppe *</legend><div class="vw-schalter-raster">{category_checkboxes('category', product_categories(product))}</div></fieldset>
+            <fieldset class="vw-feldgruppe"><legend>Einkauf</legend>
+                <div class="vw-zwei">
+                    <label>Artikelnummer beim Händler<input name="artikelnummer" value="{esc(product['artikelnummer'] or '')}" placeholder="optional"></label>
+                    <label>Einkaufspreis je Gebinde (€)<input name="einkaufspreis" inputmode="decimal" value="{zahl_kurz(product['einkaufspreis']) if product['einkaufspreis'] is not None else ''}" placeholder="z. B. 14,05"></label>
+                </div>
+                <div class="vw-zwei">
+                    <label>Inhalt je Gebinde<input name="inhalt_menge" inputmode="decimal" value="{zahl_kurz(product['inhalt_menge']) if product['inhalt_menge'] else ''}" placeholder="z. B. 5"></label>
+                    <label>Einheit{einheit_auswahl('inhalt_einheit', product['inhalt_einheit'] or 'kg')}</label>
+                </div>
+                <p class="vw-klein">{preis_hinweis}</p>
+            </fieldset>
             <label>Im Bestellbereich<select name="active"><option value="1" {"selected" if product["active"] else ""}>sichtbar</option><option value="0" {"selected" if not product["active"] else ""}>ausgeblendet</option></select></label>
             <div class="vw-zwei vw-bildfeld"><div>{bild}</div><label>Neues Bild<input type="file" name="image" accept="image/*"></label></div>
             <p class="vw-klein">Sichtbar {esc(sichtbar_text)}. Ändern kannst du das beim jeweiligen <a href="/admin/locations">Standort</a> unter „Sortiment“.</p>
@@ -6025,7 +6096,7 @@ class App(BaseHTTPRequestHandler):
                     <tr><td>Kategorie</td><td>nein</td><td>Becher &amp; Verpackung</td></tr>
                 </table></div>
                 <p class="vw-klein">Neue Produkte sind für alle Standorte sichtbar. Bilder lassen sich danach einzeln ergänzen.</p>
-                <a class="button" href="/admin/import-template.csv">Vorlage herunterladen</a>
+                <a class="button" href="/admin/import-template.csv">⬇ Musterdatei herunterladen</a>
             </section>
         </div>
         """
@@ -6991,8 +7062,10 @@ class App(BaseHTTPRequestHandler):
         produkte = get_products(False)
         karten = []
         for l in get_locations():
-            sichtbar = sum(1 for p in produkte if l["id"] in product_visible_location_keys(p["visible_to"]))
+            voll = bool(l.get("full_assortment"))
+            sichtbar = len(produkte) if voll else sum(1 for p in produkte if l["id"] in product_visible_location_keys(p["visible_to"]))
             merkmale = [
+                *(['<span class="vw-marke gruen">Vollsortiment</span>'] if voll else []),
                 f'<span class="vw-marke blau">{esc(role_label(l.get("role", "standard")))}</span>',
                 f'<span class="vw-marke {"gruen" if l.get("time_tracking_enabled") else "grau"}">Zeiterfassung {"an" if l.get("time_tracking_enabled") else "aus"}</span>',
             ]
@@ -7049,6 +7122,8 @@ class App(BaseHTTPRequestHandler):
                     </div>
                     <label>PIN für den Zugang<span class="password-wrap"><input class="password-field" type="password" name="password" value="{esc(location.get('password', ''))}" autocomplete="new-password" placeholder="leer = ohne PIN"><button type="button" class="password-toggle">Anzeigen</button></span></label>
                     <p class="vw-klein">Mit dieser PIN meldet sich der Standort im Bestellbereich an.</p>
+                    <label class="vw-schalter"><input type="checkbox" name="full_assortment" value="1" {'checked' if location.get('full_assortment') else ''}><span>Sieht immer das gesamte Sortiment</span></label>
+                    <p class="vw-klein">Für die Herstellung sinnvoll: Der Standort sieht alle Produkte, auch jedes neu angelegte. Der Reiter „Sortiment“ entfällt dann.</p>
                     <div class="vw-dialog-fuss"><button class="primary" type="submit">Speichern</button></div>
                 </form>
                 <form method="post" action="/admin/location/loeschen" class="vw-gefahrzone" data-vw-confirm="Standort „{esc(location['name'])}“ wirklich löschen? Bestellungen und Zeiten bleiben gespeichert, aber der Standort kann sich nicht mehr anmelden.">
@@ -7102,6 +7177,13 @@ class App(BaseHTTPRequestHandler):
         self.admin_seite(location["name"], body)
 
     def standort_sortiment_html(self, location):
+        if location.get("full_assortment"):
+            return f"""
+        <section class="vw-karte vw-schmal">
+            <p><b>{esc(location['name'])}</b> sieht immer das gesamte Sortiment – auch jedes Produkt, das später dazukommt.
+            Deshalb gibt es hier nichts auszuwählen.</p>
+            <p class="vw-klein">Umstellen kannst du das im Reiter „Allgemein“ mit dem Schalter „Sieht immer das gesamte Sortiment“.</p>
+        </section>"""
         produkte = get_products(False, sort="category")
         lid = location["id"]
         sichtbar_ids = {str(p["id"]) for p in produkte if lid in product_visible_location_keys(p["visible_to"])}
@@ -7150,6 +7232,7 @@ class App(BaseHTTPRequestHandler):
             location["role"] = self.form_value(form, "role", "standard").strip()
             location["contact_name"] = self.form_value(form, "contact_name").strip()
             location["password"] = self.form_value(form, "password").strip()
+            location["full_assortment"] = bool(self.form_value(form, "full_assortment"))
         elif tab == "mindestbestand":
             location["min_stock_enabled"] = bool(self.form_value(form, "min_stock_enabled"))
             location["min_stock_items"] = self.collect_min_stock_items(form, "min")
@@ -8453,6 +8536,7 @@ class App(BaseHTTPRequestHandler):
                 <label class="vw-wachsen">CSV- oder Excel-Datei<input type="file" name="datei" accept=".csv,.xlsx" required></label>
                 <button class="primary" type="submit">Preise übernehmen</button>
             </form>
+            <p><a class="button" href="/admin/kalkulation/preise/vorlage.csv">⬇ Musterdatei herunterladen</a></p>
             <p class="vw-klein">Die Datei braucht eine Spalte mit dem Preis und eine mit Artikelnummer oder Produktname –
             wie die Spalten heißen, ist egal (Preis, EK, Einkaufspreis … / Artikelnummer, Artikel-Nr, Bezeichnung …).
             Zugeordnet wird zuerst über die Artikelnummer, sonst über den Produktnamen. Eine Spalte Inhalt oder Gebinde wird mitgenommen.</p>
@@ -8889,6 +8973,7 @@ class App(BaseHTTPRequestHandler):
             <div class="vw-dialog-kopf"><h3>Kontoauszug hochladen</h3><button type="button" class="vw-zu" data-schliessen aria-label="Schließen">×</button></div>
             <form method="post" action="/admin/buchhaltung/konto/upload" enctype="multipart/form-data" class="vw-formular">
                 <label>Datei aus dem Online-Banking<input type="file" name="datei" accept=".xml,.zip,.csv,.txt" required></label>
+                <p><a class="button" href="/admin/buchhaltung/bank/vorlage.csv">⬇ Musterdatei herunterladen</a></p>
                 <p class="vw-klein">Am besten im Format <b>CAMT.053</b> (XML oder ZIP). CSV geht auch – auch die Abrechnung von PayPal oder der Kreditkarte. Doppelte Zahlungen werden erkannt, überlappende Zeiträume sind also kein Problem.</p>
                 <label>Zu welchem Konto?<select name="konto">{konto_optionen}</select></label>
                 <label>… oder neues Konto anlegen<input name="konto_neu" placeholder="z. B. PayPal oder Kreditkarte"></label>
@@ -10411,12 +10496,14 @@ class App(BaseHTTPRequestHandler):
             con = db()
             now = datetime.now().isoformat(timespec="seconds")
             for name, category, package_size, source in prepared:
+                menge, einheit = gebinde_aus_text(package_size)
                 con.execute(
                     """
-                    INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at,
+                                          inhalt_menge, inhalt_einheit)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, package_size, category, source, visible_to_text, None, now),
+                    (name, package_size, category, source, visible_to_text, None, now, menge, einheit),
                 )
             con.commit()
             con.close()
@@ -10440,13 +10527,22 @@ class App(BaseHTTPRequestHandler):
                 with open(os.path.join(UPLOAD_DIR, image_filename), "wb") as f:
                     f.write(item.content)
         if name and package_size and source and categories:
+            preis_roh = self.form_value(form, "einkaufspreis").strip()
+            einkaufspreis = parse_decimal(preis_roh, 0) or None if preis_roh else None
+            inhalt_menge = parse_decimal(self.form_value(form, "inhalt_menge"), 0) or None
+            inhalt_einheit = self.form_value(form, "inhalt_einheit").strip() or None
+            if inhalt_menge is None:
+                inhalt_menge, inhalt_einheit = gebinde_aus_text(package_size)
             con = db()
             con.execute(
                 """
-                INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (name, package_size, category, source, visible_to, image_filename, created_at,
+                                      einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (name, package_size, category, source, visible_to_text, image_filename, datetime.now().isoformat(timespec="seconds")),
+                (name, package_size, category, source, visible_to_text, image_filename, datetime.now().isoformat(timespec="seconds"),
+                 einkaufspreis, inhalt_menge, inhalt_einheit or "kg",
+                 berlin_now().date().isoformat() if einkaufspreis is not None else None),
             )
             con.commit()
             con.close()
@@ -10501,7 +10597,16 @@ class App(BaseHTTPRequestHandler):
                 image_filename = slug_filename(item.filename)
                 with open(os.path.join(UPLOAD_DIR, image_filename), "wb") as f:
                     f.write(item.content)
+        preis_roh = self.form_value(form, "einkaufspreis").strip()
+        einkaufspreis = parse_decimal(preis_roh, 0) or None if preis_roh else None
+        inhalt_menge = parse_decimal(self.form_value(form, "inhalt_menge"), 0) or product["inhalt_menge"]
+        inhalt_einheit = self.form_value(form, "inhalt_einheit").strip() or product["inhalt_einheit"] or "kg"
+        artikelnummer = self.form_value(form, "artikelnummer").strip() or None
+        preis_stand = berlin_now().date().isoformat() if einkaufspreis != product["einkaufspreis"] else product["preis_stand"]
         con = db()
+        con.execute(
+            "UPDATE products SET einkaufspreis=?, inhalt_menge=?, inhalt_einheit=?, artikelnummer=?, preis_stand=? WHERE id=?",
+            (einkaufspreis, inhalt_menge, inhalt_einheit, artikelnummer, preis_stand, product_id))
         con.execute(
             """
             UPDATE products
