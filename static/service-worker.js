@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v71-scrollpos';
+const CACHE_NAME = 'opa-peters-bestellung-v72-kalkulation';
 const STATIC_ASSETS = [
   '/',
   '/login',
