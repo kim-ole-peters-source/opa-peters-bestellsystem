@@ -3277,3 +3277,12 @@ tr.ist-gewaehlt td{background:#FDF3DF}
 }
 @media (max-width:760px){.vw-tabelle.bh-buchungen{min-width:0}}
 .bh-buchungen td:nth-child(3) b{white-space:normal}
+
+/* Kalkulation */
+.vw-warnung { border-left: 4px solid #b91c1c; background: #fef2f2; }
+.vw-warnung h3 { color: #b91c1c; }
+.vw-rot { color: #b91c1c; }
+.vw-hinweis.vw-rot { border-left: 4px solid #b91c1c; background: #fef2f2; padding: 0.75rem 1rem; border-radius: 8px; }
+.vw-liste-punkte { margin: 0.25rem 0 0; padding-left: 1.1rem; line-height: 1.7; }
+.vw-liste-punkte li { margin-bottom: 0.15rem; }
+.vw-schmal-feld { max-width: 7.5rem; }

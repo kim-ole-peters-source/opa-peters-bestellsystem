@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-22-scrollpos"
+ASSET_VERSION = "2026-11-25-kalkulation"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2643,7 +2643,7 @@ ADMIN_NAV = [
     ("/admin/buchhaltung", "Buchhaltung", "📒", ["/admin/buchhaltung"], True),
     ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility"], True),
     ("/admin/settings", "Einstellungen", "⚙️", ["/admin/settings", "/admin/mehr"], True),
-    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/settings"], None),
+    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/settings"], None),
 ]
 
 
@@ -3041,6 +3041,328 @@ def tagesmail_uhr_starten():
             _time.sleep(300)
 
     threading.Thread(target=schleife, name="tagesmail", daemon=True).start()
+
+# =================================================================
+#   KALKULATION (Einkaufspreise, Rezepte, Zielmarge)
+# =================================================================
+# Einheiten werden auf drei Basen zurückgeführt: kg, l und st (Stück).
+EINHEITEN = {
+    "kg": ("kg", 1.0), "kilo": ("kg", 1.0), "kilogramm": ("kg", 1.0),
+    "g": ("kg", 0.001), "gr": ("kg", 0.001), "gramm": ("kg", 0.001),
+    "l": ("l", 1.0), "li": ("l", 1.0), "liter": ("l", 1.0),
+    "ml": ("l", 0.001), "cl": ("l", 0.01),
+    "st": ("st", 1.0), "stk": ("st", 1.0), "stueck": ("st", 1.0), "stück": ("st", 1.0),
+    "pg": ("st", 1.0), "kt": ("st", 1.0), "ki": ("st", 1.0), "bt": ("st", 1.0),
+    "ds": ("st", 1.0), "ei": ("st", 1.0), "sa": ("st", 1.0), "fl": ("st", 1.0),
+    "ka": ("st", 1.0), "pk": ("st", 1.0), "karton": ("st", 1.0), "packung": ("st", 1.0),
+    "rolle": ("st", 1.0), "beutel": ("st", 1.0), "blech": ("st", 1.0), "dose": ("st", 1.0),
+}
+EINHEIT_AUSWAHL = [("kg", "kg"), ("g", "g"), ("l", "l"), ("ml", "ml"), ("st", "Stück")]
+BASIS_NAME = {"kg": "kg", "l": "l", "st": "Stück"}
+
+
+def einheit_basis(einheit):
+    """'g' -> ('kg', 0.001). Unbekannt -> (None, 0)."""
+    schluessel = str(einheit or "").strip().lower().rstrip(".")
+    if schluessel in EINHEITEN:
+        return EINHEITEN[schluessel]
+    return (None, 0.0)
+
+
+def menge_in_basis(menge, einheit):
+    basis, faktor = einheit_basis(einheit)
+    if not basis:
+        return (None, 0.0)
+    return (basis, float(menge or 0) * faktor)
+
+
+def gebinde_aus_text(text):
+    """Rät Inhalt und Einheit aus der Gebindegröße, z. B. 'EI 13 KG' -> (13.0, 'kg')."""
+    roh = str(text or "").replace(",", ".")
+    treffer = re.findall(r"(\d+(?:\.\d+)?)\s*([A-Za-zÄÖÜäöüß]+)", roh)
+    letzte = None
+    for zahl, wort in treffer:
+        basis, faktor = einheit_basis(wort)
+        if basis:
+            letzte = (float(zahl) * faktor, basis)
+    if letzte:
+        return letzte
+    zahl = re.search(r"(\d+(?:\.\d+)?)", roh)
+    if zahl:
+        return (float(zahl.group(1)), "st")
+    return (1.0, "st")
+
+
+def kalk_init():
+    con = db()
+    add_column_if_missing(con, "products", "artikelnummer", "TEXT")
+    add_column_if_missing(con, "products", "einkaufspreis", "REAL")
+    add_column_if_missing(con, "products", "inhalt_menge", "REAL")
+    add_column_if_missing(con, "products", "inhalt_einheit", "TEXT")
+    add_column_if_missing(con, "products", "preis_stand", "TEXT")
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS rezepte (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            menge REAL NOT NULL DEFAULT 1,
+            einheit TEXT NOT NULL DEFAULT 'l',
+            portionen REAL NOT NULL DEFAULT 0,
+            verkaufspreis REAL NOT NULL DEFAULT 0,
+            mwst REAL NOT NULL DEFAULT 7,
+            faktor REAL,
+            aktiv INTEGER NOT NULL DEFAULT 1,
+            notiz TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS rezept_zutaten (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rezept_id INTEGER NOT NULL,
+            product_id INTEGER,
+            menge REAL NOT NULL DEFAULT 0,
+            einheit TEXT NOT NULL DEFAULT 'kg',
+            FOREIGN KEY(rezept_id) REFERENCES rezepte(id)
+        );
+        """
+    )
+    # Inhalt einmalig aus der Gebindegröße vorbelegen, damit nichts leer startet
+    offen = con.execute("SELECT id, package_size FROM products WHERE inhalt_menge IS NULL").fetchall()
+    for p in offen:
+        menge, einheit = gebinde_aus_text(p["package_size"])
+        con.execute("UPDATE products SET inhalt_menge=?, inhalt_einheit=? WHERE id=?", (menge, einheit, p["id"]))
+    con.commit()
+    con.close()
+
+
+def kalk_standardfaktor():
+    try:
+        wert = float(load_settings().get("kalk_faktor") or 0)
+    except (TypeError, ValueError):
+        wert = 0.0
+    return wert if wert > 0 else 4.0
+
+
+def kalk_standardfaktor_speichern(wert):
+    einstellungen = load_settings()
+    einstellungen["kalk_faktor"] = max(1.0, float(wert or 0))
+    save_settings(einstellungen)
+
+
+def produkt_basispreis(produkt):
+    """Einkaufspreis je kg / l / Stück. -> (preis, basis) oder (None, basis)."""
+    preis = produkt["einkaufspreis"] if produkt["einkaufspreis"] is not None else None
+    menge = produkt["inhalt_menge"] or 0
+    basis = (produkt["inhalt_einheit"] or "").lower() or None
+    if preis is None or menge <= 0 or not basis:
+        return (None, basis)
+    return (preis / menge, basis)
+
+
+def rezept_laden(rezept_id):
+    con = db()
+    rezept = con.execute("SELECT * FROM rezepte WHERE id=?", (rezept_id,)).fetchone()
+    if not rezept:
+        con.close()
+        return None, []
+    zutaten = con.execute(
+        """SELECT z.*, p.name AS produkt_name, p.package_size, p.source,
+                  p.einkaufspreis, p.inhalt_menge, p.inhalt_einheit
+           FROM rezept_zutaten z LEFT JOIN products p ON p.id = z.product_id
+           WHERE z.rezept_id=? ORDER BY z.id""",
+        (rezept_id,),
+    ).fetchall()
+    con.close()
+    return rezept, zutaten
+
+
+def rezept_rechnen(rezept, zutaten, standardfaktor=None):
+    """Rechnet eine Sorte durch. Gibt alles zurück, was die Seite anzeigen muss."""
+    standardfaktor = standardfaktor if standardfaktor else kalk_standardfaktor()
+    ziel_faktor = rezept["faktor"] if rezept["faktor"] else standardfaktor
+    posten, wareneinsatz, probleme = [], 0.0, []
+    for z in zutaten:
+        zeile = {
+            "id": z["id"], "produkt_id": z["product_id"], "name": z["produkt_name"] or "– gelöschtes Produkt –",
+            "menge": z["menge"], "einheit": z["einheit"], "gebinde": z["package_size"] or "",
+            "kosten": None, "hinweis": "",
+        }
+        basis_zutat, menge_basis = menge_in_basis(z["menge"], z["einheit"])
+        if not z["product_id"]:
+            zeile["hinweis"] = "Produkt fehlt"
+        elif z["einkaufspreis"] is None:
+            zeile["hinweis"] = "kein Einkaufspreis hinterlegt"
+        elif not (z["inhalt_menge"] or 0) > 0 or not z["inhalt_einheit"]:
+            zeile["hinweis"] = "Inhalt je Gebinde fehlt"
+        elif not basis_zutat:
+            zeile["hinweis"] = f"Einheit „{z['einheit']}“ unbekannt"
+        elif basis_zutat != (z["inhalt_einheit"] or "").lower():
+            zeile["hinweis"] = f"Einheit passt nicht zum Gebinde ({BASIS_NAME.get(z['inhalt_einheit'], z['inhalt_einheit'])})"
+        else:
+            je_basis = z["einkaufspreis"] / z["inhalt_menge"]
+            zeile["kosten"] = je_basis * menge_basis
+            wareneinsatz += zeile["kosten"]
+        if zeile["hinweis"]:
+            probleme.append(f"{zeile['name']}: {zeile['hinweis']}")
+        posten.append(zeile)
+
+    portionen = rezept["portionen"] or 0
+    je_portion = (wareneinsatz / portionen) if portionen > 0 else None
+    mwst = rezept["mwst"] if rezept["mwst"] is not None else 7.0
+    vk_brutto = rezept["verkaufspreis"] or 0
+    vk_netto = vk_brutto / (1 + mwst / 100) if vk_brutto else 0.0
+    ist_faktor = (vk_netto / je_portion) if (je_portion and je_portion > 0 and vk_netto) else None
+    mindest_netto = je_portion * ziel_faktor if je_portion else None
+    mindest_brutto = mindest_netto * (1 + mwst / 100) if mindest_netto is not None else None
+    if probleme:
+        status = "unvollstaendig"
+    elif ist_faktor is None:
+        status = "offen"
+    elif ist_faktor + 0.001 < ziel_faktor:
+        status = "unter_ziel"
+    else:
+        status = "ok"
+    return {
+        "posten": posten, "wareneinsatz": wareneinsatz, "je_portion": je_portion,
+        "vk_brutto": vk_brutto, "vk_netto": vk_netto, "mwst": mwst,
+        "ziel_faktor": ziel_faktor, "ist_faktor": ist_faktor,
+        "mindest_netto": mindest_netto, "mindest_brutto": mindest_brutto,
+        "status": status, "probleme": probleme,
+        "luecke_brutto": (mindest_brutto - vk_brutto) if (mindest_brutto is not None and vk_brutto and mindest_brutto > vk_brutto) else None,
+        "teuerste": max([p for p in posten if p["kosten"] is not None], key=lambda p: p["kosten"], default=None),
+    }
+
+
+def alle_rezepte_rechnen(nur_aktive=False):
+    con = db()
+    wo = " WHERE aktiv=1" if nur_aktive else ""
+    rezepte = con.execute("SELECT * FROM rezepte" + wo + " ORDER BY name COLLATE NOCASE").fetchall()
+    con.close()
+    standard = kalk_standardfaktor()
+    ergebnis = []
+    for r in rezepte:
+        _, zutaten = rezept_laden(r["id"])
+        ergebnis.append((r, rezept_rechnen(r, zutaten, standard)))
+    return ergebnis
+
+
+def preisliste_zeilen_lesen(uploaded_file):
+    """Liest CSV oder Excel roh ein: Liste von Dicts mit den Spaltenüberschriften der Datei."""
+    name = (uploaded_file.filename or "").lower()
+    if name.endswith(".xlsx"):
+        try:
+            from openpyxl import load_workbook
+        except Exception as exc:
+            raise RuntimeError("Für Excel-Dateien bitte openpyxl installieren.") from exc
+        wb = load_workbook(io.BytesIO(uploaded_file.content), read_only=True, data_only=True)
+        rows = list(wb.active.iter_rows(values_only=True))
+        if not rows:
+            return []
+        kopf = [str(c or "").strip() for c in rows[0]]
+        return [dict(zip(kopf, ["" if c is None else str(c) for c in zeile])) for zeile in rows[1:]]
+    if name.endswith(".csv") or name.endswith(".txt"):
+        roh = uploaded_file.content or b""
+        try:
+            text = roh.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = roh.decode("latin-1", errors="replace")
+        kopfzeile = text.splitlines()[0] if text.strip() else ""
+        # Deutsche Exporte trennen mit Semikolon; Komma erst, wenn sonst nichts passt
+        trenner = max((";", "\t", "|"), key=kopfzeile.count)
+        if kopfzeile.count(trenner) == 0:
+            trenner = "," if kopfzeile.count(",") else ";"
+        return [dict(zeile) for zeile in csv.DictReader(io.StringIO(text), delimiter=trenner)]
+    raise RuntimeError("Bitte eine CSV- oder Excel-Datei (.xlsx) auswählen.")
+
+
+def spalte_finden(kopfzeilen, begriffe, belegt=()):
+    """Sucht die Spalte je Begriff in der Reihenfolge der Begriffe – der genaueste zuerst."""
+    for b in begriffe:
+        for spalte in kopfzeilen:
+            if spalte in belegt:
+                continue
+            if b in normalize_text_key(spalte):
+                return spalte
+    return None
+
+
+def preisliste_uebernehmen(zeilen):
+    """Ordnet Preiszeilen den Produkten zu: erst Artikelnummer, dann Name. -> (gesetzt, offen)"""
+    if not zeilen:
+        return (0, [])
+    kopf = list(zeilen[0].keys())
+    sp_nr = spalte_finden(kopf, ["artikelnummer", "artikelnr", "artnr", "artikelno", "nummer", "nr"])
+    sp_preis = spalte_finden(kopf, ["einkaufspreis", "ekpreis", "preis", "einkauf", "netto", "betrag"], (sp_nr,))
+    sp_inhalt = spalte_finden(kopf, ["inhalt", "gebinde", "vpe", "menge"], (sp_nr, sp_preis))
+    sp_name = spalte_finden(kopf, ["artikelbezeichnung", "produktname", "bezeichnung", "produkt", "name", "artikel"],
+                            (sp_nr, sp_preis, sp_inhalt))
+    if not sp_preis or not (sp_nr or sp_name):
+        raise RuntimeError("In der Datei fehlt eine Preisspalte oder eine Spalte mit Artikelnummer bzw. Produktname.")
+
+    con = db()
+    produkte = con.execute("SELECT id, name, artikelnummer, package_size, inhalt_menge, inhalt_einheit FROM products").fetchall()
+    nach_nr, nach_name = {}, {}
+    for p in produkte:
+        if p["artikelnummer"]:
+            nach_nr.setdefault(str(p["artikelnummer"]).strip().lstrip("0") or "0", p["id"])
+        nach_name.setdefault(normalize_text_key(p["name"]), p["id"])
+
+    heute = berlin_now().date().isoformat()
+    gesetzt, offen = 0, []
+    for zeile in zeilen:
+        preis = parse_decimal(zeile.get(sp_preis), 0.0)
+        nummer = str(zeile.get(sp_nr) or "").strip() if sp_nr else ""
+        bezeichnung = str(zeile.get(sp_name) or "").strip() if sp_name else ""
+        if preis <= 0 or not (nummer or bezeichnung):
+            continue
+        pid = nach_nr.get(nummer.lstrip("0") or "0") if nummer else None
+        if not pid and bezeichnung:
+            pid = nach_name.get(normalize_text_key(bezeichnung))
+        if not pid:
+            offen.append(f"{nummer + ' ' if nummer else ''}{bezeichnung}".strip())
+            continue
+        con.execute("UPDATE products SET einkaufspreis=?, preis_stand=? WHERE id=?", (preis, heute, pid))
+        if nummer:
+            con.execute("UPDATE products SET artikelnummer=COALESCE(NULLIF(artikelnummer,''), ?) WHERE id=?", (nummer, pid))
+        if sp_inhalt:
+            menge, einheit = gebinde_aus_text(zeile.get(sp_inhalt))
+            if menge > 0:
+                con.execute("UPDATE products SET inhalt_menge=?, inhalt_einheit=? WHERE id=?", (menge, einheit, pid))
+        gesetzt += 1
+    con.commit()
+    con.close()
+    return (gesetzt, offen)
+
+
+def geld(wert):
+    if wert is None:
+        return "–"
+    return f"{wert:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def zahl_kurz(wert):
+    if wert is None:
+        return ""
+    try:
+        zahl = float(wert)
+    except (TypeError, ValueError):
+        return str(wert)
+    if abs(zahl - round(zahl)) < 0.001:
+        return str(int(round(zahl)))
+    return f"{zahl:.3f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def faktor_text(wert):
+    if not wert:
+        return "–"
+    return (f"{wert:.1f}".rstrip("0").rstrip(".").replace(".", ",") or "0") + "×"
+
+
+def einheit_auswahl(feldname, aktuell):
+    aktuell = (aktuell or "").lower()
+    optionen = "".join(
+        f'<option value="{wert}"{" selected" if wert == aktuell else ""}>{esc(label)}</option>'
+        for wert, label in EINHEIT_AUSWAHL)
+    return f'<select name="{feldname}" aria-label="Einheit">{optionen}</select>'
 
 # =====================================================================
 #   VERWALTUNG NEU (November 2026) – gemeinsame Hilfsfunktionen
@@ -3567,6 +3889,12 @@ class App(BaseHTTPRequestHandler):
             return self.show_bh_export_zip(query=parse_qs(parsed.query))
         if path == "/beleg":
             return self.show_beleg_foto(query=parse_qs(parsed.query))
+        if path == "/admin/kalkulation":
+            return self.show_kalkulation(query=parse_qs(parsed.query))
+        if path == "/admin/kalkulation/rezept":
+            return self.show_kalk_rezept(query=parse_qs(parsed.query))
+        if path == "/admin/kalkulation/preise":
+            return self.show_kalk_preise(query=parse_qs(parsed.query))
         if path == "/admin/products":
             return self.show_products(query=parse_qs(parsed.query))
         if path == "/admin/edit-product":
@@ -5146,6 +5474,7 @@ class App(BaseHTTPRequestHandler):
         punkte = [
             ("/admin/products", "📦", "Sortiment", "Produkte, Warengruppen, Import"),
             ("/admin/time", "👥", "Team", "Zeiten, Personen, Aufgaben"),
+            ("/admin/kalkulation", "🧮", "Kalkulation", "Einkaufspreise, Rezepte, Zielmarge"),
             ("/admin/buchhaltung", "📒", "Buchhaltung", "Belege, Kontoauszüge, Monatsexport"),
             ("/admin/locations", "📍", "Standorte", "Zugänge, Sortiment je Standort, Mindestbestand"),
             ("/admin/settings", "⚙️", "Einstellungen", "E-Mail, PIN, Push, Sicherung"),
@@ -7673,6 +8002,421 @@ class App(BaseHTTPRequestHandler):
 
 
     # =================================================================
+    #   KALKULATION: Preise · Rezepte · Zielmarge
+    # =================================================================
+    def kalk_kopf(self, titel, unter="", aktionen="", aktiv="uebersicht"):
+        reiter = [
+            ("uebersicht", "Sorten", "/admin/kalkulation"),
+            ("preise", "Einkaufspreise", "/admin/kalkulation/preise"),
+        ]
+        return admin_kopf(titel, unter, aktionen, reiter, aktiv)
+
+    def show_kalkulation(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        standard = kalk_standardfaktor()
+        daten = alle_rezepte_rechnen()
+        unter_ziel = [(r, k) for r, k in daten if k["status"] == "unter_ziel"]
+        unvollstaendig = [(r, k) for r, k in daten if k["status"] == "unvollstaendig"]
+
+        zeilen = []
+        for rezept, k in daten:
+            if k["status"] == "unter_ziel":
+                marke = '<span class="vw-marke fehlt">unter Ziel</span>'
+            elif k["status"] == "ok":
+                marke = '<span class="vw-marke da">ok</span>'
+            elif k["status"] == "unvollstaendig":
+                marke = '<span class="vw-marke frage">Daten fehlen</span>'
+            else:
+                marke = '<span class="vw-marke grau">offen</span>'
+            hinweis = ""
+            if k["status"] == "unter_ziel" and k["luecke_brutto"]:
+                teuerste = k["teuerste"]
+                treiber = f' · größter Posten: {esc(teuerste["name"])}' if teuerste else ""
+                hinweis = (f'<small class="vw-klein-block">{geld(k["luecke_brutto"])} zu günstig – '
+                           f'mindestens {geld(k["mindest_brutto"])} brutto{treiber}</small>')
+            elif k["status"] == "unvollstaendig":
+                hinweis = f'<small class="vw-klein-block">{esc(k["probleme"][0])}{" …" if len(k["probleme"]) > 1 else ""}</small>'
+            zeilen.append(f"""
+            <tr>
+                <td><a href="/admin/kalkulation/rezept?id={rezept['id']}"><b>{esc(rezept['name'])}</b></a>
+                    <small class="vw-klein-block">{zahl_kurz(rezept['menge'])} {esc(rezept['einheit'])}
+                    {f"· {zahl_kurz(rezept['portionen'])} Portionen" if rezept['portionen'] else ""}</small></td>
+                <td class="zahl">{geld(k['je_portion']) if k['je_portion'] is not None else '–'}</td>
+                <td class="zahl">{geld(k['vk_brutto']) if k['vk_brutto'] else '–'}</td>
+                <td class="zahl">{faktor_text(k['ist_faktor'])}</td>
+                <td class="zahl">{faktor_text(k['ziel_faktor'])}</td>
+                <td>{marke}{hinweis}</td>
+            </tr>""")
+
+        warnung = ""
+        if unter_ziel:
+            punkte = "".join(
+                f'<li><a href="/admin/kalkulation/rezept?id={r["id"]}">{esc(r["name"])}</a> – '
+                f'{faktor_text(k["ist_faktor"])} statt {faktor_text(k["ziel_faktor"])}, '
+                f'{geld(k["luecke_brutto"])} fehlen</li>'
+                for r, k in unter_ziel if k["luecke_brutto"])
+            warnung = f"""
+            <section class="vw-karte vw-warnung">
+                <h3>{len(unter_ziel)} {"Sorte liegt" if len(unter_ziel) == 1 else "Sorten liegen"} unter der Zielmarge</h3>
+                <ul class="vw-liste-punkte">{punkte}</ul>
+            </section>"""
+
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.kalk_kopf('Kalkulation',
+                        f'Wareneinsatz mal Faktor ergibt den Mindestpreis. Standardfaktor {faktor_text(standard)} – je Sorte änderbar.',
+                        '<a class="button primary" href="/admin/kalkulation/rezept?id=neu">+ Neue Sorte</a>')}
+        {warnung}
+        <section class="vw-karte">
+            <table class="vw-tabelle">
+                <thead><tr><th>Sorte</th><th class="zahl">Wareneinsatz je Portion</th><th class="zahl">Verkauf brutto</th>
+                <th class="zahl">Faktor</th><th class="zahl">Ziel</th><th>Status</th></tr></thead>
+                <tbody>{''.join(zeilen) or '<tr><td colspan="6"><p class="vw-leer">Noch keine Sorte angelegt. Oben rechts auf „Neue Sorte“.</p></td></tr>'}</tbody>
+            </table>
+            {f'<p class="vw-klein">{len(unvollstaendig)} Sorte(n) lassen sich noch nicht rechnen, weil Einkaufspreise oder Gebindeangaben fehlen – siehe <a href="/admin/kalkulation/preise">Einkaufspreise</a>.</p>' if unvollstaendig else ''}
+        </section>
+        <section class="vw-karte vw-schmal">
+            <h3>Zielmarge</h3>
+            <form method="post" action="/admin/kalkulation/einstellungen" class="vw-inline-form">
+                <label class="vw-wachsen">Standard-Aufschlagsfaktor
+                    <input name="faktor" inputmode="decimal" value="{zahl_kurz(standard)}" required></label>
+                <button class="primary" type="submit">Speichern</button>
+            </form>
+            <p class="vw-klein">Faktor 4 heißt: Der Nettoverkaufspreis soll mindestens das Vierfache des Wareneinsatzes betragen.
+            Verglichen wird netto – die Mehrwertsteuer rechnet das System je Sorte heraus.</p>
+        </section>
+        """
+        self.admin_seite("Kalkulation", body)
+
+    def show_kalk_rezept(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        kennung = self.query_text(query, "id")
+        neu = (kennung == "neu" or not kennung)
+        if neu:
+            body = f"""
+            {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+            {self.kalk_kopf('Neue Sorte', 'Erst anlegen, danach die Zutaten eintragen.')}
+            <section class="vw-karte vw-schmal">
+                <form method="post" action="/admin/kalkulation/rezept/neu" class="vw-formular">
+                    <label>Name der Sorte<input name="name" required placeholder="z. B. Stracciatella"></label>
+                    <div class="vw-zwei">
+                        <label>Hergestellte Menge<input name="menge" inputmode="decimal" value="4,5" required></label>
+                        <label>Einheit{einheit_auswahl('einheit', 'l')}</label>
+                    </div>
+                    <label>Portionen je Charge<input name="portionen" inputmode="decimal" placeholder="z. B. 45 Kugeln"></label>
+                    <button class="primary" type="submit">Anlegen</button>
+                </form>
+            </section>"""
+            return self.admin_seite("Neue Sorte", body)
+
+        rezept, zutaten = rezept_laden(int(kennung) if kennung.isdigit() else -1)
+        if not rezept:
+            return self.redirect("/admin/kalkulation?error=" + quote_plus("Diese Sorte gibt es nicht mehr."))
+        k = rezept_rechnen(rezept, zutaten)
+
+        zutat_zeilen = []
+        for p in k["posten"]:
+            hinweis = f'<small class="vw-klein-block vw-rot">{esc(p["hinweis"])}</small>' if p["hinweis"] else ""
+            zutat_zeilen.append(f"""
+            <tr>
+                <td><b>{esc(p['name'])}</b><small class="vw-klein-block">{esc(p['gebinde'])}</small>{hinweis}</td>
+                <td>
+                    <form method="post" action="/admin/kalkulation/zutat/speichern" class="vw-inline-form">
+                        <input type="hidden" name="zutat_id" value="{p['id']}">
+                        <input type="hidden" name="rezept_id" value="{rezept['id']}">
+                        <input name="menge" inputmode="decimal" value="{zahl_kurz(p['menge'])}" aria-label="Menge" required>
+                        {einheit_auswahl('einheit', p['einheit'])}
+                        <button class="button" type="submit">Ändern</button>
+                    </form>
+                </td>
+                <td class="zahl">{geld(p['kosten']) if p['kosten'] is not None else '–'}</td>
+                <td>
+                    <form method="post" action="/admin/kalkulation/zutat/loeschen" data-vw-confirm="Zutat entfernen?">
+                        <input type="hidden" name="zutat_id" value="{p['id']}">
+                        <input type="hidden" name="rezept_id" value="{rezept['id']}">
+                        <button class="danger" type="submit">Entfernen</button>
+                    </form>
+                </td>
+            </tr>""")
+
+        con = db()
+        produkte = con.execute(
+            "SELECT id, name, package_size, einkaufspreis FROM products WHERE active=1 ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        con.close()
+        auswahl = "".join(
+            f'<option value="{p["id"]}">{esc(p["name"])} · {esc(p["package_size"] or "")}'
+            f'{"" if p["einkaufspreis"] is not None else " (kein Preis)"}</option>' for p in produkte)
+
+        if k["status"] == "unter_ziel":
+            ampel = (f'<div class="vw-hinweis vw-rot"><b>Unter Zielmarge.</b> Mindestens {geld(k["mindest_brutto"])} brutto '
+                     f'je Portion nötig, aktuell {geld(k["vk_brutto"])} – es fehlen {geld(k["luecke_brutto"])}.</div>')
+        elif k["status"] == "ok":
+            ampel = f'<div class="vw-hinweis"><b>Marge erreicht.</b> Faktor {faktor_text(k["ist_faktor"])} bei Ziel {faktor_text(k["ziel_faktor"])}.</div>'
+        elif k["status"] == "unvollstaendig":
+            ampel = ('<div class="vw-hinweis vw-rot"><b>Noch nicht rechenbar:</b><br>'
+                     + "<br>".join(esc(p) for p in k["probleme"]) + "</div>")
+        else:
+            ampel = '<div class="vw-hinweis">Trag Portionen und Verkaufspreis ein, dann rechnet das System die Marge aus.</div>'
+
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.kalk_kopf(rezept['name'], 'Zutaten, Preise und Marge dieser Sorte.',
+                        '<a class="button" href="/admin/kalkulation">Zurück zur Übersicht</a>')}
+        {ampel}
+        <section class="vw-karte">
+            <h3>Zutaten</h3>
+            <table class="vw-tabelle">
+                <thead><tr><th>Produkt</th><th>Menge</th><th class="zahl">Kosten</th><th></th></tr></thead>
+                <tbody>{''.join(zutat_zeilen) or '<tr><td colspan="4"><p class="vw-leer">Noch keine Zutat eingetragen.</p></td></tr>'}</tbody>
+                <tfoot><tr><td><b>Wareneinsatz je {zahl_kurz(rezept['menge'])} {esc(rezept['einheit'])}</b></td><td></td>
+                <td class="zahl"><b>{geld(k['wareneinsatz'])}</b></td><td></td></tr></tfoot>
+            </table>
+            <form method="post" action="/admin/kalkulation/zutat/speichern" class="vw-inline-form">
+                <input type="hidden" name="rezept_id" value="{rezept['id']}">
+                <label class="vw-wachsen">Zutat hinzufügen<select name="product_id" required>
+                    <option value="">Produkt wählen …</option>{auswahl}</select></label>
+                <label>Menge<input name="menge" inputmode="decimal" required></label>
+                <label>Einheit{einheit_auswahl('einheit', 'kg')}</label>
+                <button class="primary" type="submit">Hinzufügen</button>
+            </form>
+        </section>
+        <section class="vw-karte vw-schmal">
+            <h3>Preis und Ziel</h3>
+            <form method="post" action="/admin/kalkulation/rezept/speichern" class="vw-formular">
+                <input type="hidden" name="rezept_id" value="{rezept['id']}">
+                <label>Name<input name="name" value="{esc(rezept['name'])}" required></label>
+                <div class="vw-zwei">
+                    <label>Hergestellte Menge<input name="menge" inputmode="decimal" value="{zahl_kurz(rezept['menge'])}" required></label>
+                    <label>Einheit{einheit_auswahl('einheit', rezept['einheit'])}</label>
+                </div>
+                <div class="vw-zwei">
+                    <label>Portionen je Charge<input name="portionen" inputmode="decimal" value="{zahl_kurz(rezept['portionen']) if rezept['portionen'] else ''}"></label>
+                    <label>Verkaufspreis je Portion (brutto)<input name="verkaufspreis" inputmode="decimal" value="{zahl_kurz(rezept['verkaufspreis']) if rezept['verkaufspreis'] else ''}"></label>
+                </div>
+                <div class="vw-zwei">
+                    <label>Mehrwertsteuer %<input name="mwst" inputmode="decimal" value="{zahl_kurz(k['mwst'])}"></label>
+                    <label>Zielfaktor (leer = Standard {faktor_text(kalk_standardfaktor())})
+                        <input name="faktor" inputmode="decimal" value="{zahl_kurz(rezept['faktor']) if rezept['faktor'] else ''}"></label>
+                </div>
+                <button class="primary" type="submit">Speichern</button>
+            </form>
+            <p class="vw-klein">Netto-Verkaufspreis: {geld(k['vk_netto']) if k['vk_netto'] else '–'} ·
+            Wareneinsatz je Portion: {geld(k['je_portion']) if k['je_portion'] is not None else '–'} ·
+            Mindestpreis brutto: {geld(k['mindest_brutto']) if k['mindest_brutto'] is not None else '–'}</p>
+            <form method="post" action="/admin/kalkulation/rezept/loeschen" data-vw-confirm="Sorte „{esc(rezept['name'])}“ mit allen Zutaten löschen?">
+                <input type="hidden" name="rezept_id" value="{rezept['id']}">
+                <button class="danger" type="submit">Sorte löschen</button>
+            </form>
+        </section>
+        """
+        self.admin_seite(rezept["name"], body)
+
+    def show_kalk_preise(self, query=None):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        suche = self.query_text(query, "q")
+        nur_ohne = self.query_text(query, "filter") == "ohne"
+        con = db()
+        produkte = con.execute(
+            "SELECT id, name, package_size, source, artikelnummer, einkaufspreis, inhalt_menge, inhalt_einheit, preis_stand "
+            "FROM products WHERE active=1 ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        con.close()
+        if suche:
+            s = normalize_text_key(suche)
+            produkte = [p for p in produkte if s in normalize_text_key(f"{p['name']} {p['source']} {p['artikelnummer'] or ''}")]
+        ohne_preis = [p for p in produkte if p["einkaufspreis"] is None]
+        if nur_ohne:
+            produkte = ohne_preis
+
+        zeilen = []
+        for p in produkte[:400]:
+            basis_preis, basis = produkt_basispreis(p)
+            je_basis = f'{geld(basis_preis)} / {BASIS_NAME.get(basis, basis or "?")}' if basis_preis is not None else "–"
+            zeilen.append(f"""
+            <tr>
+                <td><b>{esc(p['name'])}</b><small class="vw-klein-block">{esc(p['package_size'] or '')} · {esc(p['source'] or '')}</small></td>
+                <td><input name="nr_{p['id']}" value="{esc(p['artikelnummer'] or '')}" aria-label="Artikelnummer" class="vw-schmal-feld"></td>
+                <td><input name="preis_{p['id']}" inputmode="decimal" value="{zahl_kurz(p['einkaufspreis']) if p['einkaufspreis'] is not None else ''}" aria-label="Einkaufspreis" class="vw-schmal-feld"></td>
+                <td><input name="inhalt_{p['id']}" inputmode="decimal" value="{zahl_kurz(p['inhalt_menge']) if p['inhalt_menge'] else ''}" aria-label="Inhalt" class="vw-schmal-feld">
+                    {einheit_auswahl(f"einheit_{p['id']}", p['inhalt_einheit'] or 'kg')}</td>
+                <td class="zahl">{je_basis}<small class="vw-klein-block">{esc(p['preis_stand'] or '')}</small></td>
+            </tr>""")
+
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.kalk_kopf('Einkaufspreise', f'{len(ohne_preis)} von {len(produkte) if not nur_ohne else len(ohne_preis)} angezeigten Produkten haben noch keinen Preis.', '', 'preise')}
+        <section class="vw-karte vw-schmal">
+            <h3>Preisliste hochladen</h3>
+            <form method="post" action="/admin/kalkulation/preise/import" enctype="multipart/form-data" class="vw-inline-form">
+                <label class="vw-wachsen">CSV- oder Excel-Datei<input type="file" name="datei" accept=".csv,.xlsx" required></label>
+                <button class="primary" type="submit">Preise übernehmen</button>
+            </form>
+            <p class="vw-klein">Die Datei braucht eine Spalte mit dem Preis und eine mit Artikelnummer oder Produktname –
+            wie die Spalten heißen, ist egal (Preis, EK, Einkaufspreis … / Artikelnummer, Artikel-Nr, Bezeichnung …).
+            Zugeordnet wird zuerst über die Artikelnummer, sonst über den Produktnamen. Eine Spalte Inhalt oder Gebinde wird mitgenommen.</p>
+        </section>
+        <section class="vw-karte">
+            <form method="get" action="/admin/kalkulation/preise" class="vw-inline-form">
+                <label class="vw-wachsen">Suchen<input name="q" value="{esc(suche)}" placeholder="Produkt, Händler oder Artikelnummer"></label>
+                <button class="button" type="submit">Suchen</button>
+                <a class="button" href="/admin/kalkulation/preise?filter={'' if nur_ohne else 'ohne'}">{'Alle zeigen' if nur_ohne else 'Nur ohne Preis'}</a>
+            </form>
+            <form method="post" action="/admin/kalkulation/preise/speichern">
+                <table class="vw-tabelle">
+                    <thead><tr><th>Produkt</th><th>Artikelnr.</th><th>Preis je Gebinde</th><th>Inhalt je Gebinde</th><th class="zahl">ergibt</th></tr></thead>
+                    <tbody>{''.join(zeilen) or '<tr><td colspan="5"><p class="vw-leer">Keine Produkte gefunden.</p></td></tr>'}</tbody>
+                </table>
+                <div class="vw-knopfreihe"><button class="primary" type="submit">Änderungen speichern</button></div>
+            </form>
+            {f'<p class="vw-klein">Es werden die ersten 400 Treffer angezeigt – nutze die Suche, um gezielt zu arbeiten.</p>' if len(produkte) > 400 else ''}
+        </section>
+        """
+        self.admin_seite("Einkaufspreise", body)
+
+    # ---------------------------------------------------------- Kalkulation: Formulare
+    def handle_kalk_einstellungen(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        faktor = parse_decimal(self.form_value(form, "faktor"), 0)
+        if faktor < 1:
+            return self.redirect("/admin/kalkulation?error=" + quote_plus("Bitte einen Faktor ab 1 eintragen."))
+        kalk_standardfaktor_speichern(faktor)
+        self.redirect("/admin/kalkulation?msg=" + quote_plus(f"Standardfaktor auf {zahl_kurz(faktor)} gesetzt."))
+
+    def handle_kalk_rezept(self, aktion):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        con = db()
+        if aktion == "neu":
+            name = self.form_value(form, "name").strip()
+            if not name:
+                con.close()
+                return self.redirect("/admin/kalkulation/rezept?id=neu&error=" + quote_plus("Bitte einen Namen eintragen."))
+            cur = con.execute(
+                "INSERT INTO rezepte (name, menge, einheit, portionen, created_at) VALUES (?, ?, ?, ?, ?)",
+                (name, max(0.0001, parse_decimal(self.form_value(form, "menge"), 1)),
+                 self.form_value(form, "einheit") or "l",
+                 parse_decimal(self.form_value(form, "portionen"), 0), berlin_now().isoformat(timespec="seconds")))
+            neu_id = cur.lastrowid
+            con.commit()
+            con.close()
+            return self.redirect(f"/admin/kalkulation/rezept?id={neu_id}&msg=" + quote_plus("Sorte angelegt – jetzt die Zutaten eintragen."))
+
+        rezept_id = self.form_value(form, "rezept_id")
+        rezept_id = int(rezept_id) if str(rezept_id).isdigit() else 0
+        if aktion == "loeschen":
+            con.execute("DELETE FROM rezept_zutaten WHERE rezept_id=?", (rezept_id,))
+            con.execute("DELETE FROM rezepte WHERE id=?", (rezept_id,))
+            con.commit()
+            con.close()
+            return self.redirect("/admin/kalkulation?msg=" + quote_plus("Sorte gelöscht."))
+
+        faktor_roh = self.form_value(form, "faktor").strip()
+        con.execute(
+            """UPDATE rezepte SET name=?, menge=?, einheit=?, portionen=?, verkaufspreis=?, mwst=?, faktor=? WHERE id=?""",
+            (self.form_value(form, "name").strip() or "Ohne Namen",
+             max(0.0001, parse_decimal(self.form_value(form, "menge"), 1)),
+             self.form_value(form, "einheit") or "l",
+             parse_decimal(self.form_value(form, "portionen"), 0),
+             parse_decimal(self.form_value(form, "verkaufspreis"), 0),
+             parse_decimal(self.form_value(form, "mwst"), 7),
+             parse_decimal(faktor_roh, 0) or None,
+             rezept_id))
+        con.commit()
+        con.close()
+        self.redirect(f"/admin/kalkulation/rezept?id={rezept_id}&msg=" + quote_plus("Gespeichert."))
+
+    def handle_kalk_zutat(self, aktion):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        rezept_id = self.form_value(form, "rezept_id")
+        rezept_id = int(rezept_id) if str(rezept_id).isdigit() else 0
+        zutat_id = self.form_value(form, "zutat_id")
+        zutat_id = int(zutat_id) if str(zutat_id).isdigit() else 0
+        con = db()
+        if aktion == "loeschen":
+            con.execute("DELETE FROM rezept_zutaten WHERE id=? AND rezept_id=?", (zutat_id, rezept_id))
+        else:
+            menge = parse_decimal(self.form_value(form, "menge"), 0)
+            einheit = self.form_value(form, "einheit") or "kg"
+            if zutat_id:
+                con.execute("UPDATE rezept_zutaten SET menge=?, einheit=? WHERE id=? AND rezept_id=?",
+                            (menge, einheit, zutat_id, rezept_id))
+            else:
+                produkt_id = self.form_value(form, "product_id")
+                if not str(produkt_id).isdigit() or menge <= 0:
+                    con.close()
+                    return self.redirect(f"/admin/kalkulation/rezept?id={rezept_id}&error=" + quote_plus("Bitte Produkt und Menge angeben."))
+                con.execute("INSERT INTO rezept_zutaten (rezept_id, product_id, menge, einheit) VALUES (?, ?, ?, ?)",
+                            (rezept_id, int(produkt_id), menge, einheit))
+        con.commit()
+        con.close()
+        self.redirect(f"/admin/kalkulation/rezept?id={rezept_id}")
+
+    def handle_kalk_preise_import(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        datei = form.get("datei")
+        datei = datei[0] if isinstance(datei, list) else datei
+        if not isinstance(datei, UploadedFile) or not datei.content:
+            return self.redirect("/admin/kalkulation/preise?error=" + quote_plus("Bitte eine Datei auswählen."))
+        try:
+            zeilen = preisliste_zeilen_lesen(datei)
+            gesetzt, offen = preisliste_uebernehmen(zeilen)
+        except Exception as fehler:
+            return self.redirect("/admin/kalkulation/preise?error=" + quote_plus(str(fehler)[:200]))
+        meldung = f"{gesetzt} Preise übernommen."
+        if offen:
+            beispiele = ", ".join(offen[:5])
+            meldung += f" {len(offen)} Zeilen ohne passendes Produkt: {beispiele}" + (" …" if len(offen) > 5 else "")
+        self.redirect("/admin/kalkulation/preise?msg=" + quote_plus(meldung[:400]))
+
+    def handle_kalk_preise_speichern(self):
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        heute = berlin_now().date().isoformat()
+        con = db()
+        geaendert = 0
+        for schluessel in list(form.keys()):
+            if not schluessel.startswith("preis_"):
+                continue
+            kennung = schluessel[6:]
+            if not kennung.isdigit():
+                continue
+            pid = int(kennung)
+            alt = con.execute("SELECT einkaufspreis, inhalt_menge, inhalt_einheit, artikelnummer, preis_stand FROM products WHERE id=?", (pid,)).fetchone()
+            if not alt:
+                continue
+            preis_roh = self.form_value(form, schluessel).strip()
+            preis = parse_decimal(preis_roh, 0) if preis_roh else None
+            inhalt = parse_decimal(self.form_value(form, f"inhalt_{pid}"), 0)
+            einheit = self.form_value(form, f"einheit_{pid}") or alt["inhalt_einheit"] or "kg"
+            nummer = self.form_value(form, f"nr_{pid}").strip()
+            neu_preis = preis if preis else None
+            if (neu_preis != alt["einkaufspreis"] or (inhalt and inhalt != alt["inhalt_menge"])
+                    or einheit != (alt["inhalt_einheit"] or "") or nummer != (alt["artikelnummer"] or "")):
+                con.execute(
+                    "UPDATE products SET einkaufspreis=?, inhalt_menge=?, inhalt_einheit=?, artikelnummer=?, preis_stand=? WHERE id=?",
+                    (neu_preis, inhalt or alt["inhalt_menge"], einheit, nummer or None,
+                     heute if neu_preis != alt["einkaufspreis"] else alt["preis_stand"], pid))
+                geaendert += 1
+        con.commit()
+        con.close()
+        self.redirect("/admin/kalkulation/preise?msg=" + quote_plus(f"{geaendert} Produkte aktualisiert."))
+
+    # =================================================================
     #   BUCHHALTUNG (neu): Übersicht · Bank · Belege · Lieferanten · Export · Einstellungen
     # =================================================================
     def bh_kopf(self, aktiv, unter="", aktionen="", monat=None):
@@ -8747,6 +9491,22 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_bh_monat("oeffnen")
             if path == "/beleg":
                 return self.handle_beleg_foto()
+            if path == "/admin/kalkulation/einstellungen":
+                return self.handle_kalk_einstellungen()
+            if path == "/admin/kalkulation/rezept/neu":
+                return self.handle_kalk_rezept("neu")
+            if path == "/admin/kalkulation/rezept/speichern":
+                return self.handle_kalk_rezept("speichern")
+            if path == "/admin/kalkulation/rezept/loeschen":
+                return self.handle_kalk_rezept("loeschen")
+            if path == "/admin/kalkulation/zutat/speichern":
+                return self.handle_kalk_zutat("speichern")
+            if path == "/admin/kalkulation/zutat/loeschen":
+                return self.handle_kalk_zutat("loeschen")
+            if path == "/admin/kalkulation/preise/import":
+                return self.handle_kalk_preise_import()
+            if path == "/admin/kalkulation/preise/speichern":
+                return self.handle_kalk_preise_speichern()
             if path == "/admin/time/create":
                 return self.handle_create_time_entry()
             if path == "/admin/time/settings":
@@ -9923,6 +10683,7 @@ def main():
     threading_start = __import__('threading').Thread(target=bh.abgleichen, daemon=True).start()  # nach Updates offene Zahlungen neu bewerten
     bh.nachtlauf_starten(taeglich=bh_monatserinnerung)
     tagesmail_uhr_starten()
+    kalk_init()
     seed_demo_products()
     print(f"Internes Bestellsystem läuft auf http://localhost:{PORT}")
     print(f"Admin-PIN: {ADMIN_PIN} (vor Onlinebetrieb ändern)")
