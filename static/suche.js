@@ -53,7 +53,9 @@
     if (z.kompakt.indexOf(token) !== -1) return true;
     if (token.length >= 2 && z.initialen.indexOf(token) !== -1) return true;
     if (token.length < 3 || hatZiffer(token)) return false;
-    var maximum = token.length >= 7 ? 2 : 1;
+    /* zwei Tippfehler erst bei langen Wörtern ("straciatela"),
+       bei kurzen führt das sonst zu Unsinn ("frische" -> "Flasche") */
+    var maximum = token.length >= 9 ? 2 : 1;
     var i;
     for (i = 0; i < z.worte.length; i++) {
       var wort = z.worte[i];
@@ -62,17 +64,18 @@
       if (wort.length > token.length
         && abstand(wort.slice(0, token.length + maximum), token, maximum) <= maximum) return true;
     }
-    /* Tippfehler mitten in einem zusammengesetzten Wort.
-       Erst ab 6 Zeichen, sonst findet "mehl" auch "Karamellsoße". */
+    /* Tippfehler in einem zusammengeschriebenen Suchbegriff
+       ("weizemehlsonnengold" für "Weizenmehl Sonnengold").
+       Erst ab 6 Zeichen und nur gleich lange Stücke – sonst findet
+       "mehl" auch "Karamellsoße" und "kirsche" jedes "Dänische". */
     if (token.length >= 6) {
-      var kompakt = z.kompakt, a = token.charAt(0), b = token.charAt(1);
-      for (i = 0; i < kompakt.length; i++) {
+      var kompakt = z.kompakt, a = token.charAt(0), b = token.charAt(1), laenge = token.length;
+      for (i = 0; i + laenge <= kompakt.length; i++) {
         var zeichen = kompakt.charAt(i);
         if (zeichen !== a && zeichen !== b) continue;
-        for (var laenge = token.length - maximum; laenge <= token.length + maximum; laenge++) {
-          if (laenge < 3 || i + laenge > kompakt.length) continue;
-          if (abstand(kompakt.substr(i, laenge), token, maximum) <= maximum) return true;
-        }
+        /* hier nur ein Tippfehler erlaubt: mit zwei würde "kirsche"
+           auch "Türkische" und "frische" auch "Flasche" finden */
+        if (abstand(kompakt.substr(i, laenge), token, 1) <= 1) return true;
       }
     }
     return false;

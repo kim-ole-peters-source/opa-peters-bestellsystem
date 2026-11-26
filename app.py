@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-26-suche"
+ASSET_VERSION = "2026-11-26-suche-b"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1074,7 +1074,9 @@ def suche_token_passt(ziel, token):
         return True
     if len(token) < 3 or any(z.isdigit() for z in token):
         return False
-    maximum = 2 if len(token) >= 7 else 1
+    # zwei Tippfehler erst bei langen Woertern ("straciatela"),
+    # bei kurzen fuehrt das sonst zu Unsinn ("frische" -> "Flasche")
+    maximum = 2 if len(token) >= 9 else 1
     for wort in ziel["worte"]:
         if len(wort) < 3:
             continue
@@ -1082,19 +1084,21 @@ def suche_token_passt(ziel, token):
             return True
         if len(wort) > len(token) and suche_abstand(wort[:len(token) + maximum], token, maximum) <= maximum:
             return True
-    # Tippfehler mitten in einem zusammengesetzten Wort ("weizenmehll", "sonnegold").
-    # Erst ab 6 Zeichen, sonst findet "mehl" auch "Karamellsoße".
+    # Tippfehler in einem zusammengeschriebenen Suchbegriff
+    # ("weizemehlsonnengold" fuer "Weizenmehl Sonnengold").
+    # Erst ab 6 Zeichen und nur gleich lange Stuecke – sonst findet
+    # "mehl" auch "Karamellsosse" und "kirsche" jedes "Daenische".
     if len(token) >= 6:
         kompakt = ziel["kompakt"]
         anfang = (token[0], token[1])
+        laenge = len(token)
         for i, zeichen in enumerate(kompakt):
-            if zeichen not in anfang:
+            if zeichen not in anfang or i + laenge > len(kompakt):
                 continue
-            for laenge in range(len(token) - maximum, len(token) + maximum + 1):
-                if laenge < 3 or i + laenge > len(kompakt):
-                    continue
-                if suche_abstand(kompakt[i:i + laenge], token, maximum) <= maximum:
-                    return True
+            # hier nur ein Tippfehler erlaubt: mit zwei wuerde "kirsche"
+            # auch "Tuerkische" und "frische" auch "Flasche" finden
+            if suche_abstand(kompakt[i:i + laenge], token, 1) <= 1:
+                return True
     return False
 
 
