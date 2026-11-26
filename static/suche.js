@@ -106,6 +106,125 @@
     return true;
   }
 
+  /* Vorschlagsliste unter dem Suchfeld, wie bei einer Suchmaschine.
+     Zeigt die ersten Treffer, Pfeiltasten und Klick wählen aus.
+     optionen: { feld, zeilen, attribut, titelWahl, unterWahl, maximal, beiAuswahl } */
+  function vorschlag(optionen) {
+    var feld = optionen.feld;
+    if (!feld || feld.__opVorschlag) return null;
+    feld.__opVorschlag = true;
+
+    var huelle = document.createElement('span');
+    huelle.className = 'op-suche-huelle';
+    feld.parentNode.insertBefore(huelle, feld);
+    huelle.appendChild(feld);
+
+    var kasten = document.createElement('div');
+    kasten.className = 'op-vorschlag';
+    kasten.hidden = true;
+    kasten.setAttribute('role', 'listbox');
+    huelle.appendChild(kasten);
+
+    feld.setAttribute('autocomplete', 'off');
+    feld.setAttribute('role', 'combobox');
+    feld.setAttribute('aria-expanded', 'false');
+    feld.setAttribute('aria-autocomplete', 'list');
+
+    var treffer = [], aktiv = -1, stumm = false;
+
+    function textVon(zeile, wahl) {
+      if (!wahl) return '';
+      var e = zeile.querySelector(wahl);
+      return e ? (e.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    }
+
+    function zu() {
+      kasten.hidden = true;
+      kasten.innerHTML = '';
+      feld.setAttribute('aria-expanded', 'false');
+      treffer = [];
+      aktiv = -1;
+    }
+
+    function markieren() {
+      Array.prototype.forEach.call(kasten.children, function (kind, i) {
+        kind.classList.toggle('ist-aktiv', i === aktiv);
+        kind.setAttribute('aria-selected', i === aktiv ? 'true' : 'false');
+      });
+    }
+
+    function waehlen(i) {
+      var zeile = treffer[i];
+      if (!zeile) return;
+      var titel = textVon(zeile, optionen.titelWahl || 'b') || textVon(zeile, 'td');
+      zu();
+      if (optionen.beiAuswahl) {
+        optionen.beiAuswahl(zeile, titel, feld);
+      } else {
+        if (titel) {
+          feld.value = titel;
+          stumm = true;   // die Liste soll nach der Auswahl zubleiben
+          feld.dispatchEvent(new Event('input', { bubbles: true }));
+          stumm = false;
+        }
+        if (zeile.scrollIntoView) zeile.scrollIntoView({ block: 'center' });
+        zeile.classList.add('op-gefunden');
+        setTimeout(function () { zeile.classList.remove('op-gefunden'); }, 1600);
+      }
+    }
+
+    function aufbauen() {
+      if (stumm) return;
+      var tokens = begriffe(feld.value);
+      if (!tokens.length) { zu(); return; }
+      var alle = Array.prototype.slice.call(
+        typeof optionen.zeilen === 'function' ? optionen.zeilen() : optionen.zeilen
+      );
+      var gefunden = [];
+      for (var i = 0; i < alle.length && gefunden.length < (optionen.maximal || 8); i++) {
+        if (passt(zielVon(alle[i], optionen.attribut), tokens)) gefunden.push(alle[i]);
+      }
+      treffer = gefunden;
+      aktiv = -1;
+      if (!treffer.length) { zu(); return; }
+      kasten.innerHTML = '';
+      treffer.forEach(function (zeile, i) {
+        var eintrag = document.createElement('button');
+        eintrag.type = 'button';
+        eintrag.className = 'op-vorschlag-eintrag';
+        eintrag.setAttribute('role', 'option');
+        var titel = textVon(zeile, optionen.titelWahl || 'b') || textVon(zeile, 'b')
+          || textVon(zeile, 'td') || (zeile.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 70) || '…';
+        var unter = textVon(zeile, optionen.unterWahl || 'small');
+        eintrag.innerHTML = '<b></b>' + (unter ? '<small></small>' : '');
+        eintrag.querySelector('b').textContent = titel;
+        if (unter) eintrag.querySelector('small').textContent = unter;
+        eintrag.addEventListener('mousedown', function (e) { e.preventDefault(); waehlen(i); });
+        eintrag.addEventListener('mouseenter', function () { aktiv = i; markieren(); });
+        kasten.appendChild(eintrag);
+      });
+      kasten.hidden = false;
+      feld.setAttribute('aria-expanded', 'true');
+    }
+
+    feld.addEventListener('input', aufbauen);
+    feld.addEventListener('focus', aufbauen);
+    feld.addEventListener('blur', function () { setTimeout(zu, 120); });
+    feld.addEventListener('keydown', function (e) {
+      if (kasten.hidden || !treffer.length) {
+        if (e.key === 'Escape') { feld.value = ''; feld.dispatchEvent(new Event('input', { bubbles: true })); }
+        return;
+      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); aktiv = (aktiv + 1) % treffer.length; markieren(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); aktiv = (aktiv <= 0 ? treffer.length : aktiv) - 1; markieren(); }
+      else if (e.key === 'Enter') {
+        if (aktiv >= 0) { e.preventDefault(); waehlen(aktiv); }
+        else { zu(); }
+      } else if (e.key === 'Escape') { e.preventDefault(); zu(); }
+    });
+    return { aufbauen: aufbauen, zu: zu };
+  }
+
   /* Hängt eine Suche an eine Liste: filtert bei jedem Tastendruck.
      optionen: { feld, zeilen (Funktion oder NodeList), attribut,
                  gruppen, leer, zaehler, zusatz (Funktion -> bool) } */
@@ -157,11 +276,22 @@
     }
     feld.addEventListener('input', filtern);
     feld.addEventListener('search', filtern);
+    if (optionen.vorschlaege !== false) {
+      vorschlag({
+        feld: feld,
+        zeilen: optionen.zeilen,
+        attribut: optionen.attribut,
+        titelWahl: optionen.titelWahl,
+        unterWahl: optionen.unterWahl,
+        beiAuswahl: optionen.beiAuswahl
+      });
+    }
     if (feld.value) filtern();
     return filtern;
   }
 
   window.opSuche = {
+    vorschlag: vorschlag,
     falten: falten,
     ziel: ziel,
     zielVon: zielVon,

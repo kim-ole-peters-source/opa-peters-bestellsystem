@@ -73,12 +73,16 @@
     var gruppe = '';
 
     function filtern() {
-      var worte = window.opSuche.begriffe(suche ? suche.value : '');
+      var worte = window.opSuche
+        ? window.opSuche.begriffe(suche ? suche.value : '')
+        : norm(suche ? suche.value : '').split(' ').filter(Boolean);
       var h = haendler ? haendler.value : '';
       var st = status ? status.value : '';
       var sichtbar = 0;
       zeilen.forEach(function (z) {
-        var ok = window.opSuche.passt(window.opSuche.zielVon(z), worte)
+        var ok = (window.opSuche
+            ? window.opSuche.passt(window.opSuche.zielVon(z), worte)
+            : worte.every(function (w) { return (z.getAttribute('data-suche') || '').toLowerCase().indexOf(w) !== -1; }))
           && (!gruppe || (' ' + z.getAttribute('data-gruppen') + ' ').indexOf(' ' + gruppe + ' ') !== -1)
           && (!h || z.getAttribute('data-haendler') === h)
           && (!st || z.getAttribute('data-status') === st);
@@ -89,6 +93,21 @@
       auswahlZaehlen();
     }
     if (suche) suche.addEventListener('input', filtern);
+    if (suche && window.opSuche && window.opSuche.vorschlag) {
+      window.opSuche.vorschlag({
+        feld: suche,
+        zeilen: function () { return zeilen; },
+        titelWahl: '.vw-produkt-text b',
+        unterWahl: '.vw-produkt-text small',
+        beiAuswahl: function (zeile, titel) {
+          suche.value = titel;
+          filtern();
+          if (zeile.scrollIntoView) zeile.scrollIntoView({ block: 'center' });
+          zeile.classList.add('op-gefunden');
+          setTimeout(function () { zeile.classList.remove('op-gefunden'); }, 1600);
+        }
+      });
+    }
     if (haendler) haendler.addEventListener('change', filtern);
     if (status) status.addEventListener('change', filtern);
     chips.forEach(function (chip) {

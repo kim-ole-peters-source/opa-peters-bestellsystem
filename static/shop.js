@@ -17,15 +17,27 @@
   var abschnitte = Array.prototype.slice.call(document.querySelectorAll('.shop-abschnitt'));
   var gruppe = shop.getAttribute('data-start-gruppe') || '';
 
+  /* Die tolerante Suche steckt in suche.js. Kommt die Datei nicht an
+     (Netzaussetzer), filtert diese einfache Fassung weiter – lieber
+     Teilstueck-Suche als eine Seite, auf der nichts mehr geht. */
+  function begriffeVon(wert) {
+    if (window.opSuche) return window.opSuche.begriffe(wert);
+    return String(wert || '').toLowerCase().split(/\s+/).filter(Boolean);
+  }
+  function passtZu(element, begriffe) {
+    if (window.opSuche) return window.opSuche.passt(window.opSuche.zielVon(element), begriffe);
+    var text = (element.getAttribute('data-suche') || '').toLowerCase();
+    return begriffe.every(function (b) { return text.indexOf(b) !== -1; });
+  }
+
   function filtern() {
-    var begriffe = window.opSuche.begriffe(suche ? suche.value : '');
+    var begriffe = begriffeVon(suche ? suche.value : '');
     var gefiltert = !!gruppe || begriffe.length > 0;
     var sichtbar = 0;
 
     karten.forEach(function (karte) {
       var gruppen = (karte.getAttribute('data-kategorien') || '').split('|');
-      var passt = (!gruppe || gruppen.indexOf(gruppe) !== -1) &&
-        window.opSuche.passt(window.opSuche.zielVon(karte), begriffe);
+      var passt = (!gruppe || gruppen.indexOf(gruppe) !== -1) && passtZu(karte, begriffe);
       karte.hidden = !passt;
       if (passt) sichtbar += 1;
     });
@@ -40,6 +52,23 @@
     if (treffer) {
       treffer.textContent = gefiltert ? (sichtbar === 1 ? '1 Produkt' : sichtbar + ' Produkte') : '';
     }
+  }
+
+  /* Vorschlagsliste beim Tippen: Treffer antippen springt zur Karte */
+  if (suche && window.opSuche && window.opSuche.vorschlag) {
+    window.opSuche.vorschlag({
+      feld: suche,
+      zeilen: function () { return karten; },
+      titelWahl: 'h3',
+      unterWahl: '.pk-text p',
+      beiAuswahl: function (karte, titel) {
+        suche.value = titel;
+        filtern();
+        if (karte.scrollIntoView) karte.scrollIntoView({ block: 'center' });
+        karte.classList.add('op-gefunden');
+        setTimeout(function () { karte.classList.remove('op-gefunden'); }, 1600);
+      }
+    });
   }
 
   function gruppeWaehlen(name) {

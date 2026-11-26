@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-26-suche-b"
+ASSET_VERSION = "2026-11-26-vorschlag"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1127,7 +1127,7 @@ def suche_filter(eintraege, anfrage, text_von):
 
 
 def suchfeld(kennung, platzhalter, zeilen_wahl, gruppen_wahl="", einheit="Einträge", klasse="vw-suche vw-suche-block",
-             ueberschriften=""):
+             ueberschriften="", titel_wahl="", unter_wahl=""):
     """Suchfeld fuer eine Liste, die im Browser gefiltert wird (static/suche.js).
     zeilen_wahl: CSS-Auswahl der Zeilen, die ein data-suche tragen.
     gruppen_wahl: optionale Bloecke, die mit ausgeblendet werden, wenn nichts mehr passt."""
@@ -1147,6 +1147,8 @@ def suchfeld(kennung, platzhalter, zeilen_wahl, gruppen_wahl="", einheit="Eintr�
         gruppen: function () {{ return {gruppen_js} || []; }},
         zeilenWahl: {json.dumps(zeilen_wahl + ":not([hidden])")},
         ueberschriften: {json.dumps(ueberschriften) if ueberschriften else "null"},
+        titelWahl: {json.dumps(titel_wahl) if titel_wahl else "null"},
+        unterWahl: {json.dumps(unter_wahl) if unter_wahl else "null"},
         zaehler: function (sichtbar, gesamt, gefiltert) {{
           if (treffer) treffer.textContent = gefiltert ? (sichtbar + ' von ' + gesamt + ' {esc(einheit)}') : '';
         }}
@@ -6440,7 +6442,7 @@ class App(BaseHTTPRequestHandler):
             </form>
             <p class="vw-klein">Bitte kein Komma im Namen – „&amp;“ geht (z. B. „Milchprodukte &amp; Eier“).</p>
         </section>
-        {suchfeld("gruppenSuche", "Warengruppe suchen", ".vw-tabelle tr[data-suche]", einheit="Warengruppen") if len(zeilen) > 7 else ""}
+        {suchfeld("gruppenSuche", "Warengruppe suchen", ".vw-tabelle tr[data-suche]", einheit="Warengruppen") if len(zeilen) > 5 else ""}
         <div class="vw-tabelle-wrap">
             <table class="vw-tabelle">
                 <tr><th>Warengruppe</th><th class="zahl">Produkte</th><th>Umbenennen</th><th></th></tr>
@@ -6789,7 +6791,7 @@ class App(BaseHTTPRequestHandler):
         {monat_auswahl}
         {f'<div class="vw-chips">{chips}</div>' if chips else ''}
         {alle_pdf}
-        {suchfeld("bestellSuche", "Bestellung suchen – Standort, Nummer, Name oder Produkt", ".vw-bestellung-wrap", einheit="Bestellungen", ueberschriften="h3.vw-tag") if len(liste) > 3 else ""}
+        {suchfeld("bestellSuche", "Bestellung suchen – Standort, Nummer, Name oder Produkt", ".vw-bestellung-wrap", einheit="Bestellungen", ueberschriften="h3.vw-tag") if len(liste) > 2 else ""}
         <div class="vw-bestellliste">{''.join(karten) or leer}</div>
         <form id="sammelForm" method="post" action="/admin/orders/combined-pdf">
             <input type="hidden" name="return_location" value="{ansicht}">
@@ -7648,7 +7650,8 @@ class App(BaseHTTPRequestHandler):
             )
             haken = "".join(
                 f'<label class="vw-haken-zeile vw-sicht-produkt" data-suche="{esc(" ".join([p["name"] or "", p["package_size"] or "", g, p["source"] or ""]))}">'
-                f'<input class="visibility-product-check" type="checkbox" name="product_{p["id"]}" value="1" data-category="{esc(g)}" {"checked" if str(p["id"]) in sichtbar_ids else ""}> {esc(p["name"])} <small>{esc(p["package_size"])}</small></label>'
+                f'<input class="visibility-product-check" type="checkbox" name="product_{p["id"]}" value="1" data-category="{esc(g)}" {"checked" if str(p["id"]) in sichtbar_ids else ""}> '
+                f'<span class="vw-haken-text">{esc(p["name"])}</span> <small>{esc(p["package_size"])}</small></label>'
                 for p in in_gruppe
             )
             bloecke.append(f'<details class="vw-aufklapp vw-sicht-gruppe"><summary>{esc(g)} <span class="vw-klein">{an} von {len(in_gruppe)} sichtbar</span></summary><div class="vw-haken-liste">{haken}</div></details>')
@@ -7660,7 +7663,8 @@ class App(BaseHTTPRequestHandler):
                 <input type="hidden" name="zurueck" value="standort">
                 <fieldset class="vw-feldgruppe"><legend>Ganze Warengruppen an/aus</legend><div class="vw-schalter-raster">{''.join(gruppen_haken)}</div></fieldset>
                 <p class="vw-klein">Für einzelne Produkte die Gruppe aufklappen oder suchen:</p>
-                {suchfeld("sichtSuche", "Produkt suchen – auch Teilwort, Zahl oder mit Tippfehler", ".vw-sicht-produkt", ".vw-sicht-gruppe", einheit="Produkte")}
+                {suchfeld("sichtSuche", "Produkt suchen – auch Teilwort, Zahl oder mit Tippfehler", ".vw-sicht-produkt", ".vw-sicht-gruppe",
+                          einheit="Produkte", titel_wahl=".vw-haken-text", unter_wahl="small")}
                 {''.join(bloecke)}
                 <div class="vw-dialog-fuss vw-klebend"><button class="primary" type="submit">Sortiment speichern</button></div>
             </form>
@@ -8801,7 +8805,7 @@ class App(BaseHTTPRequestHandler):
                         '<a class="button primary" href="/admin/kalkulation/rezept?id=neu">+ Neue Sorte</a>')}
         {warnung}
         <section class="vw-karte">
-            {suchfeld("kalkSuche", "Sorte suchen", "#kalkListe tr[data-suche]", einheit="Sorten") if len(daten) > 7 else ""}
+            {suchfeld("kalkSuche", "Sorte suchen", "#kalkListe tr[data-suche]", einheit="Sorten") if len(daten) > 5 else ""}
             <table class="vw-tabelle">
                 <thead><tr><th>Sorte</th><th class="zahl">Wareneinsatz je Portion</th><th class="zahl">Verkauf brutto</th>
                 <th class="zahl">Faktor</th><th class="zahl">Ziel</th><th>Status</th></tr></thead>
@@ -8972,7 +8976,7 @@ class App(BaseHTTPRequestHandler):
             basis_preis, basis = produkt_basispreis(p)
             je_basis = f'{geld(basis_preis)} / {BASIS_NAME.get(basis, basis or "?")}' if basis_preis is not None else "–"
             zeilen.append(f"""
-            <tr>
+            <tr data-suche="{esc(" ".join([p['name'] or '', p['package_size'] or '', p['source'] or '', p['artikelnummer'] or '']))}">
                 <td><b>{esc(p['name'])}</b><small class="vw-klein-block">{esc(p['package_size'] or '')} · {esc(p['source'] or '')}</small></td>
                 <td><input name="nr_{p['id']}" value="{esc(p['artikelnummer'] or '')}" aria-label="Artikelnummer" class="vw-schmal-feld"></td>
                 <td><input name="preis_{p['id']}" inputmode="decimal" value="{zahl_kurz(p['einkaufspreis']) if p['einkaufspreis'] is not None else ''}" aria-label="Einkaufspreis" class="vw-schmal-feld"></td>
@@ -8996,19 +9000,39 @@ class App(BaseHTTPRequestHandler):
         </section>
         <section class="vw-karte">
             <form method="get" action="/admin/kalkulation/preise" class="vw-inline-form">
-                <label class="vw-wachsen">Suchen<input name="q" value="{esc(suche)}" placeholder="Produkt, Händler oder Artikelnummer"></label>
+                <label class="vw-wachsen">Suchen<input id="preiseSuche" name="q" value="{esc(suche)}" autocomplete="off" placeholder="Produkt, Händler oder Artikelnummer"></label>
                 <button class="button" type="submit">Suchen</button>
                 <a class="button" href="/admin/kalkulation/preise?filter={'' if nur_ohne else 'ohne'}">{'Alle zeigen' if nur_ohne else 'Nur ohne Preis'}</a>
             </form>
             <form method="post" action="/admin/kalkulation/preise/speichern">
                 <table class="vw-tabelle">
                     <thead><tr><th>Produkt</th><th>Artikelnr.</th><th>Preis je Gebinde</th><th>Inhalt je Gebinde</th><th class="zahl">ergibt</th></tr></thead>
-                    <tbody>{''.join(zeilen) or '<tr><td colspan="5"><p class="vw-leer">Keine Produkte gefunden.</p></td></tr>'}</tbody>
+                    <tbody id="preiseListe">{''.join(zeilen) or '<tr><td colspan="5"><p class="vw-leer">Keine Produkte gefunden.</p></td></tr>'}</tbody>
                 </table>
                 <div class="vw-knopfreihe"><button class="primary" type="submit">Änderungen speichern</button></div>
             </form>
             {f'<p class="vw-klein">Es werden die ersten 400 Treffer angezeigt – nutze die Suche, um gezielt zu arbeiten.</p>' if len(produkte) > 400 else ''}
+            <p class="vw-klein vw-suche-treffer" id="preiseTreffer" aria-live="polite"></p>
         </section>
+        <script>
+        document.addEventListener('DOMContentLoaded', function () {{
+          var feld = document.getElementById('preiseSuche');
+          var treffer = document.getElementById('preiseTreffer');
+          if (!feld || !window.opSuche) return;
+          // filtert schon beim Tippen; der Knopf "Suchen" sucht zusaetzlich auf dem Server,
+          // weil die Seite nur die ersten 400 Produkte zeigt
+          window.opSuche.verbinden({{
+            feld: feld,
+            zeilen: function () {{ return document.querySelectorAll('#preiseListe tr[data-suche]'); }},
+            zeilenWahl: '#preiseListe tr[data-suche]:not([hidden])',
+            titelWahl: 'td:first-child b',
+            unterWahl: 'td:first-child small',
+            zaehler: function (sichtbar, gesamt, gefiltert) {{
+              if (treffer) treffer.textContent = gefiltert ? (sichtbar + ' von ' + gesamt + ' Produkten') : '';
+            }}
+          }});
+        }});
+        </script>
         """
         self.admin_seite("Einkaufspreise", body)
 
@@ -10391,7 +10415,19 @@ class App(BaseHTTPRequestHandler):
               feld: suche,
               zeilen: function () {{ return liste.querySelectorAll('[data-inv-zeile]'); }},
               gruppen: function () {{ return liste.querySelectorAll('.inv-gruppe'); }},
-              zeilenWahl: '[data-inv-zeile]:not([hidden])'
+              zeilenWahl: '[data-inv-zeile]:not([hidden])',
+              titelWahl: '.inv-name b',
+              unterWahl: '.inv-name small',
+              beiAuswahl: function (zeile) {{
+                // direkt ins Mengenfeld springen – darum geht es beim Zaehlen
+                var gruppe = zeile.closest('.inv-gruppe');
+                if (gruppe) gruppe.open = true;
+                if (zeile.scrollIntoView) zeile.scrollIntoView({{ block: 'center' }});
+                var feldchen = zeile.querySelector('[data-inv-produkt]');
+                if (feldchen) {{ feldchen.focus(); feldchen.select(); }}
+                zeile.classList.add('op-gefunden');
+                setTimeout(function () {{ zeile.classList.remove('op-gefunden'); }}, 1600);
+              }}
             }});
           }});
           document.querySelectorAll('[data-inv-frei],[data-inv-fertig]').forEach(function (f) {{
@@ -10669,7 +10705,8 @@ class App(BaseHTTPRequestHandler):
             <p class="vw-klein">Warenwert = gezählte Menge × Einkaufspreis je Gebinde aus der Kalkulation{'' if not offen else ' (aktueller Stand – wird beim Abschließen festgeschrieben)'}.</p>
         </section>
         <section class="vw-karte inv-nicht-drucken">
-            {suchfeld("invSuche", "Artikel suchen – auch Teilwort, Zahl oder mit Tippfehler", ".inv-tabelle tr[data-suche]", einheit="Positionen")}
+            {suchfeld("invSuche", "Artikel suchen – auch Teilwort, Zahl oder mit Tippfehler", ".inv-tabelle tr[data-suche]",
+                      einheit="Positionen", titel_wahl="td:first-child", unter_wahl="td:nth-child(2)")}
         </section>
         {''.join(abschnitte)}
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""

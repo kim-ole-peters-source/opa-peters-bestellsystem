@@ -875,12 +875,16 @@
     return keys.indexOf(categoryKey) !== -1;
   }
   function filterBulkCategoryButtons() {
+    var wert = bulkCategorySearch ? bulkCategorySearch.value : '';
     var begriffe = window.opSuche
-      ? window.opSuche.begriffe(bulkCategorySearch ? bulkCategorySearch.value : '')
-      : [];
+      ? window.opSuche.begriffe(wert)
+      : String(wert || '').toLowerCase().split(/\s+/).filter(Boolean);
     bulkCategoryButtons.forEach(function (button) {
-      button.hidden = begriffe.length > 0
-        && !window.opSuche.passt(button.textContent, begriffe);
+      var text = button.textContent;
+      var passt = window.opSuche
+        ? window.opSuche.passt(text, begriffe)
+        : begriffe.every(function (b) { return text.toLowerCase().indexOf(b) !== -1; });
+      button.hidden = begriffe.length > 0 && !passt;
     });
   }
   if (bulkCategorySearch) {

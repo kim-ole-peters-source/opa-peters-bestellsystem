@@ -3393,3 +3393,23 @@ nav a[href="/inventur"]::before { content: "📋"; }
 .inv-karte-wrap .vw-karte { margin: 0; }
 .inv-karte-loeschen { display: flex; justify-content: flex-end; margin: 0; }
 .inv-karte-loeschen button { padding: 6px 14px; font-size: 13px; }
+
+/* Vorschlagsliste unter dem Suchfeld (static/suche.js) */
+.op-suche-huelle { position: relative; display: block; flex: 1 1 auto; }
+.op-suche-huelle > input { width: 100%; }
+.op-vorschlag { position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 4px);
+  background: #fff; border: 1px solid var(--op-sand, #EAE0D3); border-radius: 14px;
+  box-shadow: 0 14px 32px rgba(42, 31, 24, .16); overflow: hidden; max-height: 58vh; overflow-y: auto; }
+.op-vorschlag[hidden] { display: none; }
+.op-vorschlag-eintrag { display: block; width: 100%; text-align: left; background: none; border: 0;
+  border-bottom: 1px solid #F3EDE4; padding: 10px 14px; font: inherit; color: inherit; cursor: pointer; }
+.op-vorschlag-eintrag:last-child { border-bottom: 0; }
+.op-vorschlag-eintrag b { display: block; font-size: 15px; line-height: 1.3; }
+.op-vorschlag-eintrag small { display: block; color: #8A7A6D; font-size: 13px; margin-top: 2px; }
+.op-vorschlag-eintrag.ist-aktiv, .op-vorschlag-eintrag:hover { background: #FAF5EE; }
+.op-gefunden { animation: op-gefunden-blitz 1.6s ease-out; }
+@keyframes op-gefunden-blitz {
+  0%, 35% { background: #FFF3D6; }
+  100% { background: transparent; }
+}
+@media (max-width: 640px) { .op-vorschlag { max-height: 50vh; } }

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'opa-peters-bestellung-v81-suche-b';
+const CACHE_NAME = 'opa-peters-bestellung-v82-vorschlag';
 const STATIC_ASSETS = [
   '/',
   '/login',
@@ -34,7 +34,14 @@ self.addEventListener('fetch', event => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(request, copy)).catch(() => null);
       return response;
-    }).catch(() => caches.match(request).then(cached => cached || caches.match('/login')))
+    }).catch(() => caches.match(request).then(cached => {
+      if (cached) return cached;
+      /* Nur für Seitenaufrufe die Login-Seite zeigen. Für Skripte, CSS oder
+         Bilder wäre HTML als Antwort schlimmer als ein Fehler: das Skript
+         bricht dann mit einem Syntaxfehler ab und die Seite ist halb tot. */
+      if (request.mode === 'navigate') return caches.match('/login');
+      return new Response('', { status: 504, statusText: 'offline' });
+    }))
   );
 });
 
