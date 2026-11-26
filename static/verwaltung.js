@@ -73,13 +73,12 @@
     var gruppe = '';
 
     function filtern() {
-      var worte = norm(suche ? suche.value : '').split(' ').filter(Boolean);
+      var worte = window.opSuche.begriffe(suche ? suche.value : '');
       var h = haendler ? haendler.value : '';
       var st = status ? status.value : '';
       var sichtbar = 0;
       zeilen.forEach(function (z) {
-        var text = z.getAttribute('data-suche') || '';
-        var ok = worte.every(function (w) { return text.indexOf(w) !== -1; })
+        var ok = window.opSuche.passt(window.opSuche.zielVon(z), worte)
           && (!gruppe || (' ' + z.getAttribute('data-gruppen') + ' ').indexOf(' ' + gruppe + ' ') !== -1)
           && (!h || z.getAttribute('data-haendler') === h)
           && (!st || z.getAttribute('data-status') === st);

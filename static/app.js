@@ -875,9 +875,12 @@
     return keys.indexOf(categoryKey) !== -1;
   }
   function filterBulkCategoryButtons() {
-    var query = bulkCategorySearch ? bulkCategorySearch.value.toLowerCase() : '';
+    var begriffe = window.opSuche
+      ? window.opSuche.begriffe(bulkCategorySearch ? bulkCategorySearch.value : '')
+      : [];
     bulkCategoryButtons.forEach(function (button) {
-      button.hidden = query && button.textContent.toLowerCase().indexOf(query) === -1;
+      button.hidden = begriffe.length > 0
+        && !window.opSuche.passt(button.textContent, begriffe);
     });
   }
   if (bulkCategorySearch) {

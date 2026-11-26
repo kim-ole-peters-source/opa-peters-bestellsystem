@@ -1754,14 +1754,16 @@ def _passende_art(buchung, beleg):
     return beleg["art"] in ("AR", "GS")
 
 
-def kandidaten(con, buchung, limit=8, suche=""):
+def kandidaten(con, buchung, limit=8, suche="", passt=None):
     belegt = {r["beleg_id"] for r in con.execute("SELECT beleg_id FROM zuordnung")}
     bekannt = bekannte_zuordnungen(con)
     liste = []
     zeilen = con.execute("SELECT * FROM belege WHERE status NOT IN ('ignoriert', 'doppelt', 'portal', 'unsicher') AND dauer=0").fetchall()
     for b in zeilen:
         if suche:
-            if schluessel_text(suche) not in schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], betrag_text(b["betrag"]), b["original_name"], b["mail_von"] or ""])):
+            text = " ".join([b["lieferant"], b["rechnungsnr"], betrag_text(b["betrag"]), b["original_name"], b["mail_von"] or ""])
+            # passt() kommt aus app.py (tolerante Suche); ohne sie bleibt es beim Teilstueck
+            if not (passt(text) if passt else schluessel_text(suche) in schluessel_text(text)):
                 continue
             p = punkte(buchung, b, bekannt)
         else:

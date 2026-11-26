@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-26-inventur-ekfeld"
+ASSET_VERSION = "2026-11-26-suche"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -1017,6 +1017,140 @@ def normalize_text_key(text):
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
+# =================================================================
+#   Suche: ein Verfahren fuer alle Listen
+#   Dieselben Regeln stecken in static/suche.js (dort fuer Listen,
+#   die ohne Neuladen filtern). Aenderungen bitte an beiden Stellen.
+# =================================================================
+
+def suche_falten(text):
+    """'Weizenmehl Typ 550, 2,5 KG' -> 'weizenmehl typ 550 25 kg'"""
+    t = (text or "").strip().lower()
+    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"),
+                     ("é", "e"), ("è", "e"), ("á", "a"), ("à", "a"), ("ç", "c"), ("ñ", "n")):
+        t = t.replace(alt, neu)
+    t = re.sub(r"(\d)[.,](\d)", r"\1\2", t)          # 2,5 kg und 2.5 kg sind dasselbe
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+def suche_ziel(text):
+    """Bereitet einen Text einmal auf, damit die Suche ihn schnell pruefen kann."""
+    worte = suche_falten(text).split()
+    return {
+        "worte": worte,
+        "kompakt": "".join(worte),
+        "initialen": "".join(w[:1] for w in worte),
+    }
+
+
+def suche_abstand(a, b, maximum):
+    """Levenshtein-Abstand, bricht ab sobald er groesser als das Maximum ist."""
+    if abs(len(a) - len(b)) > maximum:
+        return maximum + 1
+    if a == b:
+        return 0
+    vorher = list(range(len(b) + 1))
+    for i, zeichen_a in enumerate(a, start=1):
+        aktuell = [i]
+        bester = i
+        for j, zeichen_b in enumerate(b, start=1):
+            kosten = 0 if zeichen_a == zeichen_b else 1
+            wert = min(vorher[j] + 1, aktuell[j - 1] + 1, vorher[j - 1] + kosten)
+            aktuell.append(wert)
+            bester = min(bester, wert)
+        if bester > maximum:
+            return maximum + 1
+        vorher = aktuell
+    return vorher[-1]
+
+
+def suche_token_passt(ziel, token):
+    """Ein einzelner Suchbegriff: Teilstueck, Wortanfang, Initialen oder Tippfehler."""
+    if not token:
+        return True
+    if token in ziel["kompakt"]:
+        return True
+    if len(token) >= 2 and token in ziel["initialen"]:
+        return True
+    if len(token) < 3 or any(z.isdigit() for z in token):
+        return False
+    maximum = 2 if len(token) >= 7 else 1
+    for wort in ziel["worte"]:
+        if len(wort) < 3:
+            continue
+        if suche_abstand(wort, token, maximum) <= maximum:
+            return True
+        if len(wort) > len(token) and suche_abstand(wort[:len(token) + maximum], token, maximum) <= maximum:
+            return True
+    # Tippfehler mitten in einem zusammengesetzten Wort ("weizenmehll", "sonnegold").
+    # Erst ab 6 Zeichen, sonst findet "mehl" auch "Karamellsoße".
+    if len(token) >= 6:
+        kompakt = ziel["kompakt"]
+        anfang = (token[0], token[1])
+        for i, zeichen in enumerate(kompakt):
+            if zeichen not in anfang:
+                continue
+            for laenge in range(len(token) - maximum, len(token) + maximum + 1):
+                if laenge < 3 or i + laenge > len(kompakt):
+                    continue
+                if suche_abstand(kompakt[i:i + laenge], token, maximum) <= maximum:
+                    return True
+    return False
+
+
+def suche_passt(text_oder_ziel, anfrage):
+    """True, wenn jeder Suchbegriff irgendwie in dem Text steckt."""
+    tokens = suche_falten(anfrage).split()
+    if not tokens:
+        return True
+    ziel = text_oder_ziel if isinstance(text_oder_ziel, dict) else suche_ziel(text_oder_ziel)
+    return all(suche_token_passt(ziel, t) for t in tokens)
+
+
+def suche_filter(eintraege, anfrage, text_von):
+    """Filtert eine Liste. text_von(eintrag) liefert den durchsuchbaren Text."""
+    if not (anfrage or "").strip():
+        return list(eintraege)
+    tokens = suche_falten(anfrage).split()
+    if not tokens:
+        return list(eintraege)
+    treffer = []
+    for eintrag in eintraege:
+        ziel = suche_ziel(text_von(eintrag))
+        if all(suche_token_passt(ziel, t) for t in tokens):
+            treffer.append(eintrag)
+    return treffer
+
+
+def suchfeld(kennung, platzhalter, zeilen_wahl, gruppen_wahl="", einheit="Einträge", klasse="vw-suche vw-suche-block",
+             ueberschriften=""):
+    """Suchfeld fuer eine Liste, die im Browser gefiltert wird (static/suche.js).
+    zeilen_wahl: CSS-Auswahl der Zeilen, die ein data-suche tragen.
+    gruppen_wahl: optionale Bloecke, die mit ausgeblendet werden, wenn nichts mehr passt."""
+    gruppen_js = (f"document.querySelectorAll({json.dumps(gruppen_wahl)})" if gruppen_wahl else "null")
+    return f"""
+    <label class="{klasse}"><span class="sr-only">Suchen</span>
+        <input type="search" id="{kennung}" placeholder="{esc(platzhalter)}" autocomplete="off"></label>
+    <p class="vw-klein vw-suche-treffer" id="{kennung}Treffer" aria-live="polite"></p>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {{
+      var feld = document.getElementById({json.dumps(kennung)});
+      var treffer = document.getElementById({json.dumps(kennung + "Treffer")});
+      if (!feld || !window.opSuche) return;
+      window.opSuche.verbinden({{
+        feld: feld,
+        zeilen: function () {{ return document.querySelectorAll({json.dumps(zeilen_wahl)}); }},
+        gruppen: function () {{ return {gruppen_js} || []; }},
+        zeilenWahl: {json.dumps(zeilen_wahl + ":not([hidden])")},
+        ueberschriften: {json.dumps(ueberschriften) if ueberschriften else "null"},
+        zaehler: function (sichtbar, gesamt, gefiltert) {{
+          if (treffer) treffer.textContent = gefiltert ? (sichtbar + ' von ' + gesamt + ' {esc(einheit)}') : '';
+        }}
+      }});
+    }});
+    </script>"""
+
+
 def admin_orders_return_url(message="", error="", pdf="", open_location="", open_day=""):
     params = []
     if message:
@@ -1277,19 +1411,18 @@ def get_categories_for_buyer(buyer_key=None):
 
 
 def filter_products_by_search(products, search_text, include_source=False):
-    term = (search_text or "").strip().lower()
-    if not term:
+    if not (search_text or "").strip():
         return products
-    words = [w for w in re.split(r"\s+", term) if w]
-    filtered = []
-    for p in products:
+
+    def text_von(p):
         values = [p["name"], category_text(product_categories(p)), p["package_size"]]
+        if "artikelnummer" in p.keys():
+            values.append(p["artikelnummer"])
         if include_source:
             values.extend([p["source"], visible_labels(p["visible_to"])])
-        haystack = " ".join(str(v or "") for v in values).lower()
-        if all(word in haystack for word in words):
-            filtered.append(p)
-    return filtered
+        return " ".join(str(v or "") for v in values)
+
+    return suche_filter(products, search_text, text_von)
 
 
 def normalize_whatsapp_number(number):
@@ -2788,6 +2921,7 @@ def page(title, body, admin=False, buyer_key=None):
 <script>
 (function(){{var p=location.pathname;document.querySelectorAll('.topbar nav a').forEach(function(a){{var h=a.getAttribute('href');var m=(a.getAttribute('data-match')||'').split(' ').filter(Boolean);var treffer=m.length?m.some(function(x){{return x==='/admin'?p==='/admin':(p===x||p.indexOf(x+'/')===0||p.indexOf(x+'-')===0);}}):(h===p||(h==='/messages/select'&&p.indexOf('/messages')===0));if(treffer){{a.setAttribute('aria-current','page');}}}});}})();
 </script>
+<script src="/static/suche.js?v={ASSET_VERSION}"></script>
 <script src="/static/app.js?v={ASSET_VERSION}" defer></script>
 </body>
 </html>""".encode("utf-8")
@@ -5186,7 +5320,7 @@ class App(BaseHTTPRequestHandler):
             open_quantity = open_order_product_quantities.get(str(p["id"]), 0)
             status_badge = f'<div class="ordered-open-badge">Bereits offen bestellt: {open_quantity}</div>' if open_quantity > 0 else ""
             card_class = "product-card ordered-open-product" if open_quantity > 0 else "product-card"
-            suchtext = f"{p['name']} {p['package_size']}".lower()
+            suchtext = f"{p['name']} {p['package_size']} {' '.join(cats)} {p['source'] or ''}"
             return f"""
             <article class="{card_class}" data-product-id="{p['id']}" data-product-name="{esc(p['name'])}" data-product-package="{esc(p['package_size'])}" data-kategorien="{esc('|'.join(cats))}" data-suche="{esc(suchtext)}">
                 <div class="pk-bild" style="--pk-farbe:{f}">{bild}</div>
@@ -5851,7 +5985,7 @@ class App(BaseHTTPRequestHandler):
         for category in categories:
             category_products = [p for p in products if product_has_category(p, category)]
             product_checks = "".join(
-                f'<label class="visibility-option product-visibility-option"><input class="visibility-product-check" type="checkbox" name="product_{product["id"]}" value="1" data-category="{esc(category)}" {"checked" if str(product["id"]) in visible_product_ids else ""}><span>{esc(product["name"])}<small>{esc(product["package_size"])}</small></span></label>'
+                f'<label class="visibility-option product-visibility-option" data-suche="{esc(" ".join([product["name"] or "", product["package_size"] or "", category, product["source"] or ""]))}"><input class="visibility-product-check" type="checkbox" name="product_{product["id"]}" value="1" data-category="{esc(category)}" {"checked" if str(product["id"]) in visible_product_ids else ""}><span>{esc(product["name"])}<small>{esc(product["package_size"])}</small></span></label>'
                 for product in category_products
             )
             product_panels.append(
@@ -6045,7 +6179,8 @@ class App(BaseHTTPRequestHandler):
             basis_preis, basis_einheit = produkt_basispreis(p)
             preis_text = (f'<span class="vw-produkt-preis">{geld(basis_preis)}/{BASIS_NAME.get(basis_einheit, basis_einheit or "?")}</span>'
                           if basis_preis is not None else '<span class="vw-produkt-preis vw-grau">kein Preis</span>')
-            suche = normalize_text_key(" ".join([p["name"] or "", p["package_size"] or "", p["source"] or "", " ".join(kategorien)]))
+            suche = " ".join([p["name"] or "", p["package_size"] or "", p["source"] or "",
+                              " ".join(kategorien), (p["artikelnummer"] if "artikelnummer" in p.keys() else "") or ""])
             status = "" if p["active"] else '<span class="vw-marke grau">ausgeblendet</span>'
             zeilen.append(f"""
             <div class="vw-produkt {'ist-aus' if not p['active'] else ''}" id="p-{p['id']}" data-id="{p['id']}" data-suche="{esc(suche)}"
@@ -6279,7 +6414,7 @@ class App(BaseHTTPRequestHandler):
                     f'<input type="hidden" name="name" value="{esc(name)}"><button class="danger" type="submit">Löschen</button></form>'
                 )
             zeilen.append(f"""
-            <tr>
+            <tr data-suche="{esc(name)}">
                 <td><b>{esc(name)}</b></td>
                 <td class="zahl"><a href="/admin/products?gruppe={esc(normalize_text_key(name))}">{anzahl}</a></td>
                 <td>
@@ -6301,6 +6436,7 @@ class App(BaseHTTPRequestHandler):
             </form>
             <p class="vw-klein">Bitte kein Komma im Namen – „&amp;“ geht (z. B. „Milchprodukte &amp; Eier“).</p>
         </section>
+        {suchfeld("gruppenSuche", "Warengruppe suchen", ".vw-tabelle tr[data-suche]", einheit="Warengruppen") if len(zeilen) > 7 else ""}
         <div class="vw-tabelle-wrap">
             <table class="vw-tabelle">
                 <tr><th>Warengruppe</th><th class="zahl">Produkte</th><th>Umbenennen</th><th></th></tr>
@@ -6523,8 +6659,10 @@ class App(BaseHTTPRequestHandler):
         if erledigt:
             unter += f' · erledigt {esc(order["completed_at"])}'
         teil = f'{len(offen_items)} von {len(items)} offen' if (not erledigt and 0 < len(offen_items) < len(items)) else (f'{len(items)} Positionen' if len(items) != 1 else '1 Position')
+        such_text = " ".join([order["location"] or "", order["order_number"] or "", order["ordered_by"] or "",
+                              order["note"] or ""] + [f'{i["product_name"]} {i["source"] or ""}' for i in items])
         return f"""
-        <div class="vw-bestellung-wrap {'ist-erledigt' if erledigt else ''}" id="order-{order['id']}">
+        <div class="vw-bestellung-wrap {'ist-erledigt' if erledigt else ''}" id="order-{order['id']}" data-suche="{esc(such_text)}">
         <label class="vw-auswahl"><input class="vw-bestell-check" type="checkbox" name="order_{order['id']}" value="1" form="sammelForm" aria-label="Bestellung {esc(order['order_number'])} auswählen"></label>
         <details class="vw-bestellung">
             <summary>
@@ -6647,6 +6785,7 @@ class App(BaseHTTPRequestHandler):
         {monat_auswahl}
         {f'<div class="vw-chips">{chips}</div>' if chips else ''}
         {alle_pdf}
+        {suchfeld("bestellSuche", "Bestellung suchen – Standort, Nummer, Name oder Produkt", ".vw-bestellung-wrap", einheit="Bestellungen", ueberschriften="h3.vw-tag") if len(liste) > 3 else ""}
         <div class="vw-bestellliste">{''.join(karten) or leer}</div>
         <form id="sammelForm" method="post" action="/admin/orders/combined-pdf">
             <input type="hidden" name="return_location" value="{ansicht}">
@@ -7504,7 +7643,8 @@ class App(BaseHTTPRequestHandler):
                 f'<label class="vw-schalter"><input class="visibility-category-toggle" type="checkbox" name="category_{esc(g)}" value="1" data-category="{esc(g)}" {"checked" if alle else ""}><span>{esc(g)} <small>{an}/{len(in_gruppe)}</small></span></label>'
             )
             haken = "".join(
-                f'<label class="vw-haken-zeile"><input class="visibility-product-check" type="checkbox" name="product_{p["id"]}" value="1" data-category="{esc(g)}" {"checked" if str(p["id"]) in sichtbar_ids else ""}> {esc(p["name"])} <small>{esc(p["package_size"])}</small></label>'
+                f'<label class="vw-haken-zeile vw-sicht-produkt" data-suche="{esc(" ".join([p["name"] or "", p["package_size"] or "", g, p["source"] or ""]))}">'
+                f'<input class="visibility-product-check" type="checkbox" name="product_{p["id"]}" value="1" data-category="{esc(g)}" {"checked" if str(p["id"]) in sichtbar_ids else ""}> {esc(p["name"])} <small>{esc(p["package_size"])}</small></label>'
                 for p in in_gruppe
             )
             bloecke.append(f'<details class="vw-aufklapp vw-sicht-gruppe"><summary>{esc(g)} <span class="vw-klein">{an} von {len(in_gruppe)} sichtbar</span></summary><div class="vw-haken-liste">{haken}</div></details>')
@@ -7515,7 +7655,8 @@ class App(BaseHTTPRequestHandler):
                 <input type="hidden" name="location_id" value="{esc(lid)}">
                 <input type="hidden" name="zurueck" value="standort">
                 <fieldset class="vw-feldgruppe"><legend>Ganze Warengruppen an/aus</legend><div class="vw-schalter-raster">{''.join(gruppen_haken)}</div></fieldset>
-                <p class="vw-klein">Für einzelne Produkte die Gruppe aufklappen:</p>
+                <p class="vw-klein">Für einzelne Produkte die Gruppe aufklappen oder suchen:</p>
+                {suchfeld("sichtSuche", "Produkt suchen – auch Teilwort, Zahl oder mit Tippfehler", ".vw-sicht-produkt", ".vw-sicht-gruppe", einheit="Produkte")}
                 {''.join(bloecke)}
                 <div class="vw-dialog-fuss vw-klebend"><button class="primary" type="submit">Sortiment speichern</button></div>
             </form>
@@ -8174,7 +8315,8 @@ class App(BaseHTTPRequestHandler):
             con.close()
             return self.send_html(b'<p class="vw-leer">Buchung nicht gefunden.</p>', 404)
         belege = con.execute("SELECT b.* FROM zuordnung z JOIN belege b ON b.id=z.beleg_id WHERE z.buchung_id=?", (bu["id"],)).fetchall()
-        kand = bh.kandidaten(con, bu, limit=10, suche=suche)
+        kand = bh.kandidaten(con, bu, limit=10, suche=suche,
+                             passt=(lambda text: suche_passt(text, suche)) if suche else None)
         konto = con.execute("SELECT name FROM konten WHERE id=?", (bu["konto_id"],)).fetchone()
         con.close()
         monat = (bu["datum"] or "")[:7]
@@ -8624,7 +8766,7 @@ class App(BaseHTTPRequestHandler):
             elif k["status"] == "unvollstaendig":
                 hinweis = f'<small class="vw-klein-block">{esc(k["probleme"][0])}{" …" if len(k["probleme"]) > 1 else ""}</small>'
             zeilen.append(f"""
-            <tr>
+            <tr data-suche="{esc(rezept['name'] or '')} {esc(rezept['einheit'] or '')}">
                 <td><a href="/admin/kalkulation/rezept?id={rezept['id']}"><b>{esc(rezept['name'])}</b></a>
                     <small class="vw-klein-block">{zahl_kurz(rezept['menge'])} {esc(rezept['einheit'])}
                     {f"· {zahl_kurz(rezept['portionen'])} Portionen" if rezept['portionen'] else ""}</small></td>
@@ -8655,10 +8797,11 @@ class App(BaseHTTPRequestHandler):
                         '<a class="button primary" href="/admin/kalkulation/rezept?id=neu">+ Neue Sorte</a>')}
         {warnung}
         <section class="vw-karte">
+            {suchfeld("kalkSuche", "Sorte suchen", "#kalkListe tr[data-suche]", einheit="Sorten") if len(daten) > 7 else ""}
             <table class="vw-tabelle">
                 <thead><tr><th>Sorte</th><th class="zahl">Wareneinsatz je Portion</th><th class="zahl">Verkauf brutto</th>
                 <th class="zahl">Faktor</th><th class="zahl">Ziel</th><th>Status</th></tr></thead>
-                <tbody>{''.join(zeilen) or '<tr><td colspan="6"><p class="vw-leer">Noch keine Sorte angelegt. Oben rechts auf „Neue Sorte“.</p></td></tr>'}</tbody>
+                <tbody id="kalkListe">{''.join(zeilen) or '<tr><td colspan="6"><p class="vw-leer">Noch keine Sorte angelegt. Oben rechts auf „Neue Sorte“.</p></td></tr>'}</tbody>
             </table>
             {f'<p class="vw-klein">{len(unvollstaendig)} Sorte(n) lassen sich noch nicht rechnen, weil Einkaufspreise oder Gebindeangaben fehlen – siehe <a href="/admin/kalkulation/preise">Einkaufspreise</a>.</p>' if unvollstaendig else ''}
         </section>
@@ -8814,8 +8957,8 @@ class App(BaseHTTPRequestHandler):
         ).fetchall()
         con.close()
         if suche:
-            s = normalize_text_key(suche)
-            produkte = [p for p in produkte if s in normalize_text_key(f"{p['name']} {p['source']} {p['artikelnummer'] or ''}")]
+            produkte = suche_filter(produkte, suche,
+                                    lambda p: f"{p['name']} {p['package_size'] or ''} {p['source']} {p['artikelnummer'] or ''}")
         ohne_preis = [p for p in produkte if p["einkaufspreis"] is None]
         if nur_ohne:
             produkte = ohne_preis
@@ -9073,8 +9216,11 @@ class App(BaseHTTPRequestHandler):
                     + (f'<small class="vw-klein-block">Artikelnr. {esc(v["artikelnummer"])}</small>' if v["artikelnummer"] else "")
                     + f'<small class="vw-klein-block">{zahl_kurz(v["menge"])} {esc(v["einheit"])} · {geld(v["preis"])}</small>')
 
+        def such_text(v):
+            return " ".join([v["name"] or "", v["artikelnummer"] or "", str(v["einheit"] or ""), v.get("treffer") or ""])
+
         sicher_zeilen = "".join(
-            f'<tr><td>{zeile_text(v)}</td><td>{"Preis aktualisieren" if v["art"] == "preis" else "neu verknüpfen"}'
+            f'<tr data-suche="{esc(such_text(v))}"><td>{zeile_text(v)}</td><td>{"Preis aktualisieren" if v["art"] == "preis" else "neu verknüpfen"}'
             f'<small class="vw-klein-block">{esc(v["treffer"])}</small></td></tr>' for v in sicher)
 
         frage_zeilen = []
@@ -9083,7 +9229,7 @@ class App(BaseHTTPRequestHandler):
                 f'<option value="{k["id"]}">{esc(k["name"])} · {esc(k["gebinde"] or "")} ({int(k["wert"] * 100)} % ähnlich)</option>'
                 for k in v["kandidaten"])
             frage_zeilen.append(f"""
-            <tr>
+            <tr data-suche="{esc(such_text(v))}">
                 <td>{zeile_text(v)}</td>
                 <td>
                     <select name="wahl_{v['nr']}" class="vw-wachsen">
@@ -9095,12 +9241,15 @@ class App(BaseHTTPRequestHandler):
             </tr>""")
 
         neu_zeilen = "".join(
-            f'<tr><td><label class="vw-haken-zeile"><input type="checkbox" name="neu_{v["nr"]}" value="1" checked> {zeile_text(v)}</label></td></tr>'
+            f'<tr data-suche="{esc(such_text(v))}"><td><label class="vw-haken-zeile"><input type="checkbox" name="neu_{v["nr"]}" value="1" checked> {zeile_text(v)}</label></td></tr>'
             for v in neue)
 
         body = f"""
         {admin_kopf(f'Vorschau · {esc(haendler)}',
                     f'{esc(daten["dateiname"])} · {len(vorgaenge)} Zeilen gelesen. Gespeichert wird erst beim Übernehmen.')}
+        <section class="vw-karte">
+            {suchfeld("vorschauSuche", "Artikel in der Liste suchen – Name, Artikelnummer, Zahl", ".vw-tabelle tr[data-suche]", einheit="Zeilen")}
+        </section>
         <form method="post" action="/admin/preisliste/uebernehmen">
             <input type="hidden" name="token" value="{esc(token)}">
             <section class="vw-karte">
@@ -9393,8 +9542,8 @@ class App(BaseHTTPRequestHandler):
         vorschlaege = {r["id"]: r for r in con.execute("SELECT * FROM belege WHERE id IN (SELECT vorschlag_id FROM buchungen WHERE vorschlag_id IS NOT NULL)")}
         con.close()
         if suche:
-            s = bh.schluessel_text(suche)
-            buchungen = [b for b in buchungen if s in bh.schluessel_text(f"{b['gegenpartei']} {b['zweck']} {bh.betrag_text(b['betrag'])}")]
+            buchungen = suche_filter(buchungen, suche,
+                                     lambda b: f"{b['gegenpartei']} {b['zweck']} {bh.betrag_text(b['betrag'])}")
         z = {"alle": len(buchungen)}
         for bu in buchungen:
             z[bu["status"]] = z.get(bu["status"], 0) + 1
@@ -9525,8 +9674,8 @@ class App(BaseHTTPRequestHandler):
         else:
             zeilen = nach_stand(nach_art(gueltig, art_f), stand_f)
         if suche:
-            s = bh.schluessel_text(suche)
-            zeilen = [b for b in zeilen if s in bh.schluessel_text(" ".join([b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))]
+            zeilen = suche_filter(zeilen, suche, lambda b: " ".join(
+                [b["lieferant"], b["rechnungsnr"], b["original_name"], b["mail_betreff"], bh.betrag_text(b["betrag"])]))
 
         def link(a=None, st=None):
             return f"/admin/buchhaltung/belege?monat={monat}&art={a or art_f}&stand={st or stand_f}"
@@ -9661,7 +9810,7 @@ class App(BaseHTTPRequestHandler):
         jahr = monat[:4]
         suche = self.query_text(query, "q")
         alle = self.bh_lieferanten_daten(jahr)
-        liste = [e for e in alle if not suche or bh.schluessel_text(suche) in e["key"]]
+        liste = suche_filter(alle, suche, lambda e: f"{e['name']} {e['key']}")
         gewaehlt = self.query_text(query, "l") or (liste[0]["key"] if liste else "")
         e = next((x for x in alle if x["key"] == gewaehlt), None)
         zeilen = []
@@ -10078,8 +10227,7 @@ class App(BaseHTTPRequestHandler):
         if gruppen.get(filt):
             zeilen = [z for z in zeilen if z["art"] in gruppen[filt]]
         if suche:
-            s_ = bh.schluessel_text(suche)
-            zeilen = [z for z in zeilen if s_ in bh.schluessel_text(f"{z['von']} {z['betreff']} {z['ergebnis']}")]
+            zeilen = suche_filter(zeilen, suche, lambda z: f"{z['von']} {z['betreff']} {z['ergebnis']}")
         chips = [("alle", "Alle"), ("beleg", f"Neue Belege {zahl.get('beleg', 0)}"), ("pruefen", f"Zum Prüfen {zahl.get('unsicher', 0) + zahl.get('portal', 0)}"),
                  ("keine", f"Keine Rechnung / schon da {sum(zahl.get(a, 0) for a in ('keine', 'doppelt', 'vorhanden', 'kasse'))}"), ("ohne", f"Ohne Anhang {zahl.get('ohne', 0)}"), ("fehler", f"Fehler {zahl.get('fehler', 0)}")]
         chips_html = "".join(f'<a class="vw-chip" aria-pressed="{"true" if k == filt else "false"}" href="/admin/buchhaltung/protokoll?quelle={qid}&filter={k}">{esc(t)}</a>' for k, t in chips)
@@ -10124,7 +10272,7 @@ class App(BaseHTTPRequestHandler):
                 eintrag = mengen.get(p["id"])
                 wert = inventur_menge_text(eintrag["menge"]) if eintrag else ""
                 zeilen.append(f"""
-                <div class="inv-zeile{' ist-gezaehlt' if eintrag else ''}" data-inv-zeile data-suche="{esc((p['name'] + ' ' + (p['package_size'] or '')).lower())}">
+                <div class="inv-zeile{' ist-gezaehlt' if eintrag else ''}" data-inv-zeile data-suche="{esc(' '.join([p['name'] or '', p['package_size'] or '', gruppe, p['source'] or '']))}">
                     <div class="inv-name"><b>{esc(p['name'])}</b><small>{esc(p['package_size'] or '')}</small></div>
                     <div class="inv-eingabe">
                         <button type="button" class="inv-knopf" data-inv-minus aria-label="Eins weniger">−</button>
@@ -10233,10 +10381,14 @@ class App(BaseHTTPRequestHandler):
             feld.value = text(z); speichern(feld);
           }});
           var suche = document.querySelector('[data-inv-suche]');
-          if (suche) suche.addEventListener('input', function () {{
-            var q = suche.value.trim().toLowerCase();
-            liste.querySelectorAll('[data-inv-zeile]').forEach(function (z) {{ z.hidden = !!q && z.getAttribute('data-suche').indexOf(q) < 0; }});
-            liste.querySelectorAll('.inv-gruppe').forEach(function (g) {{ g.hidden = !!q && !g.querySelector('[data-inv-zeile]:not([hidden])'); if (q) g.open = true; }});
+          document.addEventListener('DOMContentLoaded', function () {{
+            if (!suche || !window.opSuche) return;
+            window.opSuche.verbinden({{
+              feld: suche,
+              zeilen: function () {{ return liste.querySelectorAll('[data-inv-zeile]'); }},
+              gruppen: function () {{ return liste.querySelectorAll('.inv-gruppe'); }},
+              zeilenWahl: '[data-inv-zeile]:not([hidden])'
+            }});
           }});
           document.querySelectorAll('[data-inv-frei],[data-inv-fertig]').forEach(function (f) {{
             f.addEventListener('submit', function (e) {{
@@ -10358,12 +10510,23 @@ class App(BaseHTTPRequestHandler):
                 f'<span class="vw-marke {"gruen" if z["meldung"] else ("honig" if z["gezaehlt"] else "grau")}">{esc(location_label(lid))} {z["gezaehlt"]}/{z["sortiment"]}{" ✓" if z["meldung"] else ""}</span>'
                 for lid, z in zusammen.items())
             wert = sum(z["wert"] for z in zusammen.values())
+            gezaehlt_gesamt = sum(len([p for p in z["posten"] if (p["menge"] or 0) > 0]) for z in zusammen.values())
+            warnung = (f" Die {gezaehlt_gesamt} gezählten Mengen sind dann weg."
+                       if gezaehlt_gesamt else " Es ist noch nichts gezählt.")
             karten.append(f"""
+            <div class="inv-karte-wrap">
             <a class="vw-karte vw-standort-karte" href="/admin/inventur/ansicht?id={inv['id']}">
                 <span class="vw-karte-kopf"><h3>{esc(inv['titel'])}</h3><span class="vw-marke {'gruen' if inv['status'] == 'abgeschlossen' else 'blau'}">{'abgeschlossen' if inv['status'] == 'abgeschlossen' else 'läuft'}</span></span>
                 <span class="vw-klein">Stichtag {datetime.strptime(inv['stichtag'], '%Y-%m-%d').strftime('%d.%m.%Y')} · Warenwert {inventur_euro(wert)}</span>
                 <span class="vw-merkmale">{orte}</span>
-            </a>""")
+            </a>
+            <form method="post" action="/admin/inventur/status" class="inv-karte-loeschen"
+                  data-vw-confirm="Inventur „{esc(inv['titel'])}“ löschen?{warnung} Das lässt sich nicht zurückholen.">
+                <input type="hidden" name="inventur_id" value="{inv['id']}">
+                <input type="hidden" name="aktion" value="loeschen">
+                <button class="danger" type="submit">Löschen</button>
+            </form>
+            </div>""")
         heute = berlin_now()
         monate = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
         orte_haken = "".join(
@@ -10437,7 +10600,8 @@ class App(BaseHTTPRequestHandler):
                         ek_zelle = (inventur_euro(p["einkaufspreis"]) if p["einkaufspreis"] is not None
                                     else "<span class=inv-ohne-preis>kein Preis</span>")
                     zeilen.append(
-                        f'<tr><td>{esc(p["name"])}</td><td>{esc(p["gebinde"])}</td><td class="zahl"><b>{esc(inventur_menge_text(p["menge"]))}</b></td>'
+                        f'<tr data-suche="{esc(" ".join([p["name"] or "", p["gebinde"] or "", p["kategorie"] or "", p["gezaehlt_von"] or ""]))}">'
+                        f'<td>{esc(p["name"])}</td><td>{esc(p["gebinde"])}</td><td class="zahl"><b>{esc(inventur_menge_text(p["menge"]))}</b></td>'
                         f'<td class="zahl">{ek_zelle}</td>'
                         f'<td class="inv-klein">{esc(p["gezaehlt_von"])}</td><td class="zahl">{inventur_euro(wert) if wert is not None else "–"}</td></tr>')
             produkte = inventur_produkte(lid)
@@ -10499,6 +10663,9 @@ class App(BaseHTTPRequestHandler):
                 <tr class="inv-summe"><th>Gesamt</th><th></th><th class="zahl">{inventur_euro(gesamt)}</th></tr>
             </table></div>
             <p class="vw-klein">Warenwert = gezählte Menge × Einkaufspreis je Gebinde aus der Kalkulation{'' if not offen else ' (aktueller Stand – wird beim Abschließen festgeschrieben)'}.</p>
+        </section>
+        <section class="vw-karte inv-nicht-drucken">
+            {suchfeld("invSuche", "Artikel suchen – auch Teilwort, Zahl oder mit Tippfehler", ".inv-tabelle tr[data-suche]", einheit="Positionen")}
         </section>
         {''.join(abschnitte)}
         <script src="/static/verwaltung.js?v={ASSET_VERSION}" defer></script>"""

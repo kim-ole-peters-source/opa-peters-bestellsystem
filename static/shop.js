@@ -17,20 +17,15 @@
   var abschnitte = Array.prototype.slice.call(document.querySelectorAll('.shop-abschnitt'));
   var gruppe = shop.getAttribute('data-start-gruppe') || '';
 
-  function normal(text) {
-    return String(text || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-  }
-
   function filtern() {
-    var begriffe = normal(suche ? suche.value : '').split(/\s+/).filter(Boolean);
+    var begriffe = window.opSuche.begriffe(suche ? suche.value : '');
     var gefiltert = !!gruppe || begriffe.length > 0;
     var sichtbar = 0;
 
     karten.forEach(function (karte) {
-      var text = normal(karte.getAttribute('data-suche'));
       var gruppen = (karte.getAttribute('data-kategorien') || '').split('|');
       var passt = (!gruppe || gruppen.indexOf(gruppe) !== -1) &&
-        begriffe.every(function (b) { return text.indexOf(b) !== -1; });
+        window.opSuche.passt(window.opSuche.zielVon(karte), begriffe);
       karte.hidden = !passt;
       if (passt) sichtbar += 1;
     });

@@ -1,9 +1,10 @@
-const CACHE_NAME = 'opa-peters-bestellung-v79-inventur-ekfeld';
+const CACHE_NAME = 'opa-peters-bestellung-v80-suche';
 const STATIC_ASSETS = [
   '/',
   '/login',
   '/static/style.css',
   '/static/app.js',
+  '/static/suche.js',
   '/static/shop.js',
   '/static/verwaltung.js',
   '/static/icons/opa-peters-logo.png',

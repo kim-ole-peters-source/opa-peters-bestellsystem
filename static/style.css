@@ -3381,3 +3381,15 @@ nav a[href="/inventur"]::before { content: "📋"; }
 }
 .vw-produkt-preis { font-size: 0.82rem; color: #475569; white-space: nowrap; }
 .vw-produkt-preis.vw-grau { color: #94a3b8; }
+
+/* Suche an Listen (static/suche.js) */
+.vw-suche-block { display: block; margin: 0 0 8px; }
+.vw-suche-block input[type="search"] { width: 100%; min-height: 46px; border-radius: 999px; padding: 10px 18px; margin: 0; }
+.vw-suche-treffer:empty { display: none; }
+.vw-suche-treffer { margin: 0 0 10px; color: #8A7A6D; }
+
+/* Inventur-Übersicht: Karte mit Löschen darunter */
+.inv-karte-wrap { display: flex; flex-direction: column; gap: 6px; }
+.inv-karte-wrap .vw-karte { margin: 0; }
+.inv-karte-loeschen { display: flex; justify-content: flex-end; margin: 0; }
+.inv-karte-loeschen button { padding: 6px 14px; font-size: 13px; }
