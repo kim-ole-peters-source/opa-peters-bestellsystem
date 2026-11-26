@@ -3413,3 +3413,9 @@ nav a[href="/inventur"]::before { content: "📋"; }
   100% { background: transparent; }
 }
 @media (max-width: 640px) { .op-vorschlag { max-height: 50vh; } }
+
+/* Rezeptblatt */
+.rezept-druck-titel { display: none; }
+@media print {
+  .rezept-druck-titel { display: block; margin: 0 0 4px; }
+}

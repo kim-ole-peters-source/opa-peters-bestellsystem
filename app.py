@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-26-vorschlag"
+ASSET_VERSION = "2026-11-26-rezepte"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -2793,11 +2793,11 @@ ADMIN_NAV = [
     ("/admin/messages", "Nachrichten", "✉️", ["/admin/messages"], False),
     ("/admin/products", "Sortiment", "📦", ["/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/preisliste"], True),
     ("/admin/time", "Team", "👥", ["/admin/time", "/admin/employees", "/admin/aufgaben", "/admin/cockpit-content", "/admin/task-report"], False),
-    ("/admin/kalkulation", "Kalkulation", "🧮", ["/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise"], True),
+    ("/admin/kalkulation", "Kalkulation", "🧮", ["/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/rezepte", "/admin/rezepte/blatt"], True),
     ("/admin/buchhaltung", "Buchhaltung", "📒", ["/admin/buchhaltung"], True),
     ("/admin/locations", "Standorte", "📍", ["/admin/locations", "/admin/location", "/admin/visibility", "/admin/inventur"], True),
     ("/admin/settings", "Einstellungen", "⚙️", ["/admin/settings", "/admin/mehr"], True),
-    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/inventur", "/admin/settings"], None),
+    ("/admin/mehr", "Mehr", "☰", ["/admin/mehr", "/admin/kalkulation", "/admin/kalkulation/rezept", "/admin/kalkulation/preise", "/admin/rezepte", "/admin/rezepte/blatt", "/admin/buchhaltung", "/admin/products", "/admin/edit-product", "/admin/categories", "/admin/import", "/admin/locations", "/admin/location", "/admin/inventur", "/admin/settings"], None),
 ]
 
 
@@ -3230,6 +3230,14 @@ def einheit_basis(einheit):
     return (None, 0.0)
 
 
+def einheit_text(einheit):
+    """'st' -> 'Stück', 'kg' -> 'kg'. Fuer die Anzeige auf Rezeptblatt und Co."""
+    schluessel = str(einheit or "").strip().lower()
+    if schluessel in ("st", "stk", "stueck", "stück", "pg", "kt"):
+        return "Stück"
+    return einheit or ""
+
+
 def menge_in_basis(menge, einheit):
     basis, faktor = einheit_basis(einheit)
     if not basis:
@@ -3286,6 +3294,7 @@ def kalk_init():
         );
         """
     )
+    add_column_if_missing(con, "rezepte", "menge_auto", "INTEGER NOT NULL DEFAULT 1")
     # Inhalt einmalig aus der Gebindegröße vorbelegen, damit nichts leer startet
     offen = con.execute("SELECT id, package_size FROM products WHERE inhalt_menge IS NULL").fetchall()
     for p in offen:
@@ -3366,6 +3375,21 @@ def rezept_rechnen(rezept, zutaten, standardfaktor=None):
             probleme.append(f"{zeile['name']}: {zeile['hinweis']}")
         posten.append(zeile)
 
+    # Hergestellte Menge aus den Zutaten: kg und Liter werden 1:1 addiert,
+    # Stueck-Zutaten (Tueten, Becher, Deckel) zaehlen nicht zur Masse.
+    menge_aus_zutaten = 0.0
+    menge_offen = []
+    for z in zutaten:
+        basis, in_basis = menge_in_basis(z["menge"], z["einheit"])
+        if basis in ("kg", "l"):
+            menge_aus_zutaten += in_basis
+        elif basis == "st":
+            menge_offen.append(f"{z['produkt_name'] or 'Zutat'} ({BASIS_NAME['st']})")
+        else:
+            menge_offen.append(f"{z['produkt_name'] or 'Zutat'} (Einheit unbekannt)")
+    auto_menge = bool(rezept["menge_auto"]) if "menge_auto" in rezept.keys() else False
+    menge = menge_aus_zutaten if (auto_menge and menge_aus_zutaten > 0) else (rezept["menge"] or 0)
+
     portionen = rezept["portionen"] or 0
     je_portion = (wareneinsatz / portionen) if portionen > 0 else None
     mwst = rezept["mwst"] if rezept["mwst"] is not None else 7.0
@@ -3374,6 +3398,13 @@ def rezept_rechnen(rezept, zutaten, standardfaktor=None):
     ist_faktor = (vk_netto / je_portion) if (je_portion and je_portion > 0 and vk_netto) else None
     mindest_netto = je_portion * ziel_faktor if je_portion else None
     mindest_brutto = mindest_netto * (1 + mwst / 100) if mindest_netto is not None else None
+
+    # Verkaufspreis je Einheit (Liter/kg) direkt aus dem Zielfaktor
+    einsatz_je_einheit = (wareneinsatz / menge) if menge > 0 else None
+    vk_einheit_netto = einsatz_je_einheit * ziel_faktor if einsatz_je_einheit is not None else None
+    vk_einheit_brutto = vk_einheit_netto * (1 + mwst / 100) if vk_einheit_netto is not None else None
+    # und was der eingetragene Portionspreis je Einheit tatsaechlich bringt
+    ist_einheit_brutto = ((vk_brutto * portionen) / menge) if (vk_brutto and portionen > 0 and menge > 0) else None
     if probleme:
         status = "unvollstaendig"
     elif ist_faktor is None:
@@ -3386,6 +3417,11 @@ def rezept_rechnen(rezept, zutaten, standardfaktor=None):
         "posten": posten, "wareneinsatz": wareneinsatz, "je_portion": je_portion,
         "vk_brutto": vk_brutto, "vk_netto": vk_netto, "mwst": mwst,
         "ziel_faktor": ziel_faktor, "ist_faktor": ist_faktor,
+        "menge": menge, "menge_aus_zutaten": menge_aus_zutaten, "menge_auto": auto_menge,
+        "menge_offen": menge_offen,
+        "einsatz_je_einheit": einsatz_je_einheit,
+        "vk_einheit_netto": vk_einheit_netto, "vk_einheit_brutto": vk_einheit_brutto,
+        "ist_einheit_brutto": ist_einheit_brutto,
         "mindest_netto": mindest_netto, "mindest_brutto": mindest_brutto,
         "status": status, "probleme": probleme,
         "luecke_brutto": (mindest_brutto - vk_brutto) if (mindest_brutto is not None and vk_brutto and mindest_brutto > vk_brutto) else None,
@@ -4520,6 +4556,10 @@ class App(BaseHTTPRequestHandler):
             return self.show_kalk_rezept(query=parse_qs(parsed.query))
         if path == "/admin/kalkulation/preise":
             return self.show_kalk_preise(query=parse_qs(parsed.query))
+        if path == "/admin/rezepte":
+            return self.show_rezepte(query=parse_qs(parsed.query))
+        if path == "/admin/rezepte/blatt":
+            return self.show_rezeptblatt(query=parse_qs(parsed.query))
         if path == "/admin/products":
             return self.show_products(query=parse_qs(parsed.query))
         if path == "/admin/edit-product":
@@ -6142,7 +6182,8 @@ class App(BaseHTTPRequestHandler):
         punkte = [
             ("/admin/products", "📦", "Sortiment", "Produkte, Warengruppen, Import"),
             ("/admin/time", "👥", "Team", "Zeiten, Personen, Aufgaben"),
-            ("/admin/kalkulation", "🧮", "Kalkulation", "Einkaufspreise, Rezepte, Zielmarge"),
+            ("/admin/kalkulation", "🧮", "Kalkulation", "Einkaufspreise, Zielmarge, Mindestpreise"),
+            ("/admin/rezepte", "📖", "Rezepte", "Zutaten, Chargen umrechnen, Rezeptblatt drucken"),
             ("/admin/buchhaltung", "📒", "Buchhaltung", "Belege, Kontoauszüge, Monatsexport"),
             ("/admin/locations", "📍", "Standorte", "Zugänge, Sortiment je Standort, Mindestbestand"),
             ("/admin/inventur", "📋", "Inventur", "Zählen je Standort, Inventurdokument"),
@@ -8742,6 +8783,7 @@ class App(BaseHTTPRequestHandler):
     def kalk_kopf(self, titel, unter="", aktionen="", aktiv="uebersicht"):
         reiter = [
             ("uebersicht", "Sorten", "/admin/kalkulation"),
+            ("rezepte", "Rezepte", "/admin/rezepte"),
             ("preise", "Einkaufspreise", "/admin/kalkulation/preise"),
         ]
         return admin_kopf(titel, unter, aktionen, reiter, aktiv)
@@ -8776,8 +8818,10 @@ class App(BaseHTTPRequestHandler):
             zeilen.append(f"""
             <tr data-suche="{esc(rezept['name'] or '')} {esc(rezept['einheit'] or '')}">
                 <td><a href="/admin/kalkulation/rezept?id={rezept['id']}"><b>{esc(rezept['name'])}</b></a>
-                    <small class="vw-klein-block">{zahl_kurz(rezept['menge'])} {esc(rezept['einheit'])}
+                    <small class="vw-klein-block">{zahl_kurz(k['menge'])} {esc(rezept['einheit'])}
                     {f"· {zahl_kurz(rezept['portionen'])} Portionen" if rezept['portionen'] else ""}</small></td>
+                <td class="zahl">{geld(k['vk_einheit_brutto']) if k['vk_einheit_brutto'] is not None else '–'}
+                    <small class="vw-klein-block">je {esc(BASIS_NAME.get(rezept['einheit'], rezept['einheit']))}</small></td>
                 <td class="zahl">{geld(k['je_portion']) if k['je_portion'] is not None else '–'}</td>
                 <td class="zahl">{geld(k['vk_brutto']) if k['vk_brutto'] else '–'}</td>
                 <td class="zahl">{faktor_text(k['ist_faktor'])}</td>
@@ -8807,9 +8851,9 @@ class App(BaseHTTPRequestHandler):
         <section class="vw-karte">
             {suchfeld("kalkSuche", "Sorte suchen", "#kalkListe tr[data-suche]", einheit="Sorten") if len(daten) > 5 else ""}
             <table class="vw-tabelle">
-                <thead><tr><th>Sorte</th><th class="zahl">Wareneinsatz je Portion</th><th class="zahl">Verkauf brutto</th>
+                <thead><tr><th>Sorte</th><th class="zahl">Mindestpreis je Einheit</th><th class="zahl">Wareneinsatz je Portion</th><th class="zahl">Verkauf brutto</th>
                 <th class="zahl">Faktor</th><th class="zahl">Ziel</th><th>Status</th></tr></thead>
-                <tbody id="kalkListe">{''.join(zeilen) or '<tr><td colspan="6"><p class="vw-leer">Noch keine Sorte angelegt. Oben rechts auf „Neue Sorte“.</p></td></tr>'}</tbody>
+                <tbody id="kalkListe">{''.join(zeilen) or '<tr><td colspan="7"><p class="vw-leer">Noch keine Sorte angelegt. Oben rechts auf „Neue Sorte“.</p></td></tr>'}</tbody>
             </table>
             {f'<p class="vw-klein">{len(unvollstaendig)} Sorte(n) lassen sich noch nicht rechnen, weil Einkaufspreise oder Gebindeangaben fehlen – siehe <a href="/admin/kalkulation/preise">Einkaufspreise</a>.</p>' if unvollstaendig else ''}
         </section>
@@ -8839,11 +8883,10 @@ class App(BaseHTTPRequestHandler):
             <section class="vw-karte vw-schmal">
                 <form method="post" action="/admin/kalkulation/rezept/neu" class="vw-formular">
                     <label>Name der Sorte<input name="name" required placeholder="z. B. Stracciatella"></label>
-                    <div class="vw-zwei">
-                        <label>Hergestellte Menge<input name="menge" inputmode="decimal" value="4,5" required></label>
-                        <label>Einheit{einheit_auswahl('einheit', 'l')}</label>
-                    </div>
+                    <label>Einheit der Sorte{einheit_auswahl('einheit', 'l')}</label>
                     <label>Portionen je Charge<input name="portionen" inputmode="decimal" placeholder="z. B. 45 Kugeln"></label>
+                    <p class="vw-klein">Die hergestellte Menge rechnet das System aus den Zutaten –
+                    du kannst sie später auch von Hand setzen.</p>
                     <button class="primary" type="submit">Anlegen</button>
                 </form>
             </section>"""
@@ -8899,9 +8942,38 @@ class App(BaseHTTPRequestHandler):
         else:
             ampel = '<div class="vw-hinweis">Trag Portionen und Verkaufspreis ein, dann rechnet das System die Marge aus.</div>'
 
+        if k["menge_auto"] and k["menge_aus_zutaten"] > 0:
+            offen = (f' · nicht mitgezählt: {esc(", ".join(k["menge_offen"]))}' if k["menge_offen"] else "")
+            menge_herkunft = f'<small class="vw-klein-block">aus den Zutaten gerechnet{offen}</small>'
+        elif k["menge_auto"]:
+            menge_herkunft = '<small class="vw-klein-block">noch keine Zutat mit kg oder Liter – solange gilt der Wert von Hand</small>'
+        else:
+            menge_herkunft = (f'<small class="vw-klein-block">von Hand gesetzt · aus den Zutaten wären es '
+                              f'{zahl_kurz(k["menge_aus_zutaten"])} {esc(rezept["einheit"])}</small>'
+                              if k["menge_aus_zutaten"] > 0 else '<small class="vw-klein-block">von Hand gesetzt</small>')
+
+        if k["vk_einheit_brutto"] is not None:
+            ist_zeile = (f'<tr><td>dein Portionspreis ergibt</td><td class="zahl">{geld(k["ist_einheit_brutto"])}</td></tr>'
+                         if k["ist_einheit_brutto"] is not None else "")
+            preis_je_einheit = f"""
+            <section class="vw-karte vw-schmal">
+                <h3>Verkaufspreis je {esc(BASIS_NAME.get(rezept['einheit'], rezept['einheit']))}</h3>
+                <table class="vw-tabelle">
+                    <tr><td>Wareneinsatz</td><td class="zahl">{geld(k['einsatz_je_einheit'])}</td></tr>
+                    <tr><td>× Zielfaktor {faktor_text(k['ziel_faktor'])} = netto</td><td class="zahl">{geld(k['vk_einheit_netto'])}</td></tr>
+                    <tr><td><b>brutto mit {zahl_kurz(k['mwst'])} % MwSt</b></td><td class="zahl"><b>{geld(k['vk_einheit_brutto'])}</b></td></tr>
+                    {ist_zeile}
+                </table>
+                <p class="vw-klein">So viel muss die Sorte je {esc(BASIS_NAME.get(rezept['einheit'], rezept['einheit']))}
+                bringen, damit der Zielfaktor steht – unabhängig davon, wie du sie portionierst.</p>
+            </section>"""
+        else:
+            preis_je_einheit = ""
+
         body = f"""
         {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
         {self.kalk_kopf(rezept['name'], 'Zutaten, Preise und Marge dieser Sorte.',
+                        '<a class="button" href="/admin/rezepte/blatt?id=' + str(rezept['id']) + '">Rezeptblatt</a>'
                         '<a class="button" href="/admin/kalkulation">Zurück zur Übersicht</a>')}
         {ampel}
         <section class="vw-karte">
@@ -8909,8 +8981,14 @@ class App(BaseHTTPRequestHandler):
             <table class="vw-tabelle">
                 <thead><tr><th>Produkt</th><th>Menge</th><th class="zahl">Kosten</th><th></th></tr></thead>
                 <tbody>{''.join(zutat_zeilen) or '<tr><td colspan="4"><p class="vw-leer">Noch keine Zutat eingetragen.</p></td></tr>'}</tbody>
-                <tfoot><tr><td><b>Wareneinsatz je {zahl_kurz(rezept['menge'])} {esc(rezept['einheit'])}</b></td><td></td>
-                <td class="zahl"><b>{geld(k['wareneinsatz'])}</b></td><td></td></tr></tfoot>
+                <tfoot>
+                <tr><td><b>Hergestellte Menge</b>{menge_herkunft}</td><td></td>
+                <td class="zahl"><b>{zahl_kurz(k['menge'])} {esc(rezept['einheit'])}</b></td><td></td></tr>
+                <tr><td><b>Wareneinsatz je Charge</b></td><td></td>
+                <td class="zahl"><b>{geld(k['wareneinsatz'])}</b></td><td></td></tr>
+                <tr><td>je {esc(BASIS_NAME.get(rezept['einheit'], rezept['einheit']))}</td><td></td>
+                <td class="zahl">{geld(k['einsatz_je_einheit']) if k['einsatz_je_einheit'] is not None else '–'}</td><td></td></tr>
+                </tfoot>
             </table>
             <form method="post" action="/admin/kalkulation/zutat/speichern" class="vw-inline-form">
                 <input type="hidden" name="rezept_id" value="{rezept['id']}">
@@ -8926,8 +9004,10 @@ class App(BaseHTTPRequestHandler):
             <form method="post" action="/admin/kalkulation/rezept/speichern" class="vw-formular">
                 <input type="hidden" name="rezept_id" value="{rezept['id']}">
                 <label>Name<input name="name" value="{esc(rezept['name'])}" required></label>
+                <label class="vw-haken-zeile"><input type="checkbox" name="menge_auto" value="1" {'checked' if k['menge_auto'] else ''}>
+                    <span class="vw-haken-text">Hergestellte Menge aus den Zutaten rechnen</span></label>
                 <div class="vw-zwei">
-                    <label>Hergestellte Menge<input name="menge" inputmode="decimal" value="{zahl_kurz(rezept['menge'])}" required></label>
+                    <label>Menge von Hand<input name="menge" inputmode="decimal" value="{zahl_kurz(rezept['menge'])}" required></label>
                     <label>Einheit{einheit_auswahl('einheit', rezept['einheit'])}</label>
                 </div>
                 <div class="vw-zwei">
@@ -8948,6 +9028,124 @@ class App(BaseHTTPRequestHandler):
                 <input type="hidden" name="rezept_id" value="{rezept['id']}">
                 <button class="danger" type="submit">Sorte löschen</button>
             </form>
+        </section>
+        {preis_je_einheit}
+        """
+        self.admin_seite(rezept["name"], body)
+
+    # ------------------------------------------------- Rezeptdatenbank
+    def show_rezepte(self, query=None):
+        """Alle Sorten als Rezeptsammlung: was drin ist, was es kostet, was es bringen muss."""
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        daten = alle_rezepte_rechnen()
+        zeilen = []
+        for rezept, k in daten:
+            zutaten_text = ", ".join(p["name"] for p in k["posten"][:4])
+            if len(k["posten"]) > 4:
+                zutaten_text += f" … (+{len(k['posten']) - 4})"
+            einheit_name = BASIS_NAME.get(rezept["einheit"], rezept["einheit"])
+            zeilen.append(f"""
+            <tr data-suche="{esc(" ".join([rezept["name"] or "", rezept["einheit"] or ""] + [p["name"] for p in k["posten"]]))}">
+                <td><a href="/admin/rezepte/blatt?id={rezept['id']}"><b>{esc(rezept['name'])}</b></a>
+                    <small class="vw-klein-block">{esc(zutaten_text) or 'noch keine Zutat'}</small></td>
+                <td class="zahl">{zahl_kurz(k['menge'])} {esc(rezept['einheit'])}</td>
+                <td class="zahl">{len(k['posten'])}</td>
+                <td class="zahl">{geld(k['wareneinsatz'])}</td>
+                <td class="zahl">{geld(k['vk_einheit_brutto']) if k['vk_einheit_brutto'] is not None else '–'}
+                    <small class="vw-klein-block">je {esc(einheit_name)}</small></td>
+                <td><a class="button" href="/admin/rezepte/blatt?id={rezept['id']}">Rezeptblatt</a></td>
+            </tr>""")
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {self.kalk_kopf('Rezepte', 'Jede kalkulierte Sorte ist hier ein Rezept – zum Nachschlagen, Umrechnen und Ausdrucken.',
+                        '<a class="button primary" href="/admin/kalkulation/rezept?id=neu">+ Neue Sorte</a>', aktiv='rezepte')}
+        <section class="vw-karte">
+            {suchfeld("rezeptSuche", "Rezept oder Zutat suchen", "#rezeptListe tr[data-suche]", einheit="Rezepte",
+                      titel_wahl="td:first-child b", unter_wahl="td:first-child small") if len(daten) > 5 else ""}
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+                <thead><tr><th>Sorte</th><th class="zahl">Menge</th><th class="zahl">Zutaten</th>
+                <th class="zahl">Wareneinsatz</th><th class="zahl">Mindestpreis</th><th></th></tr></thead>
+                <tbody id="rezeptListe">{''.join(zeilen) or '<tr><td colspan="6"><p class="vw-leer">Noch kein Rezept. Leg in der Kalkulation eine Sorte an und trag die Zutaten ein.</p></td></tr>'}</tbody>
+            </table></div>
+        </section>
+        """
+        self.admin_seite("Rezepte", body)
+
+    def show_rezeptblatt(self, query=None):
+        """Produktionszettel: Zutaten auf eine beliebige Chargengroesse umgerechnet."""
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        query = query or {}
+        kennung = self.query_text(query, "id")
+        rezept, zutaten = rezept_laden(int(kennung) if kennung.isdigit() else -1)
+        if not rezept:
+            return self.redirect("/admin/rezepte?error=" + quote_plus("Dieses Rezept gibt es nicht mehr."))
+        k = rezept_rechnen(rezept, zutaten)
+        einheit_name = BASIS_NAME.get(rezept["einheit"], rezept["einheit"])
+
+        wunsch_roh = self.query_text(query, "menge")
+        wunsch = parse_decimal(wunsch_roh, 0) if wunsch_roh else 0
+        basis_menge = k["menge"] or 0
+        if wunsch > 0 and basis_menge > 0:
+            faktor = wunsch / basis_menge
+            ziel_menge = wunsch
+        else:
+            faktor, ziel_menge = 1.0, basis_menge
+
+        zeilen = []
+        for p in k["posten"]:
+            menge_neu = (p["menge"] or 0) * faktor
+            kosten_neu = (p["kosten"] * faktor) if p["kosten"] is not None else None
+            zeilen.append(f"""
+            <tr>
+                <td><b>{esc(p['name'])}</b>{f'<small class="vw-klein-block">{esc(p["gebinde"])}</small>' if p['gebinde'] else ''}</td>
+                <td class="zahl"><b>{zahl_kurz(menge_neu)} {esc(einheit_text(p['einheit']))}</b></td>
+                <td class="zahl">{geld(kosten_neu) if kosten_neu is not None else '–'}</td>
+            </tr>""")
+
+        stufen = []
+        for wert in sorted({basis_menge, basis_menge * 2, basis_menge * 4, 10, 20, 50}):
+            if wert <= 0:
+                continue
+            aktiv = abs(wert - ziel_menge) < 0.001
+            stufen.append(f'<a class="button{" primary" if aktiv else ""}" '
+                           f'href="/admin/rezepte/blatt?id={rezept["id"]}&menge={zahl_kurz(wert).replace(",", ".")}">'
+                           f'{zahl_kurz(wert)} {esc(rezept["einheit"])}</a>')
+
+        wareneinsatz_neu = k["wareneinsatz"] * faktor
+        body = f"""
+        {admin_meldungen(self.query_text(query, 'msg'), self.query_text(query, 'error'))}
+        {admin_kopf(rezept['name'], f'Rezeptblatt · Grundrezept {zahl_kurz(basis_menge)} {esc(rezept["einheit"])}',
+                    '<a class="button" href="/admin/rezepte">Alle Rezepte</a>'
+                    f'<a class="button" href="/admin/kalkulation/rezept?id={rezept["id"]}">Kalkulation</a>'
+                    '<button class="button" type="button" onclick="window.print()">Drucken</button>')}
+        <section class="vw-karte inv-nicht-drucken">
+            <h3>Auf welche Menge?</h3>
+            <div class="vw-knopfreihe">{''.join(stufen)}</div>
+            <form method="get" action="/admin/rezepte/blatt" class="vw-inline-form">
+                <input type="hidden" name="id" value="{rezept['id']}">
+                <label>Eigene Menge<input name="menge" inputmode="decimal" value="{zahl_kurz(ziel_menge)}"></label>
+                <span class="vw-klein">{esc(rezept['einheit'])}</span>
+                <button class="primary" type="submit">Umrechnen</button>
+            </form>
+        </section>
+        <section class="vw-karte">
+            <h2 class="rezept-druck-titel">{esc(rezept['name'])}</h2>
+            <p class="vw-klein">Für <b>{zahl_kurz(ziel_menge)} {esc(rezept['einheit'])}</b>
+            {f'· das {faktor_text(faktor)} des Grundrezepts' if abs(faktor - 1) > 0.001 else '· Grundrezept'}
+            {f'· {zahl_kurz((rezept["portionen"] or 0) * faktor)} Portionen' if rezept['portionen'] else ''}</p>
+            <div class="vw-tabelle-wrap"><table class="vw-tabelle">
+                <thead><tr><th>Zutat</th><th class="zahl">Menge</th><th class="zahl">Kosten</th></tr></thead>
+                <tbody>{''.join(zeilen) or '<tr><td colspan="3"><p class="vw-leer">Für dieses Rezept ist noch keine Zutat eingetragen.</p></td></tr>'}</tbody>
+                <tfoot><tr><td><b>Wareneinsatz</b></td><td class="zahl"></td><td class="zahl"><b>{geld(wareneinsatz_neu)}</b></td></tr></tfoot>
+            </table></div>
+            {f'<p class="vw-klein vw-rot">Noch nicht vollständig: {esc(", ".join(k["probleme"][:3]))}</p>' if k['probleme'] else ''}
+            {f'<p class="vw-klein"><b>Notiz:</b> {esc(rezept["notiz"])}</p>' if rezept['notiz'] else ''}
+            <p class="vw-klein">Wareneinsatz je {esc(einheit_name)}: {geld(k['einsatz_je_einheit']) if k['einsatz_je_einheit'] is not None else '–'}
+            · Mindestpreis brutto je {esc(einheit_name)}: {geld(k['vk_einheit_brutto']) if k['vk_einheit_brutto'] is not None else '–'}
+            (Zielfaktor {faktor_text(k['ziel_faktor'])})</p>
         </section>
         """
         self.admin_seite(rezept["name"], body)
@@ -9077,8 +9275,9 @@ class App(BaseHTTPRequestHandler):
             return self.redirect("/admin/kalkulation?msg=" + quote_plus("Sorte gelöscht."))
 
         faktor_roh = self.form_value(form, "faktor").strip()
+        menge_auto = 1 if self.form_value(form, "menge_auto") else 0
         con.execute(
-            """UPDATE rezepte SET name=?, menge=?, einheit=?, portionen=?, verkaufspreis=?, mwst=?, faktor=? WHERE id=?""",
+            """UPDATE rezepte SET name=?, menge=?, einheit=?, portionen=?, verkaufspreis=?, mwst=?, faktor=?, menge_auto=? WHERE id=?""",
             (self.form_value(form, "name").strip() or "Ohne Namen",
              max(0.0001, parse_decimal(self.form_value(form, "menge"), 1)),
              self.form_value(form, "einheit") or "l",
@@ -9086,6 +9285,7 @@ class App(BaseHTTPRequestHandler):
              parse_decimal(self.form_value(form, "verkaufspreis"), 0),
              parse_decimal(self.form_value(form, "mwst"), 7),
              parse_decimal(faktor_roh, 0) or None,
+             menge_auto,
              rezept_id))
         con.commit()
         con.close()
