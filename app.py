@@ -128,7 +128,7 @@ DEFAULT_SETTINGS = {
 APP_NAME = "Opa Peters Bestellung"
 APP_SHORT_NAME = "OP Bestellung"
 THEME_COLOR = "#1e3a8a"
-ASSET_VERSION = "2026-11-25-inventurpreis"
+ASSET_VERSION = "2026-11-26-inventur-ekfeld"
 BACKGROUND_COLOR = "#f6f7fb"
 MAX_FORM_BYTES = 12 * 1024 * 1024
 MAX_CART_DRAFT_BYTES = 220 * 1024
@@ -3935,6 +3935,7 @@ def inventur_init():
         );
         """
     )
+    add_column_if_missing(con, "inventur_posten", "preis_manuell", "INTEGER DEFAULT 0")
     con.commit()
     con.close()
 
@@ -4001,13 +4002,15 @@ def inventur_produkte(location_id):
 
 def inventur_posten(inventur_id, location_id=None):
     """Solange die Inventur laeuft, gilt der aktuelle Einkaufspreis aus dem Sortiment.
+    Ein hier von Hand eingetragener Preis gewinnt immer.
     Erst beim Abschliessen wird der Preis in den Posten festgeschrieben."""
     con = db()
     status = con.execute("SELECT status FROM inventuren WHERE id=?", (inventur_id,)).fetchone()
     offen = not (status and status["status"] == "abgeschlossen")
-    preis = ("COALESCE(p.einkaufspreis, ip.einkaufspreis)" if offen else "ip.einkaufspreis")
+    preis = ("CASE WHEN ip.preis_manuell=1 THEN ip.einkaufspreis ELSE COALESCE(p.einkaufspreis, ip.einkaufspreis) END"
+             if offen else "ip.einkaufspreis")
     rumpf = (f"SELECT ip.id, ip.inventur_id, ip.location_id, ip.product_id, ip.name, ip.gebinde, ip.kategorie, "
-             f"ip.menge, {preis} AS einkaufspreis, ip.gezaehlt_von, ip.geaendert "
+             f"ip.menge, {preis} AS einkaufspreis, ip.preis_manuell, ip.gezaehlt_von, ip.geaendert "
              f"FROM inventur_posten ip LEFT JOIN products p ON p.id = ip.product_id WHERE ip.inventur_id=?")
     if location_id:
         zeilen = con.execute(rumpf + " AND ip.location_id=? ORDER BY ip.kategorie COLLATE NOCASE, ip.name COLLATE NOCASE",
@@ -10426,9 +10429,16 @@ class App(BaseHTTPRequestHandler):
                 zeilen.append(f'<tr class="inv-gruppen-zeile"><th colspan="5">{esc(g)}</th><th class="zahl">{inventur_euro(summe)}</th></tr>')
                 for p in gruppen[g]:
                     wert = (p["menge"] or 0) * p["einkaufspreis"] if p["einkaufspreis"] is not None else None
+                    if offen:
+                        ek_zelle = (f'<input name="ekp_{p["id"]}" inputmode="decimal" class="inv-preis-feld" placeholder="–" '
+                                    f'value="{zahl_kurz(p["einkaufspreis"]) if p["einkaufspreis"] is not None else ""}" '
+                                    f'aria-label="Einkaufspreis {esc(p["name"])}">')
+                    else:
+                        ek_zelle = (inventur_euro(p["einkaufspreis"]) if p["einkaufspreis"] is not None
+                                    else "<span class=inv-ohne-preis>kein Preis</span>")
                     zeilen.append(
                         f'<tr><td>{esc(p["name"])}</td><td>{esc(p["gebinde"])}</td><td class="zahl"><b>{esc(inventur_menge_text(p["menge"]))}</b></td>'
-                        f'<td class="zahl">{inventur_euro(p["einkaufspreis"]) if p["einkaufspreis"] is not None else "<span class=inv-ohne-preis>kein Preis</span>"}</td>'
+                        f'<td class="zahl">{ek_zelle}</td>'
                         f'<td class="inv-klein">{esc(p["gezaehlt_von"])}</td><td class="zahl">{inventur_euro(wert) if wert is not None else "–"}</td></tr>')
             produkte = inventur_produkte(lid)
             gezaehlte_ids = {p["product_id"] for p in z["posten"]}
@@ -10436,16 +10446,29 @@ class App(BaseHTTPRequestHandler):
             fehlen_html = (f'<details class="vw-aufklapp inv-nicht-drucken"><summary>{len(fehlen)} Artikel nicht gezählt</summary><p class="vw-klein">'
                            + ", ".join(esc(p["name"]) for p in fehlen) + '</p></details>') if fehlen else ""
             ohne_preis = (f'<p class="vw-klein inv-nicht-drucken">⚠ {len(z["ohne_preis"])} Artikel ohne Einkaufspreis – diese zählen nicht zum Warenwert. '
-                          f'Preise kannst du unter <a href="/admin/kalkulation/preise">Kalkulation → Einkaufspreise</a> nachtragen.</p>') if z["ohne_preis"] else ""
-            abschnitte.append(f"""
-            <section class="vw-karte inv-abschnitt">
-                <div class="vw-karte-kopf"><h3>{esc(location_label(lid))}</h3><b>{inventur_euro(z['wert'])}</b></div>
-                {ohne_preis}
+                          f'Du kannst den EK hier direkt in die Spalte schreiben oder ihn im '
+                          f'<a href="/admin/products">Sortiment</a> hinterlegen.</p>') if (z["ohne_preis"] and offen) else (
+                          f'<p class="vw-klein inv-nicht-drucken">⚠ {len(z["ohne_preis"])} Artikel ohne Einkaufspreis – diese zählen nicht zum Warenwert.</p>'
+                          if z["ohne_preis"] else "")
+            speichern = (f'<div class="vw-knopfreihe inv-nicht-drucken"><button class="primary" type="submit">Preise speichern</button>'
+                         f'<span class="vw-klein">Ein hier eingetragener Preis gilt nur für diese Inventur und gewinnt gegen das Sortiment.</span></div>'
+                         if offen else "")
+            tabelle = f"""
                 <div class="vw-tabelle-wrap"><table class="vw-tabelle inv-tabelle">
                     <tr><th>Artikel</th><th>Gebinde</th><th class="zahl">Menge</th><th class="zahl">EK je Gebinde</th><th>gezählt von</th><th class="zahl">Wert</th></tr>
                     {''.join(zeilen) or '<tr><td colspan="6" class="vw-leer">Noch nichts gezählt.</td></tr>'}
                     <tr class="inv-summe"><th colspan="5">Summe {esc(location_label(lid))}</th><th class="zahl">{inventur_euro(z['wert'])}</th></tr>
                 </table></div>
+                {speichern}"""
+            if offen and zeilen:
+                tabelle = (f'<form method="post" action="/admin/inventur/preise">'
+                           f'<input type="hidden" name="inventur_id" value="{inventur["id"]}">'
+                           f'<input type="hidden" name="standort" value="{esc(lid)}">{tabelle}</form>')
+            abschnitte.append(f"""
+            <section class="vw-karte inv-abschnitt">
+                <div class="vw-karte-kopf"><h3>{esc(location_label(lid))}</h3><b>{inventur_euro(z['wert'])}</b></div>
+                {ohne_preis}
+                {tabelle}
                 {fehlen_html}
             </section>""")
         uebersicht = "".join(f'<tr><td>{esc(location_label(lid))}</td><td class="zahl">{len([p for p in z["posten"] if (p["menge"] or 0) > 0])}</td><td class="zahl">{inventur_euro(z["wert"])}</td></tr>' for lid, z in zusammen.items())
@@ -10534,7 +10557,8 @@ class App(BaseHTTPRequestHandler):
         if aktion == "abschliessen":
             # Einkaufspreise auf den heutigen Stand festschreiben
             con.execute("UPDATE inventur_posten SET einkaufspreis=(SELECT einkaufspreis FROM products WHERE products.id=inventur_posten.product_id) "
-                        "WHERE inventur_id=? AND product_id IS NOT NULL", (int(iid),))
+                        "WHERE inventur_id=? AND product_id IS NOT NULL AND COALESCE(preis_manuell, 0) != 1 "
+                        "AND (SELECT einkaufspreis FROM products WHERE products.id=inventur_posten.product_id) IS NOT NULL", (int(iid),))
             con.execute("UPDATE inventuren SET status='abgeschlossen', abgeschlossen=? WHERE id=?", (inventur_jetzt(), int(iid)))
             text = "Inventur abgeschlossen."
         else:
@@ -10542,6 +10566,61 @@ class App(BaseHTTPRequestHandler):
             text = "Inventur wieder geöffnet – das Team kann wieder zählen."
         con.commit()
         con.close()
+        self.redirect(f"/admin/inventur/ansicht?id={iid}&msg=" + quote_plus(text))
+
+    def handle_admin_inventur_preise(self):
+        """EK je Gebinde direkt im Inventurdokument eintragen (gilt nur fuer diese Inventur)."""
+        if not self.is_admin():
+            return self.redirect("/admin/login")
+        form = self.read_form()
+        iid = self.form_value(form, "inventur_id").strip()
+        if not iid.isdigit():
+            return self.redirect("/admin/inventur")
+        inventur = inventur_holen(int(iid))
+        if not inventur or inventur["status"] == "abgeschlossen":
+            return self.redirect(f"/admin/inventur/ansicht?id={iid}&error="
+                                 + quote_plus("Die Inventur ist abgeschlossen – Preise lassen sich nicht mehr ändern."))
+        con = db()
+        erlaubt = {str(p["id"]): p for p in inventur_posten(int(iid), self.form_value(form, "standort") or None)}
+        gesetzt = geloescht = 0
+        unlesbar = []
+        for feld, rohwert in form.items():
+            if not feld.startswith("ekp_"):
+                continue
+            posten_id = feld[4:]
+            posten = erlaubt.get(posten_id)
+            if not posten:
+                continue
+            text_wert = (rohwert if isinstance(rohwert, str) else "").strip()
+            preis = inventur_zahl(text_wert)
+            if preis is None:
+                if text_wert:
+                    # Tippfehler wie "12,5o" – lieber nichts anfassen und sagen, was war
+                    unlesbar.append(posten["name"])
+                    continue
+                # Feld geleert -> wieder der Preis aus dem Sortiment (oder gar keiner)
+                if posten["preis_manuell"]:
+                    con.execute("UPDATE inventur_posten SET einkaufspreis=NULL, preis_manuell=0 WHERE id=?", (posten_id,))
+                    geloescht += 1
+                continue
+            if preis < 0:
+                unlesbar.append(posten["name"])
+                continue
+            if posten["preis_manuell"] and posten["einkaufspreis"] == preis:
+                continue
+            con.execute("UPDATE inventur_posten SET einkaufspreis=?, preis_manuell=1 WHERE id=?", (preis, posten_id))
+            gesetzt += 1
+        con.commit()
+        con.close()
+        teile = []
+        if gesetzt:
+            teile.append(f"{gesetzt} Preis(e) gespeichert")
+        if geloescht:
+            teile.append(f"{geloescht} wieder aus dem Sortiment")
+        text = ", ".join(teile) + "." if teile else "Keine Änderung – es war nichts Neues eingetragen."
+        if unlesbar:
+            fehler = "Nicht gespeichert, bitte als Zahl eintragen: " + ", ".join(unlesbar[:6]) + ("…" if len(unlesbar) > 6 else "")
+            return self.redirect(f"/admin/inventur/ansicht?id={iid}&error=" + quote_plus(fehler))
         self.redirect(f"/admin/inventur/ansicht?id={iid}&msg=" + quote_plus(text))
 
     def show_admin_inventur_csv(self, query=None):
@@ -10620,6 +10699,8 @@ class App(BaseHTTPRequestHandler):
                 return self.handle_admin_inventur_neu()
             if path == "/admin/inventur/status":
                 return self.handle_admin_inventur_status()
+            if path == "/admin/inventur/preise":
+                return self.handle_admin_inventur_preise()
             if path == "/admin/login":
                 return self.handle_admin_login()
             if path == "/admin/push/test":

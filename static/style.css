@@ -3327,6 +3327,8 @@ tr.ist-gewaehlt td{background:#FDF3DF}
 .inv-summe th{border-top:2px solid #2A1F18;font-size:15px}
 .inv-klein{font-size:13px;color:#8A7A6D}
 .inv-ohne-preis{color:#B4432F;font-size:13px}
+.inv-preis-feld{width:84px;text-align:right;padding:5px 7px;border:1px solid #EAE0D3;border-radius:8px;font:inherit;background:#fff}
+.inv-preis-feld:focus{border-color:#B4432F;outline:none}
 .inv-druck-titel{display:none}
 .inv-admin .box{background:#fff;border:1px solid #EAE0D3;border-radius:16px;padding:16px;margin-bottom:14px}
 @media (max-width:640px){
@@ -3345,6 +3347,7 @@ tr.ist-gewaehlt td{background:#FDF3DF}
   .vw-tabelle-wrap{overflow:visible!important}
   body,main{background:#fff!important}
   .vw-kopf{display:none}
+  .inv-preis-feld{border:0!important;padding:0!important;width:auto!important;background:transparent!important}
 }
 .inv-stand{align-items:flex-start}
 @media print{
